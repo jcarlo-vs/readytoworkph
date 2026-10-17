@@ -1,0 +1,20 @@
+@import "tailwindcss";
+
+@theme inline {
+  --font-sans: var(--font-geist-sans);
+  --font-display: var(--font-jakarta);
+  --animate-topload: topload 1.1s ease-in-out infinite;
+
+  @keyframes topload {
+    from { transform: translateX(-100%); }
+    to { transform: translateX(250%); }
+  }
+}
+
+/* Tailwind v4 dropped the pointer cursor on buttons; bring it back everywhere. */
+@layer base {
+  button:not(:disabled), [role="button"]:not([aria-disabled="true"]), [role="menuitem"], [role="combobox"], summary {
+    cursor: pointer;
+  }
+}
+

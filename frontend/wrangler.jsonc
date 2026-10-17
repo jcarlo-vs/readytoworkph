@@ -1,0 +1,17 @@
+{
+	"$schema": "node_modules/wrangler/config-schema.json",
+	// Next.js on Cloudflare Workers through the OpenNext adapter (npm run deploy).
+	"name": "remotepinas",
+	"main": ".open-next/worker.js",
+	"compatibility_date": "2026-10-01",
+	"compatibility_flags": ["nodejs_compat", "global_fetch_strictly_public"],
+	// Live domains (Cloudflare manages DNS and certificates); the workers.dev address stays on for testing.
+	"routes": [
+		{ "pattern": "remotepinas.com", "custom_domain": true },
+		{ "pattern": "www.remotepinas.com", "custom_domain": true }
+	],
+	"assets": {
+		"directory": ".open-next/assets",
+		"binding": "ASSETS"
+	}
+}
