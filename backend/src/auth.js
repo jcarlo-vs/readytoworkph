@@ -1,6 +1,7 @@
 import { scrypt, randomBytes, timingSafeEqual } from 'node:crypto';
 import { promisify } from 'node:util';
 import jwt from 'jsonwebtoken';
+import { pool } from './db.js';
 
 const scryptAsync = promisify(scrypt);
 
@@ -36,27 +37,30 @@ export const endSession = (req, res) => res.clearCookie(SESSION, options(req, '/
 export const startAdminSession = (req, res) => res.cookie(ADMIN, signAdminToken(), options(req, '/api/admin', DAY / 2));
 export const endAdminSession = (req, res) => res.clearCookie(ADMIN, options(req, '/api/admin'));
 
-export function requireAuth(role) {
-  return (req, res, next) => {
-    try {
-      req.user = verify(readCookie(req, SESSION));
-    } catch {
-      return res.status(401).json({ error: 'Not logged in' });
-    }
-    if (req.user.admin) return res.status(401).json({ error: 'Not logged in' }); // admin logins aren't user accounts
-    if (role && req.user.role !== role) return res.status(403).json({ error: `Only ${role}s can do this` });
-    next();
-  };
-}
-
-// The signed-in user, or null for visitors (for public pages that show more to members).
-export function signedInUser(req) {
+// The signed-in user ({ id, role }), or null for visitors. A login stops working when it expires, when the
+// account is gone, or when the account signed everyone out after it was issued (password reset, Google
+// taking over an account), so a stolen login dies with the password.
+export async function signedInUser(req) {
+  let token;
   try {
-    const user = verify(readCookie(req, SESSION));
-    return user.admin ? null : user;
+    token = verify(readCookie(req, SESSION));
   } catch {
     return null;
   }
+  if (token.admin) return null; // admin logins aren't user accounts
+  const { rows: [u] } = await pool.query(
+    'SELECT role, floor(extract(epoch FROM sessions_valid_from))::bigint AS since FROM users WHERE id = $1', [token.id]);
+  if (!u || token.iat < Number(u.since)) return null;
+  return { id: token.id, role: u.role };
+}
+
+export function requireAuth(role) {
+  return async (req, res, next) => {
+    req.user = await signedInUser(req);
+    if (!req.user) return res.status(401).json({ error: 'Not logged in' });
+    if (role && req.user.role !== role) return res.status(403).json({ error: `Only ${role}s can do this` });
+    next();
+  };
 }
 
 // The admin panel uses its own login (ADMIN_EMAIL / ADMIN_PASSWORD), separate from user accounts.

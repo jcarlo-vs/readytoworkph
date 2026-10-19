@@ -208,13 +208,14 @@ app.post('/api/auth/register', async (req, res) => {
 
   const { rows } = await q(
     `INSERT INTO users (email, password_hash, name, role) VALUES ($1, $2, $3, $4)
-     ON CONFLICT (email) DO NOTHING RETURNING id, email, name, role, plan, photo_key IS NOT NULL AS has_photo`,
+     ON CONFLICT (email) DO NOTHING RETURNING id, email, name, role, plan, photo_key IS NOT NULL AS has_photo, email_verified_at IS NOT NULL AS email_verified`,
     [email, await hashPassword(password), name, role]
   );
   if (!rows[0]) return res.status(409).json({ error: 'This email already has an account. Log in, or use a different email to create another account.' });
   signups.hit(visitor(req));
   if (role === 'worker') await q('INSERT INTO worker_profiles (user_id) VALUES ($1)', [rows[0].id]);
   welcome(rows[0]);
+  await sendVerification(rows[0]); // the link is saved before the account is handed back
   startSession(req, res, rows[0]);
   res.status(201).json({ user: rows[0] });
 });
@@ -277,7 +278,7 @@ app.post('/api/auth/login', async (req, res) => {
   if (user.recent_fails || user.login_locked_until) await q('UPDATE users SET failed_logins = 0, failed_login_at = NULL, login_locked_until = NULL WHERE id = $1', [user.id]);
   const { id, email, name, role, plan } = user;
   startSession(req, res, user);
-  res.json({ user: { id, email, name, role, plan, has_photo: !!user.photo_key } });
+  res.json({ user: { id, email, name, role, plan, has_photo: !!user.photo_key, email_verified: !!user.email_verified_at } });
 });
 
 app.post('/api/auth/logout', (req, res) => {
@@ -314,6 +315,40 @@ app.post('/api/auth/forgot', async (req, res) => {
   res.json({ ok: true });
 });
 
+// --- Email confirmation ---
+// A one-time link, good for 3 days. Asking again replaces the old link.
+async function sendVerification(user) {
+  const token = randomBytes(32).toString('base64url');
+  await q('DELETE FROM email_verifications WHERE user_id = $1', [user.id]);
+  await q(`INSERT INTO email_verifications (token_hash, user_id, expires_at) VALUES ($1, $2, now() + interval '3 days')`, [hashToken(token), user.id]);
+  app.locals.sendEmail({
+    to: user.email,
+    subject: 'Confirm your email for ReadyToWork.ph',
+    ...renderEmail({
+      preheader: 'One click to confirm this is your email address.',
+      greeting: `Hi ${user.name},`,
+      intro: ['Please confirm this is your email address. It keeps your account safe and makes sure messages from employers and workers reach you. The link works for 3 days.'],
+      button: { label: 'Confirm my email', url: `${SITE}/verify-email?token=${token}` },
+      reason: 'You’re receiving this because this email was used to create a ReadyToWork.ph account. If that wasn’t you, ignore this email.',
+    }),
+  }).catch((err) => console.error(err));
+}
+
+// Opened from the email link; works whether or not the person is logged in on this device.
+app.post('/api/auth/verify', async (req, res) => {
+  const { rows: [v] } = await q(
+    'DELETE FROM email_verifications WHERE token_hash = $1 AND expires_at > now() RETURNING user_id', [hashToken(String(req.body.token ?? ''))]);
+  if (!v) return res.status(400).json({ error: 'This link has expired or was already used. Log in and ask for a new one.', code: 'invalid_link' });
+  await q('UPDATE users SET email_verified_at = coalesce(email_verified_at, now()) WHERE id = $1', [v.user_id]);
+  res.json({ ok: true });
+});
+
+app.post('/api/auth/verify/resend', requireAuth(), throttle(3, 60 * 60_000, 'an hour', perUser), async (req, res) => {
+  const { rows: [user] } = await q('SELECT id, name, email, email_verified_at FROM users WHERE id = $1', [req.user.id]);
+  if (!user.email_verified_at) await sendVerification(user);
+  res.json({ ok: true, verified: !!user.email_verified_at });
+});
+
 // Sets the new password from a reset link and signs the person in.
 app.post('/api/auth/reset', async (req, res) => {
   const { password } = req.body;
@@ -325,8 +360,10 @@ app.post('/api/auth/reset', async (req, res) => {
   if (!reset) return res.status(400).json({ error: 'This reset link has expired or was already used. Request a new one.', code: 'invalid_link' });
   const { rows: [user] } = await q(
     // a new password also ends any login pause on the account
-    `UPDATE users SET password_hash = $2, failed_logins = 0, failed_login_at = NULL, login_locked_until = NULL
-     WHERE id = $1 RETURNING id, email, name, role, plan, photo_key IS NOT NULL AS has_photo`,
+    // ...and signs out every other device: if someone else was in, they're out now
+    `UPDATE users SET password_hash = $2, failed_logins = 0, failed_login_at = NULL, login_locked_until = NULL,
+       sessions_valid_from = date_trunc('second', now()), email_verified_at = coalesce(email_verified_at, now())
+     WHERE id = $1 RETURNING id, email, name, role, plan, photo_key IS NOT NULL AS has_photo, email_verified_at IS NOT NULL AS email_verified`,
     [reset.user_id, await hashPassword(password)]
   );
   await q('DELETE FROM password_resets WHERE user_id = $1', [user.id]); // older links stop working too
@@ -352,11 +389,36 @@ app.post('/api/auth/google', throttle(30, 15 * 60_000, '15 minutes'), async (req
   const email = g.email.toLowerCase();
 
   // Existing account: match on Google ID, else link by verified email.
-  let { rows } = await q('SELECT id, email, name, role, plan, photo_key IS NOT NULL AS has_photo FROM users WHERE google_sub = $1', [g.sub]);
-  if (!rows[0]) ({ rows } = await q(
-    'UPDATE users SET google_sub = $1 WHERE email = $2 AND google_sub IS NULL RETURNING id, email, name, role, plan, photo_key IS NOT NULL AS has_photo',
-    [g.sub, email]
-  ));
+  let { rows } = await q('SELECT id, email, name, role, plan, photo_key IS NOT NULL AS has_photo, email_verified_at IS NOT NULL AS email_verified FROM users WHERE google_sub = $1', [g.sub]);
+  // An unconfirmed email sign-up could be anyone's (an address and a password they know). Google proves who
+  // owns the address: linking to an unconfirmed account removes that password and signs out every other
+  // login (the owner can set a new password with "Forgot password"). Confirmed accounts keep theirs.
+  if (!rows[0]) {
+    ({ rows } = await q(
+      `WITH old AS (SELECT id, password_hash IS NOT NULL AND email_verified_at IS NULL AS had_password FROM users WHERE email = $2 AND google_sub IS NULL)
+       UPDATE users u SET google_sub = $1, email_verified_at = coalesce(u.email_verified_at, now()),
+         password_hash = CASE WHEN old.had_password THEN NULL ELSE u.password_hash END,
+         sessions_valid_from = CASE WHEN old.had_password THEN date_trunc('second', now()) ELSE u.sessions_valid_from END
+       FROM old WHERE u.id = old.id
+       RETURNING u.id, u.email, u.name, u.role, u.plan, u.photo_key IS NOT NULL AS has_photo, true AS email_verified, old.had_password`,
+      [g.sub, email]
+    ));
+    if (rows[0]?.had_password) {
+      app.locals.sendEmail({
+        to: rows[0].email,
+        subject: 'Your ReadyToWork.ph account now signs in with Google',
+        ...renderEmail({
+          preheader: 'We linked your Google account and removed the old password.',
+          greeting: `Hi ${rows[0].name},`,
+          intro: ['You just signed in with Google, so your account now uses Google to log in. To keep it safe, we removed the password it had and signed out other devices.',
+            'Want a password too? Use “Forgot password” on the log-in page to set one.'],
+          button: { label: 'Log in', url: `${SITE}/login` },
+          reason: 'You’re receiving this because the way you log in changed. If this wasn’t you, reply to this email right away.',
+        }),
+      }).catch((err) => console.error(err));
+    }
+    if (rows[0]) delete rows[0].had_password;
+  }
   const { role } = req.body;
   // One account per email, with one role. Signing up as the other role doesn't silently log into this account.
   if (rows[0] && role && role !== rows[0].role)
@@ -369,7 +431,7 @@ app.post('/api/auth/google', throttle(30, 15 * 60_000, '15 minutes'), async (req
   if (!['worker', 'employer'].includes(role))
     return res.status(404).json({ error: 'No account yet. Choose how you’ll use ReadyToWork.ph to sign up.', needsRole: true });
   ({ rows } = await q(
-    `INSERT INTO users (email, name, role, google_sub) VALUES ($1, $2, $3, $4) RETURNING id, email, name, role, plan, photo_key IS NOT NULL AS has_photo`,
+    `INSERT INTO users (email, name, role, google_sub, email_verified_at) VALUES ($1, $2, $3, $4, now()) RETURNING id, email, name, role, plan, photo_key IS NOT NULL AS has_photo, email_verified_at IS NOT NULL AS email_verified`,
     [email, str(g.name, 100) || email.split('@')[0], role, g.sub]
   ));
   if (role === 'worker') await q('INSERT INTO worker_profiles (user_id) VALUES ($1)', [rows[0].id]);
@@ -379,7 +441,7 @@ app.post('/api/auth/google', throttle(30, 15 * 60_000, '15 minutes'), async (req
 });
 
 app.get('/api/me', requireAuth(), async (req, res) => {
-  const { rows } = await q('SELECT id, email, name, role, plan, photo_key IS NOT NULL AS has_photo FROM users WHERE id = $1', [req.user.id]);
+  const { rows } = await q('SELECT id, email, name, role, plan, photo_key IS NOT NULL AS has_photo, email_verified_at IS NOT NULL AS email_verified FROM users WHERE id = $1', [req.user.id]);
   rows[0] ? res.json(rows[0]) : res.status(404).json({ error: 'User not found' });
 });
 
@@ -398,7 +460,7 @@ app.get('/api/stats', async (req, res) => {
 // reading the public pages or this API can't harvest them.
 const EMAIL = /[A-Z0-9._%+-]+@[A-Z0-9-]+(?:\.[A-Z0-9-]+)*\.[A-Z]{2,}/gi;
 export const EMAIL_HIDDEN = '[email hidden, log in to see it]';
-const forViewer = (req, jobs) => (signedInUser(req) ? jobs
+const forViewer = async (req, jobs) => ((await signedInUser(req)) ? jobs
   : jobs.map((j) => ({ ...j, title: j.title.replace(EMAIL, EMAIL_HIDDEN), description: j.description.replace(EMAIL, EMAIL_HIDDEN) })));
 
 app.get('/api/jobs', async (req, res) => {
@@ -416,7 +478,7 @@ app.get('/api/jobs', async (req, res) => {
      ORDER BY j.created_at DESC LIMIT ${PAGE_SIZE} OFFSET ${(page - 1) * PAGE_SIZE}`,
     params
   );
-  res.json(forViewer(req, rows));
+  res.json(await forViewer(req, rows));
 });
 
 // Open jobs for the sitemap Google reads (ids and dates only). Declared before /api/jobs/:id.
@@ -431,7 +493,7 @@ app.get('/api/jobs/:id', async (req, res) => {
     `SELECT j.*, u.name AS employer_name FROM jobs j JOIN users u ON u.id = j.employer_id WHERE j.id = $1`,
     [num(req.params.id)]
   );
-  rows[0] ? res.json(forViewer(req, rows)[0]) : res.status(404).json({ error: 'Job not found' });
+  rows[0] ? res.json((await forViewer(req, rows))[0]) : res.status(404).json({ error: 'Job not found' });
 });
 
 // Validates a job post (create or edit). Returns { error } or the cleaned fields in column order.
@@ -465,6 +527,8 @@ const postLimitMessage = (plan, max) => `You've posted ${max} jobs this month, t
   + ' until the 1st, when your limit resets.';
 
 app.post('/api/jobs', requireAuth('employer'), throttle(30, 60 * 60_000, 'an hour', perUser), async (req, res) => {
+  const { rows: [me] } = await q('SELECT email_verified_at FROM users WHERE id = $1', [req.user.id]);
+  if (!me.email_verified_at) return res.status(403).json({ error: 'Please confirm your email before posting a job. We sent you a link; check your inbox (and Spam).', code: 'verify_email' });
   const { error, values } = jobFields(req.body);
   if (error) return bad(res, error);
   const db = await pool.connect();
@@ -715,7 +779,11 @@ app.get('/api/my/jobs', requireAuth('employer'), async (req, res) => {
 
 app.get('/api/my/applications', requireAuth('worker'), async (req, res) => {
   const { rows } = await q(
-    `SELECT a.id, a.credits, a.created_at, j.id AS job_id, j.title, u.name AS employer_name
+    // Status for the worker's dashboard: hired by this employer (for this job or in general), messaged by
+    // them, or the job has closed.
+    `SELECT a.id, a.credits, a.created_at, j.id AS job_id, j.title, j.closed_at, u.id AS employer_id, u.name AS employer_name,
+       EXISTS (SELECT 1 FROM hires h WHERE h.employer_id = j.employer_id AND h.worker_id = a.worker_id AND (h.job_id = j.id OR h.job_id IS NULL)) AS hired,
+       EXISTS (SELECT 1 FROM messages m WHERE m.sender_id = j.employer_id AND m.recipient_id = a.worker_id) AS messaged
      FROM applications a JOIN jobs j ON j.id = a.job_id JOIN users u ON u.id = j.employer_id
      WHERE a.worker_id = $1 ORDER BY a.created_at DESC`,
     [req.user.id]
@@ -725,7 +793,8 @@ app.get('/api/my/applications', requireAuth('worker'), async (req, res) => {
 
 // --- Workers ---
 const WORKER_SELECT = `SELECT u.id, u.name, p.title, p.bio, p.skills, p.hourly_rate, p.availability, p.portfolio_url, p.linkedin_url, p.updated_at,
-    u.created_at AS member_since, u.last_seen_at
+    p.skill_years, p.location, p.work_hours, p.hours_per_week, p.start_when, p.english, p.languages, p.internet_mbps, p.setup, p.show_resume,
+    (p.resume_key IS NOT NULL AND p.show_resume) AS has_resume, u.created_at AS member_since, u.last_seen_at
   FROM users u JOIN worker_profiles p ON p.user_id = u.id`;
 
 // A worker's surname, LinkedIn and portfolio would let an employer find them elsewhere and skip both the
@@ -759,6 +828,7 @@ const CONTACT_RE = new RegExp([
 export const hideContacts = (text) => String(text ?? '').replace(CONTACT_RE, HIDDEN);
 const limitWorker = (w) => ({
   ...w, name: shortName(w.name), title: hideContacts(w.title), bio: hideContacts(w.bio),
+  location: hideContacts(w.location), languages: hideContacts(w.languages),
   portfolio_url: null, linkedin_url: null, limited: true,
 });
 
@@ -880,13 +950,71 @@ app.put('/api/profile', requireAuth('worker'), async (req, res) => {
   const linkedin = profileLink(req.body.linkedin_url, 'linkedin.com');
   if (portfolio === undefined) return bad(res, 'Portfolio link must be a web address, like https://yoursite.com');
   if (linkedin === undefined) return bad(res, 'LinkedIn link must be a linkedin.com address');
+  const extra = bentoFields(req.body);
+  if (typeof extra === 'string') return bad(res, extra);
+  const skills = skillList(req.body.skills).slice(0, 10);
+  // years only for skills still on the list
+  if (extra.skill_years) extra.skill_years = JSON.stringify(Object.fromEntries(Object.entries(extra.skill_years).filter(([k]) => skills.includes(k))));
+  const cols = Object.keys(extra);
   const { rows } = await q(
     `UPDATE worker_profiles SET title = $2, bio = $3, skills = $4, hourly_rate = $5, availability = $6,
-       portfolio_url = $7, linkedin_url = $8, updated_at = now()
+       portfolio_url = $7, linkedin_url = $8, ${cols.map((c, i) => `${c} = $${i + 9}, `).join('')}updated_at = now()
      WHERE user_id = $1 RETURNING *`,
-    [req.user.id, str(req.body.title, 200), str(req.body.bio), skillList(req.body.skills), num(req.body.hourly_rate), availability, portfolio, linkedin]
+    [req.user.id, str(req.body.title, 200), str(req.body.bio), skills, num(req.body.hourly_rate), availability, portfolio, linkedin, ...Object.values(extra)]
   );
   res.json(rows[0]);
+});
+
+// The bento profile's optional fields. Only the ones sent are changed, so an older form can't wipe them.
+// Returns the fields to save, or an error message.
+const WORK_HOURS = ['ph', 'us', 'uk', 'au', 'flexible'];
+const START_WHEN = ['now', '1w', '2w', '1m'];
+const ENGLISH = ['basic', 'conversational', 'fluent', 'native'];
+const SETUP = ['backup_power', 'backup_internet', 'own_computer', 'headset'];
+export function bentoFields(body) {
+  const out = {};
+  const has = (k) => body[k] !== undefined;
+  const choice = (k, list, label) => {
+    if (!has(k)) return;
+    if (body[k] === null || body[k] === '') out[k] = null;
+    else if (list.includes(body[k])) out[k] = body[k];
+    else return `Invalid ${label}`;
+  };
+  const int = (k, min, max, label) => {
+    if (!has(k)) return;
+    if (body[k] === null || body[k] === '') { out[k] = null; return; }
+    const n = Number(body[k]);
+    if (!Number.isInteger(n) || n < min || n > max) return `${label} must be a whole number from ${min} to ${max}`;
+    out[k] = n;
+  };
+  const err = choice('work_hours', WORK_HOURS, 'working hours') ?? choice('start_when', START_WHEN, 'start date') ?? choice('english', ENGLISH, 'English level')
+    ?? int('hours_per_week', 1, 80, 'Hours per week') ?? int('internet_mbps', 1, 10000, 'Internet speed');
+  if (err) return err;
+  if (has('location')) out.location = str(body.location, 80) ?? '';
+  if (has('languages')) out.languages = str(body.languages, 100) ?? '';
+  if (has('setup')) out.setup = SETUP.filter((x) => Array.isArray(body.setup) && body.setup.includes(x));
+  if (has('show_resume')) out.show_resume = body.show_resume !== false;
+  if (has('skill_years')) {
+    const years = {};
+    for (const [k, v] of Object.entries(body.skill_years && typeof body.skill_years === 'object' ? body.skill_years : {})) {
+      const n = Number(v);
+      if (Number.isInteger(n) && n >= 0 && n <= 50) years[String(k).trim().toLowerCase().slice(0, 50)] = n; // same keys as skillList
+    }
+    out.skill_years = years;
+  }
+  return out;
+}
+
+// A worker's CV, from their profile (when they chose to show it). It usually has their contact details,
+// so an employer gets it only once they may contact the worker anyway (see revealFor).
+app.get('/api/workers/:id/resume', requireAuth(), async (req, res) => {
+  const id = num(req.params.id);
+  if (req.user.role !== 'employer' && req.user.id !== id) return res.status(403).json({ error: 'Only employers can view worker profiles' });
+  const { rows: [p] } = await q('SELECT resume_key, resume_name, show_resume FROM worker_profiles WHERE user_id = $1', [id]);
+  if (!p?.resume_key || !p.show_resume) return res.status(404).json({ error: 'This worker hasn’t shared a resume' });
+  if (req.user.id !== id && !(await revealFor(req.user.id, [id]))(id))
+    return res.status(403).json({ error: 'Upgrade to Pro to download resumes', code: 'upgrade' });
+  res.json({ name: p.resume_name, url: await app.locals.storage.signedUrl(p.resume_key, p.resume_name) });
 });
 
 // --- AI application analyzer (employers) ---
@@ -992,7 +1120,7 @@ app.post('/api/feedback', throttle(10, 60 * 60_000, 'an hour'), async (req, res)
     return bad(res, `Please keep it under ${FEEDBACK_MAX.toLocaleString('en-US')} characters`);
   const message = str(req.body.message, FEEDBACK_MAX);
   if (!message) return bad(res, 'Please write a message');
-  const me = signedInUser(req);
+  const me = await signedInUser(req);
   if (!me && !(await verifyHuman(req))) return notHuman(res); // visitors only; signed-in people are known
   const email = me ? null : str(req.body.email, 200) || null;
   if (email && !EMAIL.test(email)) return bad(res, 'That email address doesn’t look right');
@@ -1015,7 +1143,7 @@ app.post('/api/feedback', throttle(10, 60 * 60_000, 'an hour'), async (req, res)
 // Contact us: a support request from anyone. It lands in the admin inbox (type "support") and in the
 // support mailbox, where Reply goes straight to the person who wrote.
 app.post('/api/contact', throttle(5, 60 * 60_000, 'an hour'), async (req, res) => {
-  const me = signedInUser(req);
+  const me = await signedInUser(req);
   const name = str(req.body?.name, 100);
   const email = str(req.body?.email, 200).toLowerCase();
   const subject = str(req.body?.subject, 150);

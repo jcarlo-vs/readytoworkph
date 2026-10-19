@@ -5,7 +5,7 @@ import { useEffect, useState } from 'react';
 // (next.config.ts). The browser then sends the login cookie by itself; no token is handled in code.
 export const API = '/api';
 
-export type User = { id: number; email: string; name: string; role: 'worker' | 'employer'; has_photo?: boolean; plan?: 'free' | 'pro' | 'premium' };
+export type User = { id: number; email: string; name: string; role: 'worker' | 'employer'; has_photo?: boolean; plan?: 'free' | 'pro' | 'premium'; email_verified?: boolean };
 export type Job = {
   id: number; employer_id: number; employer_name: string; title: string; description: string;
   skills: string[]; job_type: string; salary_period: SalaryPeriod;
@@ -17,6 +17,10 @@ export type Worker = {
   hourly_rate: string | null; availability: string; portfolio_url: string | null; linkedin_url: string | null;
   limited?: true; // shown to a Free employer who can't contact this worker yet: "Maria S.", no links
   member_since?: string; last_seen_at?: string | null; saved?: boolean; hired_at?: string | null;
+  // Bento profile (all optional; labels in lib/profile.ts)
+  skill_years: Record<string, number>; location: string; work_hours: string | null; hours_per_week: number | null;
+  start_when: string | null; english: string | null; languages: string; internet_mbps: number | null; setup: string[];
+  show_resume: boolean; has_resume: boolean;
 };
 
 export type Credits = { daily: number; used: number; remaining: number; resets_at: string };

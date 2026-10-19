@@ -4,10 +4,11 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "test": "node --env-file=.env --test",
+    "test": "node --env-file-if-exists=.env --test",
     "dev": "node --watch --env-file=.env src/server.js",
     "start": "node --env-file-if-exists=.env src/server.js",
-    "db:init": "node --env-file-if-exists=.env src/init-db.js"
+    "db:init": "node --env-file-if-exists=.env src/init-db.js",
+    "migrate": "node --env-file-if-exists=.env src/init-db.js"
   },
   "keywords": [],
   "author": "",

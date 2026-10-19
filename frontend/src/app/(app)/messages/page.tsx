@@ -13,7 +13,7 @@ export default function MessagesPage() {
   const jobId = params.get('job');
   const { data: inbox, reload: reloadInbox } = useApi<Conversation[]>(user ? '/messages' : null, 15000);
 
-  if (ready && !user) return <p><Link href="/login" className="font-medium text-emerald-800 underline">Log in</Link> to see your messages.</p>;
+  if (ready && !user) return <p><Link href="/login?next=/messages" className="font-medium text-emerald-800 underline">Log in</Link> to see your messages.</p>;
   if (!user) return null;
 
   return (

@@ -1,38 +1,28 @@
 'use client';
 import Link from 'next/link';
-import { useApi, salary, type Job } from '@/lib/api';
+import { useApi, salary, interest, type Credits, type Job, type Worker } from '@/lib/api';
 import { useAuth } from '@/lib/auth';
-import { ErrorText, Initials, Skills, TimeAgo, button, buttonGhost, buttonGold, card } from '@/components/ui';
+import { BandStat, ErrorText, Initials, PageBand, Skills, TimeAgo, button, buttonGhost, buttonGold, card } from '@/components/ui';
 
 type MyJob = Job & {
   applicant_count: number; new_count: number; analyzed_count: number; last_applied_at: string | null; top_applicants: string[];
 };
-type MyApplication = { id: number; credits: number; created_at: string; job_id: number; title: string; employer_name: string };
+type MyApplication = {
+  id: number; credits: number; created_at: string; job_id: number; title: string; closed_at: string | null;
+  employer_id: number; employer_name: string; hired: boolean; messaged: boolean;
+};
 
 export default function Dashboard() {
   const { user, ready } = useAuth();
   if (!ready) return null;
-  if (!user) return <p><Link href="/login" className="text-emerald-700 underline">Log in</Link> to see your dashboard.</p>;
+  if (!user) return <p><Link href="/login?next=/dashboard" className="text-emerald-700 underline">Log in</Link> to see your dashboard.</p>;
   return user.role === 'employer' ? <EmployerDashboard /> : <WorkerDashboard />;
-}
-
-function Stat({ label, value, hint, href, tone = 'text-slate-900' }: { label: string; value: React.ReactNode; hint?: string; href?: string; tone?: string }) {
-  const body = (
-    <>
-      <p className="text-xs font-medium uppercase tracking-wide text-slate-500">{label}</p>
-      <p className={`mt-1 text-3xl font-bold ${tone}`}>{value}</p>
-      {hint && <p className="mt-0.5 text-xs text-slate-500">{hint}</p>}
-    </>
-  );
-  return href
-    ? <Link href={href} className={`${card} block p-5 transition hover:border-emerald-600 hover:shadow-md`}>{body}</Link>
-    : <div className={`${card} p-5`}>{body}</div>;
 }
 
 function JobCard({ job }: { job: MyJob }) {
   const extra = job.applicant_count - job.top_applicants.length;
   return (
-    <li className="flex flex-col overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm sm:flex-row">
+    <li className="flex flex-col overflow-hidden rounded-2xl border border-emerald-950/5 bg-white shadow-[0_1px_0_rgba(2,44,34,0.04),0_10px_28px_-20px_rgba(2,44,34,0.3)] sm:flex-row">
       <div className="min-w-0 flex-1 space-y-3 p-6">
         <div className="flex flex-wrap items-center gap-2">
           {job.closed_at && <span className="rounded-full bg-slate-800 px-2.5 py-0.5 text-xs font-semibold text-white">Closed</span>}
@@ -50,7 +40,7 @@ function JobCard({ job }: { job: MyJob }) {
       </div>
 
       <Link href={`/dashboard/jobs/${job.id}`}
-        className="flex flex-col justify-center gap-3 border-t border-slate-100 bg-slate-50/70 p-6 transition hover:bg-emerald-50/60 sm:w-64 sm:border-l sm:border-t-0">
+        className="flex flex-col justify-center gap-3 border-t border-slate-100 bg-[#f6f9f7] p-6 transition hover:bg-emerald-50/60 sm:w-64 sm:border-l sm:border-t-0">
         <div className="flex items-baseline gap-2">
           <span className="text-4xl font-bold text-slate-900">{job.applicant_count}</span>
           <span className="text-sm text-slate-500">applicant{job.applicant_count === 1 ? '' : 's'}</span>
@@ -88,30 +78,25 @@ function EmployerDashboard() {
 
   return (
     <div className="space-y-8">
-      <div className="flex flex-wrap items-end justify-between gap-4">
-        <div>
-          <p className="text-sm font-medium text-emerald-800">Welcome back{user ? `, ${user.name.split(' ')[0]}` : ''}</p>
-          <h1 className="text-3xl font-bold tracking-tight">My Jobs</h1>
-        </div>
-        <div className="flex flex-wrap gap-3">
+      <PageBand eyebrow={`Welcome back${user ? `, ${user.name.split(' ')[0]}` : ''}`} title="My Jobs"
+        actions={<>
           <Link href="/dashboard/analytics" className={`${buttonGhost} gap-2`}>
             Analytics{user?.plan !== 'premium' && <span className="rounded bg-amber-100 px-1.5 py-0.5 text-[10px] font-bold uppercase text-amber-900">Premium</span>}
           </Link>
           <Link href="/jobs/new" className={`${buttonGold} gap-2`}>
             <span className="text-lg leading-none">+</span> Post a job
           </Link>
-        </div>
-      </div>
-
-      {jobs && jobs.length > 0 && (
-        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-          <Stat label="Active jobs" value={jobs.length} />
-          <Stat label="Applicants" value={total} hint={fresh ? `+${fresh} in the last 7 days` : 'None in the last 7 days'} tone={total ? 'text-emerald-800' : 'text-slate-900'} />
-          <Stat label="Unread messages" value={unread?.count ?? 0} hint="Open your inbox" href="/messages" tone={unread?.count ? 'text-amber-600' : 'text-slate-900'} />
-          <Stat label="AI fit scores" value={usage ? (usage.remaining === null ? '∞' : usage.remaining) : '…'}
-            hint={usage?.remaining === null ? 'Unlimited on Premium' : `of ${usage?.limit ?? 10} left this month`} href={usage?.remaining === 0 ? '/pricing' : undefined} />
-        </div>
-      )}
+        </>}>
+        {jobs && jobs.length > 0 && (
+          <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
+            <BandStat label="Active jobs" value={jobs.length} />
+            <BandStat label="Applicants" value={total} hint={fresh ? `+${fresh} in the last 7 days` : 'None in the last 7 days'} gold={total > 0} />
+            <BandStat label="Unread messages" value={unread?.count ?? 0} hint="Open your inbox" href="/messages" />
+            <BandStat label="AI fit scores" value={usage ? (usage.remaining === null ? '∞' : usage.remaining) : '…'}
+              hint={usage?.remaining === null ? 'Unlimited on Premium' : `of ${usage?.limit ?? 10} left this month`} href={usage?.remaining === 0 ? '/pricing' : undefined} />
+          </div>
+        )}
+      </PageBand>
 
       <ErrorText msg={error} />
       {jobs?.length === 0 && (
@@ -175,21 +160,104 @@ function EmployerDashboard() {
   );
 }
 
+// Where an application stands, most important first.
+const STATUS = {
+  hired: { label: 'Hired 🎉', className: 'bg-emerald-600 text-white' },
+  messaged: { label: 'Employer messaged you', className: 'bg-amber-400 text-slate-900' },
+  closed: { label: 'Job closed', className: 'bg-slate-200 text-slate-600' },
+  applied: { label: 'Applied', className: 'bg-slate-100 text-slate-700' },
+};
+const statusOf = (a: MyApplication) => (a.hired ? 'hired' : a.messaged ? 'messaged' : a.closed_at ? 'closed' : 'applied');
+
 function WorkerDashboard() {
+  const { user } = useAuth();
   const { data: apps, error } = useApi<MyApplication[]>('/my/applications');
+  const { data: credits } = useApi<Credits>('/credits');
+  const { data: unread } = useApi<{ count: number }>('/messages/unread-count');
+  const { data: profile } = useApi<Worker>(user ? `/workers/${user.id}` : null);
+  const { data: resume } = useApi<{ resume: unknown }>('/profile/resume');
+
+  // Profile checklist: what makes employers pick (and the AI score) better. Hidden once complete.
+  const todo = profile && resume ? [
+    [!!profile.title, 'Add a professional title'],
+    [profile.skills.length >= 3, 'Add at least 3 skills'],
+    [!!profile.hourly_rate, 'Set your hourly rate'],
+    [(profile.bio ?? '').length >= 80, 'Write a short bio about your experience'],
+    [!!resume.resume, 'Upload your resume (PDF)'],
+    [!!user?.has_photo, 'Add a profile photo'],
+  ] as const : null;
+  const done = todo?.filter(([ok]) => ok).length ?? 0;
+  const hired = apps?.filter((a) => a.hired).length ?? 0;
+  const replies = apps?.filter((a) => a.messaged && !a.hired).length ?? 0;
+
   return (
-    <div className="space-y-4">
-      <h1 className="text-2xl font-bold">My Applications</h1>
-      <ErrorText msg={error} />
-      {apps?.length === 0 && <p className="text-slate-500">No applications yet. <Link href="/" className="text-emerald-700">Browse jobs</Link></p>}
-      <ul className="space-y-3">
-        {apps?.map((a) => (
-          <li key={a.id} className={card}>
-            <Link href={`/jobs/${a.job_id}`} className="font-semibold text-emerald-700 hover:underline">{a.title}</Link>
-            <p className="text-sm text-slate-500">{a.employer_name} · applied <TimeAgo date={a.created_at} /> · ⚡ {a.credits} credit{a.credits === 1 ? '' : 's'}</p>
-          </li>
-        ))}
-      </ul>
+    <div className="space-y-8">
+      <PageBand title={<>Hi, {user?.name.split(' ')[0]} 👋</>} sub="Here’s how your job search is going."
+        actions={<Link href="/jobs" className={buttonGold}>Find jobs</Link>}>
+        <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
+          <BandStat label="Credits left today" value={credits ? `${credits.remaining}/${credits.daily}` : '-'} hint="Refills at midnight" href="/jobs" gold />
+          <BandStat label="Applications" value={apps?.length ?? '-'} hint={replies ? `${replies} with a reply` : 'All time'} />
+          <BandStat label="Unread messages" value={unread?.count ?? '-'} hint="From employers" href="/messages" />
+          <BandStat label="Hired" value={hired} hint={hired ? 'Congratulations!' : 'Keep applying'} />
+        </div>
+      </PageBand>
+
+      {todo && done < todo.length && (
+        <section className={`${card} space-y-4 p-6`}>
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <h2 className="font-display text-lg font-bold">Complete your profile</h2>
+              <p className="text-sm text-slate-600">Complete profiles get more replies and higher AI Fit Scores.</p>
+            </div>
+            <Link href="/profile" className={`${buttonGhost} px-4 py-2`}>Edit profile</Link>
+          </div>
+          <div className="h-2 overflow-hidden rounded-full bg-slate-100" role="progressbar" aria-valuenow={done} aria-valuemin={0} aria-valuemax={todo.length} aria-label="Profile completeness">
+            <div className="h-full rounded-full bg-emerald-600 transition-all" style={{ width: `${(done / todo.length) * 100}%` }} />
+          </div>
+          <ul className="grid gap-2 sm:grid-cols-2">
+            {todo.map(([ok, label]) => (
+              <li key={label} className={`flex items-center gap-2 text-sm ${ok ? 'text-slate-400 line-through' : 'text-slate-800'}`}>
+                <span className={`grid h-5 w-5 shrink-0 place-items-center rounded-full text-xs ${ok ? 'bg-emerald-600 text-white' : 'border border-slate-300'}`}>{ok ? '✓' : ''}</span>
+                {ok ? label : <Link href="/profile" className="hover:text-emerald-700 hover:underline">{label}</Link>}
+              </li>
+            ))}
+          </ul>
+        </section>
+      )}
+
+      <section className="space-y-4">
+        <h2 className="font-display text-xl font-bold">My applications</h2>
+        <ErrorText msg={error} />
+        {apps?.length === 0 && (
+          <div className="rounded-xl border border-dashed border-slate-300 p-8 text-center">
+            <p className="font-semibold text-slate-800">No applications yet</p>
+            <p className="mt-1 text-sm text-slate-500">You have {credits?.remaining ?? 60} Credits today. Spend more on the jobs you want most to show up higher.</p>
+            <Link href="/jobs" className={`${button} mt-4 inline-block px-5 py-2.5`}>Browse jobs</Link>
+          </div>
+        )}
+        <ul className="space-y-3">
+          {apps?.map((a) => {
+            const s = STATUS[statusOf(a)];
+            return (
+              <li key={a.id} className={`${card} flex flex-wrap items-center gap-4`}>
+                <div className="min-w-0 flex-1 space-y-1">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <Link href={`/jobs/${a.job_id}`} className="font-semibold text-slate-900 hover:text-emerald-700 hover:underline">{a.title}</Link>
+                    <span className={`rounded-full px-2.5 py-0.5 text-xs font-semibold ${s.className}`}>{s.label}</span>
+                  </div>
+                  <p className="text-sm text-slate-500">
+                    {a.employer_name} · applied <TimeAgo date={a.created_at} /> ·{' '}
+                    <span className={`rounded-full px-2 py-0.5 text-xs font-semibold ${interest(a.credits).className}`}>⚡ {a.credits} credit{a.credits === 1 ? '' : 's'}</span>
+                  </p>
+                </div>
+                {a.messaged
+                  ? <Link href={`/messages?with=${a.employer_id}`} className={`${button} px-4 py-2`}>Open chat</Link>
+                  : <Link href={`/jobs/${a.job_id}`} className={`${buttonGhost} px-4 py-2`}>View job</Link>}
+              </li>
+            );
+          })}
+        </ul>
+      </section>
     </div>
   );
 }

@@ -14,9 +14,14 @@ export function EmployerGate({ signedIn }: { signedIn: boolean }) {
           ? 'Worker profiles are only visible to employers. Use an employer account to browse and hire talent.'
           : 'To protect our workers’ privacy, profiles are only visible to signed-in employers. Create a free employer account to browse and hire Filipino talent.'}
       </p>
-      {!signedIn && (
+      {signedIn ? (
         <div className="flex flex-wrap justify-center gap-3 pt-2">
-          <Link href="/register" className={button}>Sign up as an employer</Link>
+          <Link href="/jobs?sort=new" className={button}>Browse jobs</Link>
+          <Link href="/dashboard" className={buttonGhost}>Go to my dashboard</Link>
+        </div>
+      ) : (
+        <div className="flex flex-wrap justify-center gap-3 pt-2">
+          <Link href="/register?role=employer" className={button}>Sign up as an employer</Link>
           <Link href="/login" className={buttonGhost}>Log in</Link>
         </div>
       )}

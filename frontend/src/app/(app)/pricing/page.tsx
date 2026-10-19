@@ -3,7 +3,7 @@ import Link from 'next/link';
 import { useEffect, useRef, useState } from 'react';
 import { api, useApi, type User } from '@/lib/api';
 import { useAuth } from '@/lib/auth';
-import { button, buttonGhost, buttonGold, FormAlert } from '@/components/ui';
+import { band, button, buttonGhost, buttonGold, FormAlert } from '@/components/ui';
 
 // Features starting with NOT are shown crossed out, as what the plan doesn't include.
 const NOT = '✗ ';
@@ -309,6 +309,7 @@ export default function PricingPage() {
                     ? <p className="mt-8 py-3 text-center text-sm text-slate-500">Your account moves here on {day(sub.cancels_at)}</p>
                     : <button type="button" disabled={!!busy} onClick={openPortal} className={`${buttonGhost} mt-8 w-full py-3`}>Cancel to go Free</button>;
                 }
+                if (!p.monthly && user && user.role !== 'employer') return <button type="button" disabled className={`${style} opacity-50`}>For employer accounts</button>;
                 if (!p.monthly) return <Link href={p.cta[1]} className={style}>{p.cta[0]}</Link>;
                 if (!billing?.token) return <Link href={`${p.cta[1]}${yearly ? '%20(yearly)' : ''}`} className={style}>{p.cta[0]}</Link>;
                 if (!user) return <Link href="/register?role=employer&next=/pricing" className={style}>{p.cta[0]}</Link>;
@@ -411,7 +412,7 @@ export default function PricingPage() {
         ))}
       </section>
 
-      <section className="space-y-4 rounded-3xl bg-emerald-950 px-6 py-10 text-center">
+      <section className={`${band} space-y-4 px-6 py-10 text-center`}>
         <h2 className="font-display text-2xl font-bold text-white">Ready to meet your next great hire?</h2>
         <p className="text-emerald-100">Post your first job free. No credit card needed.</p>
         <div className="flex flex-wrap justify-center gap-3">
