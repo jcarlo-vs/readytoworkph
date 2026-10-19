@@ -1053,3 +1053,60 @@ test('email confirmation: link on sign-up, needed to post jobs, resend, Google a
   assert.equal(done.user.email_verified, true);
   assert.equal(w.body.user.email_verified, false);
 });
+
+test('delete my account: type DELETE, data and files gone, chats kept as "Deleted user", email free again, paid plan cancelled first', async () => {
+  const reg = async (email, role, name) => (await call('/auth/register', { email, password: 'password1', name, role })).body;
+  const boss = await reg('del.boss@co.com', 'employer', 'Del Boss');
+  const w = await reg('del.w@x.ph', 'worker', 'Del Worker');
+  const job = (await call('/jobs', { token: boss.token, title: 'Del job', description: 'x', job_type: 'gig' })).body;
+  await call(`/jobs/${job.id}/apply`, { token: w.token, cover_letter: 'hi' });
+  await call(`/messages/${w.user.id}`, { token: boss.token, body: 'Hi, thanks for applying', job_id: job.id });
+  await call(`/messages/${boss.user.id}`, { token: w.token, body: 'Hello boss' });
+  await pool.query("UPDATE users SET photo_key = 'photos/del.jpg' WHERE id = $1", [w.user.id]);
+  await pool.query("UPDATE worker_profiles SET resume_key = 'resumes/del.pdf' WHERE user_id = $1", [w.user.id]);
+  files.set('photos/del.jpg', 'x'); files.set('resumes/del.pdf', 'x');
+  const del = (token, confirm) => call('/me', { token, confirm }, 'DELETE');
+
+  assert.equal((await del(w.token, 'delete')).status, 400); // must type DELETE exactly
+  assert.equal((await del(w.token, 'DELETE')).status, 204);
+  assert.equal((await call('/me', { token: w.token }, 'GET')).status, 401); // signed out everywhere
+  assert.equal((await call('/auth/login', { email: 'del.w@x.ph', password: 'password1' })).body.code, 'no_account');
+  assert.equal((await pool.query('SELECT 1 FROM applications WHERE worker_id = $1', [w.user.id])).rowCount, 0);
+  assert.equal((await pool.query('SELECT 1 FROM worker_profiles WHERE user_id = $1', [w.user.id])).rowCount, 0);
+  assert.deepEqual([files.has('photos/del.jpg'), files.has('resumes/del.pdf')], [false, false]);
+  const inbox = (await call('/messages', { token: boss.token }, 'GET')).body;
+  assert.equal(inbox.find((c) => c.user_id === w.user.id).name, 'Deleted user'); // the boss keeps the chat
+  assert.equal((await call(`/messages/${w.user.id}`, { token: boss.token, body: 'still there?' })).status, 404); // can't write to them
+  assert.equal((await reg('del.w@x.ph', 'worker', 'Back Again')).user.name, 'Back Again'); // the email is free again, fresh account
+
+  // A paid plan is cancelled at Paddle first; if Paddle fails, nothing is deleted.
+  process.env.PADDLE_API_KEY = 'test-key';
+  await pool.query("UPDATE users SET plan = 'pro', paddle_subscription_id = 'sub_del' WHERE id = $1", [boss.user.id]);
+  const realFetch = globalThis.fetch;
+  let cancelled = null;
+  globalThis.fetch = async (url, opts) => {
+    if (String(url).includes('/subscriptions/sub_del/cancel')) { cancelled = JSON.parse(opts.body); return new Response(JSON.stringify({ error: { code: 'x' } }), { status: 500 }); }
+    return realFetch(url, opts);
+  };
+  assert.equal((await del(boss.token, 'DELETE')).status, 502);
+  assert.equal((await pool.query('SELECT deleted_at FROM users WHERE id = $1', [boss.user.id])).rows[0].deleted_at, null);
+  globalThis.fetch = async (url, opts) => (String(url).includes('/subscriptions/sub_del/cancel') ? new Response(JSON.stringify({ data: {} }), { status: 200 }) : realFetch(url, opts));
+  assert.equal((await del(boss.token, 'DELETE')).status, 204);
+  assert.deepEqual(cancelled, { effective_from: 'immediately' });
+  assert.equal((await pool.query('SELECT 1 FROM jobs WHERE id = $1', [job.id])).rowCount, 0); // their jobs go too
+  globalThis.fetch = realFetch;
+  process.env.PADDLE_API_KEY = '';
+});
+
+test('names: first and last kept separately from sign-up and from Google', async () => {
+  const w = await call('/auth/register', { email: 'names.w@x.ph', password: 'password1', first_name: 'Maria', last_name: 'Dela Cruz', role: 'worker' });
+  assert.equal(w.body.user.name, 'Maria Dela Cruz');
+  const row = async (email) => (await pool.query('SELECT name, first_name, last_name FROM users WHERE email = $1', [email])).rows[0];
+  assert.deepEqual(await row('names.w@x.ph'), { name: 'Maria Dela Cruz', first_name: 'Maria', last_name: 'Dela Cruz' });
+  await call('/auth/register', { email: 'names.old@x.ph', password: 'password1', name: 'Juan Santos Reyes', role: 'worker' }); // one field
+  assert.deepEqual(await row('names.old@x.ph'), { name: 'Juan Santos Reyes', first_name: 'Juan', last_name: 'Santos Reyes' });
+  process.env.GOOGLE_CLIENT_ID = 'test-client';
+  app.locals.verifyGoogle = async () => ({ sub: 'g-names', email: 'names.g@gmail.com', email_verified: true, name: 'Ana Lim', given_name: 'Ana', family_name: 'Lim' });
+  await call('/auth/google', { credential: 'x', role: 'worker' });
+  assert.deepEqual(await row('names.g@gmail.com'), { name: 'Ana Lim', first_name: 'Ana', last_name: 'Lim' });
+});

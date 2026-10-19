@@ -10,7 +10,7 @@ export function StatusPage({ code, title, text, children }: { code: string; titl
         <p className="text-slate-600">{text}</p>
         <div className="flex flex-wrap justify-center gap-3 pt-2">{children}</div>
         <p className="pt-2 text-sm text-slate-500">
-          Still stuck? Email <a href="mailto:support@readytowork.ph" className="font-medium text-emerald-800 hover:underline">support@readytowork.ph</a>
+          Still stuck? <a href="/contact" className="font-medium text-emerald-800 hover:underline">Contact us</a> or email support@readytowork.ph
         </p>
       </div>
     </div>

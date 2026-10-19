@@ -218,3 +218,15 @@ CREATE TABLE IF NOT EXISTS email_verifications (
   user_id    int NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   expires_at timestamptz NOT NULL
 );
+
+-- Deleted accounts (Data Privacy Act: right to erasure). The row stays as a blank placeholder so the other
+-- person keeps their side of a conversation ("Deleted user"); email, password, Google link, name, files,
+-- profile, applications, jobs, saved and hired lists are removed.
+ALTER TABLE users ADD COLUMN IF NOT EXISTS deleted_at timestamptz;
+
+-- First and last name kept separately (sign-up asks for both; Google sends both). `name` stays the display
+-- name: "First Last" for people, or an employer's company name.
+ALTER TABLE users ADD COLUMN IF NOT EXISTS first_name text NOT NULL DEFAULT '';
+ALTER TABLE users ADD COLUMN IF NOT EXISTS last_name text NOT NULL DEFAULT '';
+UPDATE users SET first_name = split_part(name, ' ', 1), last_name = trim(substr(name, length(split_part(name, ' ', 1)) + 1))
+  WHERE first_name = '' AND last_name = '' AND deleted_at IS NULL;

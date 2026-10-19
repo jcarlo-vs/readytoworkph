@@ -199,7 +199,12 @@ app.post('/api/auth/register', async (req, res) => {
   if (signups.blocked(visitor(req))) return tooMany(res, 'an hour');
   if (!(await verifyHuman(req))) return notHuman(res);
   const email = str(req.body.email, 200).toLowerCase();
-  const name = str(req.body.name, 100);
+  // People give a first and last name; an employer may instead give a company name (`name`). A single
+  // name (older pages) is split at the first space.
+  const name = str(req.body.first_name, 50) && str(req.body.last_name, 50)
+    ? `${str(req.body.first_name, 50)} ${str(req.body.last_name, 50)}` : str(req.body.name, 100);
+  const first = str(req.body.first_name, 50) || name.split(' ')[0];
+  const last = str(req.body.first_name, 50) ? str(req.body.last_name, 50) : name.split(' ').slice(1).join(' ');
   const { password, role } = req.body;
   if (!/^\S+@\S+\.\S+$/.test(email)) return bad(res, 'Valid email required');
   if (!name) return bad(res, 'Name required');
@@ -207,9 +212,9 @@ app.post('/api/auth/register', async (req, res) => {
   if (!['worker', 'employer'].includes(role)) return bad(res, 'Role must be worker or employer');
 
   const { rows } = await q(
-    `INSERT INTO users (email, password_hash, name, role) VALUES ($1, $2, $3, $4)
+    `INSERT INTO users (email, password_hash, name, role, first_name, last_name) VALUES ($1, $2, $3, $4, $5, $6)
      ON CONFLICT (email) DO NOTHING RETURNING id, email, name, role, plan, photo_key IS NOT NULL AS has_photo, email_verified_at IS NOT NULL AS email_verified`,
-    [email, await hashPassword(password), name, role]
+    [email, await hashPassword(password), name, role, first, last]
   );
   if (!rows[0]) return res.status(409).json({ error: 'This email already has an account. Log in, or use a different email to create another account.' });
   signups.hit(visitor(req));
@@ -431,13 +436,58 @@ app.post('/api/auth/google', throttle(30, 15 * 60_000, '15 minutes'), async (req
   if (!['worker', 'employer'].includes(role))
     return res.status(404).json({ error: 'No account yet. Choose how you’ll use ReadyToWork.ph to sign up.', needsRole: true });
   ({ rows } = await q(
-    `INSERT INTO users (email, name, role, google_sub, email_verified_at) VALUES ($1, $2, $3, $4, now()) RETURNING id, email, name, role, plan, photo_key IS NOT NULL AS has_photo, email_verified_at IS NOT NULL AS email_verified`,
-    [email, str(g.name, 100) || email.split('@')[0], role, g.sub]
+    `INSERT INTO users (email, name, role, google_sub, email_verified_at, first_name, last_name) VALUES ($1, $2, $3, $4, now(), $5, $6) RETURNING id, email, name, role, plan, photo_key IS NOT NULL AS has_photo, email_verified_at IS NOT NULL AS email_verified`,
+    [email, str(g.name, 100) || email.split('@')[0], role, g.sub, str(g.given_name, 50) ?? '', str(g.family_name, 50) ?? ''] // Google sends both names
   ));
   if (role === 'worker') await q('INSERT INTO worker_profiles (user_id) VALUES ($1)', [rows[0].id]);
   welcome(rows[0]);
   startSession(req, res, rows[0]);
   res.status(201).json({ user: rows[0] });
+});
+
+// Delete my account, straight away (type DELETE to confirm). A paid plan is cancelled at Paddle first, so a
+// failure there stops everything and nothing is half-deleted. Files go, then the data in one transaction;
+// the user row becomes a blank placeholder so the other side of a conversation still reads "Deleted user".
+app.delete('/api/me', requireAuth(), throttle(5, 60 * 60_000, 'an hour', perUser), async (req, res) => {
+  if (req.body?.confirm !== 'DELETE') return bad(res, 'Type DELETE to confirm');
+  const id = req.user.id;
+  const { rows: [u] } = await q(
+    'SELECT u.photo_key, u.paddle_subscription_id, p.resume_key FROM users u LEFT JOIN worker_profiles p ON p.user_id = u.id WHERE u.id = $1', [id]);
+  if (u.paddle_subscription_id && process.env.PADDLE_API_KEY) {
+    try {
+      await paddle(`/subscriptions/${u.paddle_subscription_id}/cancel`, { effective_from: 'immediately' });
+    } catch (err) {
+      if (err.paddle?.code !== 'subscription_locked_pending_changes' && !/canceled|cancelled/i.test(err.message)) {
+        console.error(err);
+        return res.status(502).json({ error: 'We couldn’t cancel your subscription just now, so nothing was deleted. Please try again in a minute, or contact support.' });
+      }
+    }
+  }
+  const db = await pool.connect();
+  try {
+    await db.query('BEGIN');
+    for (const sql of [
+      'DELETE FROM jobs WHERE employer_id = $1', // and, with them, their applications
+      'DELETE FROM applications WHERE worker_id = $1',
+      'DELETE FROM worker_profiles WHERE user_id = $1',
+      'DELETE FROM saved_workers WHERE employer_id = $1 OR worker_id = $1',
+      'DELETE FROM hires WHERE employer_id = $1 OR worker_id = $1',
+      'DELETE FROM password_resets WHERE user_id = $1',
+      'DELETE FROM email_verifications WHERE user_id = $1',
+      `UPDATE users SET name = 'Deleted user', first_name = '', last_name = '', email = 'deleted-' || id || '@deleted.invalid', password_hash = NULL, google_sub = NULL,
+         photo_key = NULL, plan = 'free', paddle_customer_id = NULL, paddle_subscription_id = NULL, last_country = NULL,
+         email_verified_at = NULL, deleted_at = now(), sessions_valid_from = now() + interval '1 second' WHERE id = $1`,
+    ]) await db.query(sql, [id]);
+    await db.query('COMMIT');
+  } catch (err) {
+    await db.query('ROLLBACK');
+    throw err;
+  } finally {
+    db.release();
+  }
+  [u.photo_key, u.resume_key].forEach(deleteFile);
+  endSession(req, res);
+  res.status(204).end();
 });
 
 app.get('/api/me', requireAuth(), async (req, res) => {
@@ -449,7 +499,7 @@ app.get('/api/stats', async (req, res) => {
   const { rows } = await q(`SELECT
     (SELECT count(*)::int FROM jobs) AS jobs,
     (SELECT count(*)::int FROM worker_profiles WHERE title <> '') AS workers,
-    (SELECT count(*)::int FROM users WHERE role = 'employer') AS employers,
+    (SELECT count(*)::int FROM users WHERE role = 'employer' AND deleted_at IS NULL) AS employers,
     (SELECT count(*)::int FROM users WHERE role = 'employer' AND plan <> 'free'
        AND plan_changed_at >= date_trunc('month', now() AT TIME ZONE 'Asia/Manila') AT TIME ZONE 'Asia/Manila') AS upgraded_this_month`);
   res.json(rows[0]);
@@ -626,7 +676,8 @@ app.get('/api/admin/settings', requireAdmin, async (req, res) => res.json(await 
 
 // Numbers for the admin dashboard. "Active" means signed in and using the site.
 app.get('/api/admin/stats', requireAdmin, async (req, res) => {
-  const count = (sql) => `(SELECT count(*)::int ${sql})`;
+  const live = (sql) => sql.replace(/FROM users( WHERE)?/, (_, where) => `FROM users WHERE deleted_at IS NULL${where ? ' AND' : ''}`); // skip deleted accounts
+  const count = (sql) => `(SELECT count(*)::int ${live(sql)})`;
   const since = (col, period) => `${col} > now() - interval '${period}'`;
   const { rows: [totals] } = await q(`SELECT
     ${count("FROM users")} AS users,
@@ -661,8 +712,8 @@ app.get('/api/admin/stats', requireAdmin, async (req, res) => {
     LEFT JOIN users u ON (u.created_at AT TIME ZONE 'Asia/Manila')::date = d::date
     GROUP BY d ORDER BY d`);
   const { rows: countries } = await q(`SELECT coalesce(last_country, '??') AS country, count(*)::int AS users
-    FROM users WHERE ${since('last_seen_at', '30 days')} GROUP BY 1 ORDER BY 2 DESC LIMIT 15`);
-  const { rows: recent } = await q('SELECT id, name, role, created_at, last_seen_at, last_country FROM users ORDER BY created_at DESC LIMIT 10');
+    FROM users WHERE deleted_at IS NULL AND ${since('last_seen_at', '30 days')} GROUP BY 1 ORDER BY 2 DESC LIMIT 15`);
+  const { rows: recent } = await q('SELECT id, name, role, created_at, last_seen_at, last_country FROM users WHERE deleted_at IS NULL ORDER BY created_at DESC LIMIT 10');
   res.json({ totals, signups, countries, recent });
 });
 
@@ -1195,7 +1246,7 @@ app.get('/api/admin/users', requireAdmin, async (req, res) => {
        (SELECT count(*)::int FROM applications a WHERE a.worker_id = u.id) AS applications,
        count(*) OVER ()::int AS total
      FROM users u
-     WHERE ($1 = '%%' OR u.name ILIKE $1 OR u.email ILIKE $1) AND ($2 = '' OR u.role = $2) AND ($3 = '' OR (u.role = 'employer' AND u.plan = $3))
+     WHERE u.deleted_at IS NULL AND ($1 = '%%' OR u.name ILIKE $1 OR u.email ILIKE $1) AND ($2 = '' OR u.role = $2) AND ($3 = '' OR (u.role = 'employer' AND u.plan = $3))
      ORDER BY u.created_at DESC LIMIT ${ADMIN_PAGE} OFFSET $4`,
     [like(req.query.q), role, plan, pageOf(req) * ADMIN_PAGE]);
   res.json({ users: rows.map(({ total: _, ...u }) => u), total: rows[0]?.total ?? 0, page_size: ADMIN_PAGE });
@@ -1229,7 +1280,7 @@ app.get('/api/admin/subscriptions', requireAdmin, async (req, res) => {
   const { rows: paying } = await q(
     `SELECT id, name, email, plan, plan_changed_at, paddle_subscription_id FROM users
      WHERE role = 'employer' AND plan <> 'free' ORDER BY plan_changed_at DESC NULLS LAST`);
-  const { rows: [{ employers }] } = await q("SELECT count(*)::int AS employers FROM users WHERE role = 'employer'");
+  const { rows: [{ employers }] } = await q("SELECT count(*)::int AS employers FROM users WHERE role = 'employer' AND deleted_at IS NULL");
   let live = new Map(), paddleError = null;
   if (process.env.PADDLE_API_KEY && paying.some((u) => u.paddle_subscription_id)) {
     try {
@@ -1371,7 +1422,7 @@ app.get('/api/messages/unread-count', requireAuth(), async (req, res) => {
 
 // The other person, if messaging them is allowed at all (employer <-> worker only).
 async function counterpart(me, otherId) {
-  const { rows } = await q('SELECT id, name, email, role FROM users WHERE id = $1', [num(otherId)]);
+  const { rows } = await q('SELECT id, name, email, role FROM users WHERE id = $1 AND deleted_at IS NULL', [num(otherId)]);
   const other = rows[0];
   return other && other.id !== me.id && other.role !== me.role ? other : null;
 }
