@@ -1,13 +1,16 @@
 'use client';
 import Link from 'next/link';
 import { useParams } from 'next/navigation';
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 import { api, useApi, interest, salary, type Job } from '@/lib/api';
 import { Skills, ErrorText, BackButton, TimeAgo, buttonGhost, card } from '@/components/ui';
 import { ResumeModal, type ViewableResume } from '@/components/ResumeModal';
 
 type Analysis = { score: number; verdict: string; strengths: string[]; concerns: string[]; resume?: 'read' | 'unreadable' | 'none' };
-type Usage = { plan: 'free' | 'premium'; used: number; limit: number; remaining: number | null };
+type Plan = 'free' | 'pro' | 'premium';
+type Usage = { plan: Plan; used: number; limit: number | null; remaining: number | null };
+type ApplicantList = { applicants: Applicant[]; total: number; limit: number | null; plan: Plan };
+const PLAN_NAME = { free: 'Free', pro: 'Pro', premium: 'Premium' };
 type Applicant = {
   id: number; worker_id: number; name: string; email: string; title: string | null; skills: string[] | null;
   cover_letter: string; credits: number; created_at: string; analysis: Analysis | null; resume_name: string | null;
@@ -33,7 +36,7 @@ function ScoreRing({ score }: { score: number }) {
   );
 }
 
-function AnalysisPanel({ analysis }: { analysis: Analysis }) {
+function AnalysisPanel({ analysis, onAgain, busy, canRun }: { analysis: Analysis; onAgain: () => void; busy: boolean; canRun: boolean }) {
   const b = band(analysis.score);
   return (
     <div className={`space-y-3 rounded-xl p-4 ${b.bg}`}>
@@ -56,20 +59,30 @@ function AnalysisPanel({ analysis }: { analysis: Analysis }) {
           </div>
         ))}
       </div>
-      {analysis.resume && (
-        <p className="text-xs text-slate-500">
-          {analysis.resume === 'read' ? 'Based on profile, cover letter and resume.'
-            : analysis.resume === 'unreadable' ? 'Resume couldn’t be read (scanned image), so the score is based on profile and cover letter.'
-            : 'No resume attached. Score is based on profile and cover letter.'}
-        </p>
-      )}
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        {analysis.resume && (
+          <p className="text-xs text-slate-500">
+            {analysis.resume === 'read' ? 'Based on profile, cover letter and resume.'
+              : analysis.resume === 'unreadable' ? 'Resume couldn’t be read (scanned image), so the score is based on profile and cover letter.'
+              : 'No resume attached. Score is based on profile and cover letter.'}
+          </p>
+        )}
+        {canRun && (
+          <button type="button" onClick={onAgain} disabled={busy} title="Ask the AI for a fresh look. Uses 1 fit score."
+            className="ml-auto inline-flex items-center gap-1.5 rounded-lg px-2.5 py-1 text-xs font-semibold text-slate-600 transition hover:bg-white/70 disabled:opacity-60">
+            {busy ? <><span className="h-3 w-3 animate-spin rounded-full border-2 border-slate-500 border-t-transparent" aria-hidden="true" />Re-scoring…</> : <>↻ Re-score</>}
+          </button>
+        )}
+      </div>
     </div>
   );
 }
 
 export default function Applicants() {
   const { id } = useParams<{ id: string }>();
-  const { data: apps, error } = useApi<Applicant[]>(`/jobs/${id}/applications`);
+  const { data: page, error } = useApi<ApplicantList>(`/jobs/${id}/applications`);
+  const apps = page?.applicants;
+  const hidden = page ? page.total - page.applicants.length : 0;
   const { data: job } = useApi<Job>(`/jobs/${id}`);
   const { data: initialUsage } = useApi<Usage>('/analyzer/usage');
   const [usage, setUsage] = useState<Usage | null>(null);
@@ -80,11 +93,11 @@ export default function Applicants() {
   const u = usage ?? initialUsage;
   const outOfFree = u?.remaining === 0;
 
-  async function analyze(appId: number) {
+  async function analyze(appId: number, again = false) {
     setBusy((b) => ({ ...b, [appId]: true }));
     setErrors((e) => ({ ...e, [appId]: '' }));
     try {
-      const res = await api<{ analysis: Analysis; usage: Usage }>(`/applications/${appId}/analyze`, { method: 'POST' });
+      const res = await api<{ analysis: Analysis; usage: Usage }>(`/applications/${appId}/analyze`, { method: 'POST', body: { again } });
       setResults((r) => ({ ...r, [appId]: res.analysis }));
       setUsage(res.usage);
     } catch (err) {
@@ -106,7 +119,33 @@ export default function Applicants() {
     }
   }
 
+  // Premium: score every unscored applicant in one go, three at a time, stopping at the first problem.
+  const [scoring, setScoring] = useState<{ done: number; of: number } | null>(null);
+  const [scoreError, setScoreError] = useState('');
+  const stop = useRef(false);
+  async function scoreAll(ids: number[]) {
+    setScoreError(''); stop.current = false;
+    setScoring({ done: 0, of: ids.length });
+    const queue = [...ids];
+    const worker = async () => {
+      for (let appId = queue.shift(); appId !== undefined && !stop.current; appId = queue.shift()) {
+        try {
+          const res = await api<{ analysis: Analysis; usage: Usage }>(`/applications/${appId}/analyze`, { method: 'POST', quiet: true });
+          setResults((r) => ({ ...r, [appId]: res.analysis }));
+          setUsage(res.usage);
+          setScoring((s) => s && { ...s, done: s.done + 1 });
+        } catch (err) {
+          stop.current = true;
+          setScoreError((err as Error).message);
+        }
+      }
+    };
+    await Promise.all([worker(), worker(), worker()]);
+    setScoring(null);
+  }
+
   const list = (apps ?? []).map((a) => ({ ...a, analysis: results[a.id] ?? a.analysis }));
+  const unscored = list.filter((a) => !a.analysis).map((a) => a.id);
   if (sortBy === 'score') list.sort((x, y) => (y.analysis?.score ?? -1) - (x.analysis?.score ?? -1));
 
   return (
@@ -115,7 +154,7 @@ export default function Applicants() {
       <div className="flex flex-wrap items-end justify-between gap-4">
         <div>
           <h1 className="text-2xl font-bold">Applicants{job && <span className="text-slate-400"> · {job.title}</span>}</h1>
-          <p className="text-sm text-slate-500">{list.length} applicant{list.length === 1 ? '' : 's'}</p>
+          <p className="text-sm text-slate-500">{page?.total ?? 0} applicant{page?.total === 1 ? '' : 's'}{hidden > 0 && <> · showing your top {list.length}</>}</p>
         </div>
         <div className="flex rounded-lg bg-slate-100 p-1 text-sm" role="group" aria-label="Sort applicants">
           {(['credits', 'score'] as const).map((s) => (
@@ -160,24 +199,54 @@ export default function Applicants() {
             <svg viewBox="0 0 24 24" className="h-5 w-5" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 3l1.8 4.9L19 9.7l-4.2 3.1 1.4 5.2L12 15l-4.2 3 1.4-5.2L5 9.7l5.2-1.8L12 3Z" /></svg>
           </span>
           <div className="min-w-48 flex-1">
-            <p className="font-semibold">AI Application Analyzer</p>
-            {u.plan === 'premium' ? (
-              <p className="text-sm text-slate-500">Premium · unlimited analyses</p>
+            <p className="font-semibold">AI Fit Score</p>
+            {u.limit === null ? (
+              <p className="text-sm text-slate-500">{PLAN_NAME[u.plan]} · unlimited fit scores</p>
             ) : (
               <>
-                <p className="text-sm text-slate-500"><strong className="text-slate-800">{u.remaining}</strong> of {u.limit} free analyses left</p>
+                <p className="text-sm text-slate-500"><strong className="text-slate-800">{u.remaining}</strong> of {u.limit} fit scores left this month · {PLAN_NAME[u.plan]}</p>
                 <div className="mt-1.5 h-1.5 max-w-xs overflow-hidden rounded-full bg-slate-100">
                   <div className="h-full rounded-full bg-amber-400" style={{ width: `${((u.remaining ?? 0) / u.limit) * 100}%` }} />
                 </div>
               </>
             )}
+            {scoring && <p className="mt-1 text-sm font-medium text-emerald-800" role="status">Scoring {scoring.done} of {scoring.of}…</p>}
+            <ErrorText msg={scoreError} />
           </div>
-          {u.plan === 'free' && <Link href="/premium" className={`${buttonGhost} px-4 py-2`}>Upgrade to Premium</Link>}
+          {u.plan === 'premium' ? (
+            unscored.length > 0 && (
+              scoring
+                ? <button type="button" onClick={() => { stop.current = true; }} className={`${buttonGhost} px-4 py-2`}>Stop</button>
+                : <button type="button" onClick={() => scoreAll(unscored)} className="rounded-lg bg-emerald-950 px-4 py-2 text-sm font-semibold text-white hover:bg-emerald-900">✦ Score all {unscored.length}</button>
+            )
+          ) : (
+            <Link href="/pricing" className={`${buttonGhost} gap-2 px-4 py-2`} title="Score every applicant in one click with Premium">
+              ✦ Score all <span className="rounded bg-amber-100 px-1.5 py-0.5 text-[10px] font-bold uppercase text-amber-900">Premium</span>
+            </Link>
+          )}
+        </div>
+      )}
+
+      {hidden > 0 && page && (
+        <div className="flex flex-wrap items-center gap-4 rounded-xl border border-amber-300 bg-amber-50 p-5">
+          <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-amber-400 text-slate-900" aria-hidden="true">
+            <svg viewBox="0 0 24 24" className="h-5 w-5" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="5" y="11" width="14" height="10" rx="2" /><path d="M8 11V7a4 4 0 0 1 8 0v4" /></svg>
+          </span>
+          <div className="min-w-56 flex-1">
+            <p className="font-semibold text-slate-900">{hidden} more applicant{hidden === 1 ? ' is' : 's are'} waiting for you</p>
+            <p className="text-sm text-slate-700">
+              You&apos;re on the {PLAN_NAME[page.plan]} plan, which shows your top {page.limit} applicants per job.{' '}
+              {page.plan === 'free'
+                ? <>Upgrade to <strong>Pro</strong> to see up to 150 per job, or <strong>Premium</strong> for unlimited applicants. Don&apos;t miss the right hire.</>
+                : <>Upgrade to <strong>Premium</strong> for unlimited applicants. Don&apos;t miss the right hire.</>}
+            </p>
+          </div>
+          <Link href="/pricing" className="rounded-lg bg-amber-400 px-4 py-2 text-sm font-semibold text-slate-900 hover:bg-amber-300">Unlock all applicants</Link>
         </div>
       )}
 
       <ErrorText msg={error} />
-      {apps?.length === 0 && <p className={`${card} text-center text-slate-500`}>No applicants yet. They&apos;ll appear here as workers apply.</p>}
+      {page?.total === 0 && <p className={`${card} text-center text-slate-500`}>No applicants yet. They&apos;ll appear here as workers apply.</p>}
       <ul className="space-y-4">
         {list.map((a) => (
           <li key={a.id} id={`applicant-${a.id}`} className={`${card} scroll-mt-24 space-y-4 target:ring-2 target:ring-amber-400`}>
@@ -204,19 +273,26 @@ export default function Applicants() {
             <Skills skills={a.skills ?? []} />
             <p className="whitespace-pre-line text-sm leading-relaxed text-slate-700">{a.cover_letter}</p>
 
-            {a.analysis ? <AnalysisPanel analysis={a.analysis} /> : (
+            {a.analysis ? (
+              <div className="space-y-2">
+                <AnalysisPanel analysis={a.analysis} onAgain={() => analyze(a.id, true)} busy={!!busy[a.id]} canRun={!outOfFree && !scoring} />
+                <ErrorText msg={errors[a.id] ?? ''} />
+              </div>
+            ) : (
               <div className="flex flex-wrap items-center gap-3 border-t border-slate-100 pt-4">
                 {outOfFree ? (
                   <>
-                    <p className="text-sm text-slate-500">You&apos;ve used your {u?.limit} free AI analyses.</p>
-                    <Link href="/premium" className="rounded-lg bg-amber-400 px-4 py-2 text-sm font-semibold text-slate-900 hover:bg-amber-300">Upgrade to analyze</Link>
+                    <p className="text-sm text-slate-500">
+                      {u?.limit === null ? 'You’ve reached this month’s fair-use limit of 10,000 AI fit scores.' : <>You&apos;ve used this month&apos;s {u?.limit} AI fit scores.</>} They reset on the 1st.
+                    </p>
+                    {u?.limit !== null && <Link href="/pricing" className="rounded-lg bg-amber-400 px-4 py-2 text-sm font-semibold text-slate-900 hover:bg-amber-300">Upgrade for more</Link>}
                   </>
                 ) : (
                   <button type="button" onClick={() => analyze(a.id)} disabled={busy[a.id]}
                     className="inline-flex items-center gap-2 rounded-lg border border-emerald-700 px-4 py-2 text-sm font-semibold text-emerald-800 transition hover:bg-emerald-50 disabled:opacity-60">
                     {busy[a.id] ? (
-                      <><span className="h-4 w-4 animate-spin rounded-full border-2 border-emerald-700 border-t-transparent" aria-hidden="true" />Analyzing…</>
-                    ) : <>✦ Analyze with AI</>}
+                      <><span className="h-4 w-4 animate-spin rounded-full border-2 border-emerald-700 border-t-transparent" aria-hidden="true" />Scoring…</>
+                    ) : <>✦ Get AI fit score</>}
                   </button>
                 )}
                 <ErrorText msg={errors[a.id] ?? ''} />
@@ -225,6 +301,24 @@ export default function Applicants() {
           </li>
         ))}
       </ul>
+      {hidden > 0 && (
+        <div className="relative">
+          <ul className="pointer-events-none space-y-4 select-none blur-sm" aria-hidden="true">
+            {Array.from({ length: Math.min(hidden, 3) }, (_, i) => (
+              <li key={i} className={`${card} space-y-3`}>
+                <div className="h-4 w-40 rounded bg-slate-200" />
+                <div className="h-3 w-64 rounded bg-slate-100" />
+                <div className="h-3 w-full rounded bg-slate-100" />
+                <div className="h-3 w-5/6 rounded bg-slate-100" />
+              </li>
+            ))}
+          </ul>
+          <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 text-center">
+            <p className="font-semibold text-slate-900">+{hidden} more applicant{hidden === 1 ? '' : 's'} hidden on the {page && PLAN_NAME[page.plan]} plan</p>
+            <Link href="/pricing" className="rounded-lg bg-amber-400 px-4 py-2 text-sm font-semibold text-slate-900 shadow hover:bg-amber-300">See plans</Link>
+          </div>
+        </div>
+      )}
       <ResumeModal resume={viewing} onClose={() => setViewing(null)} />
       <p className="text-xs text-slate-400">AI scores are a screening aid based on the job post and what applicants wrote. Always review applications yourself before deciding.</p>
     </div>

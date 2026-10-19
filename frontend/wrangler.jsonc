@@ -2,11 +2,19 @@
 	"$schema": "node_modules/wrangler/config-schema.json",
 	// Next.js on Cloudflare Workers through the OpenNext adapter (npm run deploy).
 	"name": "remotepinas",
-	"main": ".open-next/worker.js",
+	"main": "worker.ts",
 	"compatibility_date": "2026-10-01",
 	"compatibility_flags": ["nodejs_compat", "global_fetch_strictly_public"],
-	// Live domains (Cloudflare manages DNS and certificates); the workers.dev address stays on for testing.
+	// Backend on Cloud Run; /api requests are forwarded there (see worker.ts). ORIGIN_SECRET is a secret:
+	// set with `wrangler secret put ORIGIN_SECRET`, never written here.
+	"vars": { "API_ORIGIN": "https://remotepinas-api-417322526705.asia-southeast1.run.app" },
+	// Live domain is readytowork.ph; the others (old names) redirect to it (see worker.ts).
+	// Cloudflare manages DNS and certificates; each domain must be added to this Cloudflare account.
 	"routes": [
+		{ "pattern": "readytowork.ph", "custom_domain": true },
+		{ "pattern": "www.readytowork.ph", "custom_domain": true },
+		{ "pattern": "remoteworks.ph", "custom_domain": true },
+		{ "pattern": "www.remoteworks.ph", "custom_domain": true },
 		{ "pattern": "remotepinas.com", "custom_domain": true },
 		{ "pattern": "www.remotepinas.com", "custom_domain": true }
 	],

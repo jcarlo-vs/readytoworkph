@@ -82,6 +82,7 @@ function EmployerDashboard() {
   const { data: jobs, error } = useApi<MyJob[]>('/my/jobs');
   const { data: unread } = useApi<{ count: number }>('/messages/unread-count');
   const { data: usage } = useApi<{ plan: string; remaining: number | null; limit: number }>('/analyzer/usage');
+  const { data: hires } = useApi<{ id: number; name: string; title: string | null; hired_at: string; job_title: string | null }[]>('/my/hires');
   const total = jobs?.reduce((n, j) => n + j.applicant_count, 0) ?? 0;
   const fresh = jobs?.reduce((n, j) => n + j.new_count, 0) ?? 0;
 
@@ -92,9 +93,14 @@ function EmployerDashboard() {
           <p className="text-sm font-medium text-emerald-800">Welcome back{user ? `, ${user.name.split(' ')[0]}` : ''}</p>
           <h1 className="text-3xl font-bold tracking-tight">My Jobs</h1>
         </div>
-        <Link href="/jobs/new" className={`${buttonGold} gap-2`}>
-          <span className="text-lg leading-none">+</span> Post a job
-        </Link>
+        <div className="flex flex-wrap gap-3">
+          <Link href="/dashboard/analytics" className={`${buttonGhost} gap-2`}>
+            Analytics{user?.plan !== 'premium' && <span className="rounded bg-amber-100 px-1.5 py-0.5 text-[10px] font-bold uppercase text-amber-900">Premium</span>}
+          </Link>
+          <Link href="/jobs/new" className={`${buttonGold} gap-2`}>
+            <span className="text-lg leading-none">+</span> Post a job
+          </Link>
+        </div>
       </div>
 
       {jobs && jobs.length > 0 && (
@@ -102,8 +108,8 @@ function EmployerDashboard() {
           <Stat label="Active jobs" value={jobs.length} />
           <Stat label="Applicants" value={total} hint={fresh ? `+${fresh} in the last 7 days` : 'None in the last 7 days'} tone={total ? 'text-emerald-800' : 'text-slate-900'} />
           <Stat label="Unread messages" value={unread?.count ?? 0} hint="Open your inbox" href="/messages" tone={unread?.count ? 'text-amber-600' : 'text-slate-900'} />
-          <Stat label="AI analyses" value={usage ? (usage.remaining === null ? '∞' : usage.remaining) : '…'}
-            hint={usage?.remaining === null ? 'Premium · unlimited' : `of ${usage?.limit ?? 10} free left`} href={usage?.remaining === 0 ? '/premium' : undefined} />
+          <Stat label="AI fit scores" value={usage ? (usage.remaining === null ? '∞' : usage.remaining) : '…'}
+            hint={usage?.remaining === null ? 'Unlimited on Premium' : `of ${usage?.limit ?? 10} left this month`} href={usage?.remaining === 0 ? '/pricing' : undefined} />
         </div>
       )}
 
@@ -129,6 +135,42 @@ function EmployerDashboard() {
           <ul className="space-y-4">{jobs.map((j) => <JobCard key={j.id} job={j} />)}</ul>
         </section>
       )}
+
+      <div className="grid gap-4 md:grid-cols-2">
+        <section className={`${card} space-y-3`}>
+          <div className="flex items-baseline justify-between">
+            <h2 className="font-semibold">Your hires</h2>
+            {!!hires?.length && <span className="text-xs text-slate-500">{hires.length} hired</span>}
+          </div>
+          {!hires?.length ? (
+            <p className="text-sm text-slate-500">When you hire someone, open their profile and click <strong>Mark as hired</strong>. They&apos;ll show up here.</p>
+          ) : (
+            <ul className="divide-y divide-slate-100">
+              {hires.slice(0, 6).map((h) => (
+                <li key={h.id}>
+                  <Link href={`/workers/${h.id}`} className="flex items-center gap-3 py-2.5 hover:text-emerald-800">
+                    <Initials name={h.name} id={h.id} size="h-9 w-9 text-xs" />
+                    <span className="min-w-0 flex-1">
+                      <span className="block truncate font-medium text-slate-900">{h.name}</span>
+                      <span className="block truncate text-xs text-slate-500">{h.job_title ?? h.title ?? 'Hired'} · <TimeAgo date={h.hired_at} /></span>
+                    </span>
+                  </Link>
+                </li>
+              ))}
+            </ul>
+          )}
+        </section>
+        <section className={`${card} flex flex-col justify-between gap-3`}>
+          <div>
+            <h2 className="font-semibold">Saved workers</h2>
+            <p className="mt-1 text-sm text-slate-500">Tap ☆ Save on anyone in Hire Talent to keep a shortlist for later.</p>
+          </div>
+          <div className="flex flex-wrap gap-2">
+            <Link href="/workers?view=saved" className={`${buttonGhost} px-4 py-2`}>★ Saved workers</Link>
+            <Link href="/workers" className={`${buttonGhost} px-4 py-2`}>Browse talent</Link>
+          </div>
+        </section>
+      </div>
     </div>
   );
 }

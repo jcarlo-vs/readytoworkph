@@ -118,3 +118,76 @@ CREATE TRIGGER users_plan_changed BEFORE UPDATE OF plan ON users
 -- Optional links on a worker's profile (work samples and LinkedIn).
 ALTER TABLE worker_profiles ADD COLUMN IF NOT EXISTS portfolio_url text;
 ALTER TABLE worker_profiles ADD COLUMN IF NOT EXISTS linkedin_url text;
+
+-- Activity for the admin dashboard: when a signed-in user was last active, and their country as
+-- Cloudflare sees it (two-letter code). IP addresses are not stored.
+ALTER TABLE users ADD COLUMN IF NOT EXISTS last_seen_at timestamptz;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS last_country text;
+
+-- Forgot password: one-time reset links. Only a hash of the link's token is stored, so a database
+-- leak can't be used to reset anyone's password.
+CREATE TABLE IF NOT EXISTS password_resets (
+  token_hash text PRIMARY KEY,
+  user_id    int NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  expires_at timestamptz NOT NULL,
+  used_at    timestamptz
+);
+
+-- Billing through Paddle: the employer's Paddle customer, their current subscription, and when that
+-- subscription last changed (Paddle's webhooks can arrive out of order; older changes are ignored).
+ALTER TABLE users ADD COLUMN IF NOT EXISTS paddle_customer_id text;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS paddle_subscription_id text;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS paddle_updated_at timestamptz;
+
+-- Every AI analysis run, re-runs included, so monthly allowances count actual AI work (an applicant
+-- re-analyzed three times uses three). Analyses made before this table existed are copied in once.
+CREATE TABLE IF NOT EXISTS ai_analyses (
+  id             bigserial PRIMARY KEY,
+  employer_id    int NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  application_id int REFERENCES applications(id) ON DELETE SET NULL,
+  created_at     timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS ai_analyses_employer_created ON ai_analyses (employer_id, created_at);
+INSERT INTO ai_analyses (employer_id, application_id, created_at)
+SELECT j.employer_id, a.id, a.analyzed_at FROM applications a JOIN jobs j ON j.id = a.job_id
+WHERE a.analyzed_at IS NOT NULL AND NOT EXISTS (SELECT 1 FROM ai_analyses);
+
+-- Feedback from anyone (signed in or not): ideas, bug reports and anything else, read in the admin panel.
+CREATE TABLE IF NOT EXISTS feedback (
+  id          serial PRIMARY KEY,
+  user_id     int REFERENCES users(id) ON DELETE SET NULL,
+  type        text NOT NULL CHECK (type IN ('idea', 'bug', 'other')),
+  message     text NOT NULL,
+  page        text,
+  contact_ok  boolean NOT NULL DEFAULT false,
+  email       text,          -- a visitor's reply address, when they give one
+  created_at  timestamptz NOT NULL DEFAULT now(),
+  done_at     timestamptz
+);
+
+-- The Contact us form shares the feedback inbox: a "support" type, with the sender's name and a subject.
+ALTER TABLE feedback DROP CONSTRAINT IF EXISTS feedback_type_check;
+ALTER TABLE feedback ADD CONSTRAINT feedback_type_check CHECK (type IN ('idea', 'bug', 'other', 'support'));
+ALTER TABLE feedback ADD COLUMN IF NOT EXISTS sender_name text;
+ALTER TABLE feedback ADD COLUMN IF NOT EXISTS subject text;
+
+-- Employers' saved workers (bookmarks) and the workers they hired (the start of reviews, and real hire counts).
+CREATE TABLE IF NOT EXISTS saved_workers (
+  employer_id int NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  worker_id   int NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  created_at  timestamptz NOT NULL DEFAULT now(),
+  PRIMARY KEY (employer_id, worker_id)
+);
+CREATE TABLE IF NOT EXISTS hires (
+  employer_id int NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  worker_id   int NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  job_id      int REFERENCES jobs(id) ON DELETE SET NULL,
+  created_at  timestamptz NOT NULL DEFAULT now(),
+  PRIMARY KEY (employer_id, worker_id)
+);
+
+-- Password guessing protection per account (on top of the per-visitor limit): wrong passwords in the
+-- current 15-minute window, and until when password login is paused after too many.
+ALTER TABLE users ADD COLUMN IF NOT EXISTS failed_logins int NOT NULL DEFAULT 0;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS failed_login_at timestamptz;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS login_locked_until timestamptz;

@@ -17,15 +17,28 @@ const jakarta = Plus_Jakarta_Sans({
   weight: ["500", "800"],
 });
 
+const DESCRIPTION = "Remote jobs for Filipino professionals, and a direct way for employers to hire them. Work from home full-time, part-time or per project, paid in dollars. Free to join.";
+
 export const metadata: Metadata = {
-  title: "RemotePinas - Hire skilled Filipino remote workers",
-  description: "Find and hire top Filipino remote talent, or find your next remote job.",
+  metadataBase: new URL("https://readytowork.ph"),
+  title: { default: "ReadyToWork.ph: Remote jobs for Filipino professionals", template: "%s | ReadyToWork.ph" },
+  description: DESCRIPTION,
+  applicationName: "ReadyToWork.ph",
+  keywords: ["remote jobs Philippines", "work from home jobs Philippines", "online jobs Philippines", "hire Filipino virtual assistant", "Filipino remote workers", "freelance jobs Philippines"],
+  alternates: { canonical: "/" },
+  openGraph: {
+    type: "website", siteName: "ReadyToWork.ph", locale: "en_PH", url: "/",
+    title: "ReadyToWork.ph: Remote jobs for Filipino professionals", description: DESCRIPTION,
+    images: [{ url: "/og.png", width: 1200, height: 630, alt: "ReadyToWork.ph: remote jobs for Filipino professionals" }],
+  },
+  twitter: { card: "summary_large_image", images: ["/og.png"] },
 };
 
 export default function RootLayout({ children }: LayoutProps<"/">) {
   return (
     <html lang="en" className={`${geistSans.variable} ${jakarta.variable} h-full antialiased`}>
-      <body className="flex min-h-full flex-col bg-slate-50 font-sans text-slate-900">
+      {/* wrap-anywhere: a word too long for its box (a pasted link, "asdasd..." with no spaces) breaks instead of running off the card */}
+      <body className="flex min-h-full flex-col bg-slate-50 font-sans text-slate-900 wrap-anywhere">
         <Suspense>
           <TopLoader />
         </Suspense>

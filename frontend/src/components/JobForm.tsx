@@ -16,6 +16,22 @@ const toInput = (j?: Job): JobInput => ({
   salary_max: j?.salary_max != null ? String(Number(j.salary_max)) : '',
 });
 
+// Same limits as the backend (JOB_TITLE_MAX / JOB_DESCRIPTION_MAX). Typing or pasting past them isn't
+// cut off silently: the field turns red and says by how much, and the form won't submit until it fits.
+const TITLE_MAX = 120;
+const DESCRIPTION_MAX = 10_000;
+const n = (v: number) => v.toLocaleString('en-US');
+// The live count under a field: always for short fields, from 80% for long ones, red once over.
+function Limit({ id, length, max, always = false }: { id: string; length: number; max: number; always?: boolean }) {
+  const over = length - max;
+  if (over > 0) {
+    return <p id={id} role="alert" className="mt-1 text-xs font-semibold text-red-600">Too long by {n(over)} character{over === 1 ? '' : 's'} ({n(length)} / {n(max)}). Please shorten it.</p>;
+  }
+  if (!always && length < max * 0.8) return null;
+  return <p id={id} className={`mt-1 text-right text-xs ${length === max ? 'font-semibold text-amber-700' : 'text-slate-500'}`}>{n(length)} / {n(max)} characters</p>;
+}
+const overStyle = (over: boolean) => (over ? ' border-red-500 focus:border-red-500 focus:ring-red-500/20' : '');
+
 // Post a job, or edit one (`job` given). `notice` shows above the submit button, e.g. a note about existing applicants.
 export function JobForm({ job, heading, submitLabel, notice, onSubmit }: {
   job?: Job; heading: string; submitLabel: string; notice?: React.ReactNode; onSubmit: (form: JobInput) => Promise<void>;
@@ -24,6 +40,9 @@ export function JobForm({ job, heading, submitLabel, notice, onSubmit }: {
   const [status, setStatus] = useState({ busy: false, error: '' });
   const set = (k: keyof JobInput) => (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) =>
     setForm({ ...form, [k]: e.target.value });
+
+  const titleOver = form.title.length > TITLE_MAX;
+  const descriptionOver = form.description.length > DESCRIPTION_MAX;
 
   async function submit(e: React.FormEvent) {
     e.preventDefault();
@@ -38,8 +57,16 @@ export function JobForm({ job, heading, submitLabel, notice, onSubmit }: {
   return (
     <form onSubmit={submit} className={`${card} mx-auto max-w-2xl space-y-4`}>
       <h1 className="text-2xl font-bold">{heading}</h1>
-      <Field label="Job title"><input className={input} required value={form.title} onChange={set('title')} /></Field>
-      <Field label="Description"><textarea className={input} rows={8} required value={form.description} onChange={set('description')} /></Field>
+      <Field label="Job title">
+        <input className={input + overStyle(titleOver)} required value={form.title} onChange={set('title')}
+          aria-invalid={titleOver} aria-describedby="title-limit" />
+        <Limit id="title-limit" length={form.title.length} max={TITLE_MAX} always />
+      </Field>
+      <Field label="Description">
+        <textarea className={input + overStyle(descriptionOver)} rows={8} required value={form.description} onChange={set('description')}
+          aria-invalid={descriptionOver} aria-describedby="description-limit" />
+        <Limit id="description-limit" length={form.description.length} max={DESCRIPTION_MAX} />
+      </Field>
       <Field label="Skills (comma separated)"><input className={input} placeholder="react, seo, customer service" value={form.skills} onChange={set('skills')} /></Field>
       <Field label="Type">
         <Select label="Type" value={form.job_type} onChange={(job_type) => setForm({ ...form, job_type })} options={JOB_TYPES} />
@@ -57,7 +84,7 @@ export function JobForm({ job, heading, submitLabel, notice, onSubmit }: {
       </fieldset>
       {notice}
       <ErrorText msg={status.error} />
-      <button className={button} disabled={status.busy}>{status.busy ? 'Saving…' : submitLabel}</button>
+      <button className={button} disabled={status.busy || titleOver || descriptionOver}>{status.busy ? 'Saving…' : submitLabel}</button>
     </form>
   );
 }

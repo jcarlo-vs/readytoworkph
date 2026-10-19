@@ -46,7 +46,7 @@ function Stats() {
 function HeroSearch() {
   const router = useRouter();
   const { user } = useAuth();
-  const [picked, setPicked] = useState<'hire' | 'work'>('hire');
+  const [picked, setPicked] = useState<'hire' | 'work'>('work');
   // Logged-in users search their own side; visitors choose with the tabs.
   const mode = user ? (user.role === 'employer' ? 'hire' : 'work') : picked;
   const [q, setQ] = useState('');
@@ -61,9 +61,14 @@ function HeroSearch() {
     <div className="max-w-xl rounded-2xl bg-white/10 p-2 ring-1 ring-white/20 backdrop-blur">
       {user
         ? <p className="mb-2 px-2 pt-1 text-sm font-semibold text-emerald-50">{mode === 'hire' ? 'Search Filipino talent' : 'Search remote jobs'}</p>
-        : <div className="mb-2 flex gap-1">{tab('hire', 'I want to hire')}{tab('work', 'I want to work')}</div>}
+        : <div className="mb-2 flex gap-1">{tab('work', 'I want to work')}{tab('hire', 'I want to hire')}</div>}
       <form className="flex gap-2"
-        onSubmit={(e) => { e.preventDefault(); startSearch(() => router.push(`/${mode === 'hire' ? 'workers' : 'jobs'}?q=${encodeURIComponent(q)}`)); }}>
+        onSubmit={(e) => {
+          e.preventDefault();
+          // An empty search opens the main page (/jobs or /workers); typed words go to the results.
+          const page = `/${mode === 'hire' ? 'workers' : 'jobs'}`;
+          startSearch(() => router.push(q.trim() ? `${page}?q=${encodeURIComponent(q.trim())}` : page));
+        }}>
         <input value={q} onChange={(e) => setQ(e.target.value)} aria-label="Search"
           placeholder={mode === 'hire' ? 'e.g. virtual assistant, web developer' : 'e.g. customer service, bookkeeping'}
           className="min-w-0 flex-1 rounded-lg border-0 bg-white px-4 py-3 text-slate-900 shadow-sm focus:outline-none focus:ring-2 focus:ring-amber-400" />
@@ -145,7 +150,7 @@ export default function Home() {
       </section>
 
       <section className="mx-auto max-w-6xl px-4 py-20">
-        <h2 className="text-center text-3xl font-bold tracking-tight">How RemotePinas works</h2>
+        <h2 className="text-center text-3xl font-bold tracking-tight">How ReadyToWork.ph works</h2>
         <p className="mx-auto mt-2 max-w-xl text-center text-slate-600">From job post to new hire in four simple steps.</p>
         <ol className="mt-12 grid gap-6 sm:grid-cols-2 lg:grid-cols-4">
           {STEPS.map(([title, text], i) => (

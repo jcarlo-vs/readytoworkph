@@ -1,5 +1,9 @@
 'use client';
+import { FeedbackDialog, openFeedback } from '@/components/Feedback';
 import Link from 'next/link';
+import { button, buttonGold, buttonGhost, card } from './styles';
+import { StatusPage } from './StatusPage';
+export { button, buttonGold, buttonGhost, card };
 import { useEffect, useRef, useState, useSyncExternalStore } from 'react';
 import { usePathname, useRouter } from 'next/navigation';
 import { useAuth } from '@/lib/auth';
@@ -17,10 +21,6 @@ export function TimeAgo({ date }: { date: string }) {
 }
 
 export const input = 'w-full rounded-lg border border-slate-300 bg-white px-3.5 py-2.5 text-sm shadow-sm focus:border-emerald-600 focus:outline-none focus:ring-2 focus:ring-emerald-600/20';
-export const button = 'inline-flex items-center justify-center rounded-lg bg-emerald-950 px-5 py-2.5 text-sm font-semibold text-white shadow-sm transition active:scale-[0.97] hover:bg-emerald-900 disabled:opacity-50';
-export const buttonGold = 'inline-flex items-center justify-center rounded-lg bg-amber-400 px-5 py-2.5 text-sm font-semibold text-slate-900 shadow-sm transition active:scale-[0.97] hover:bg-amber-300';
-export const buttonGhost = 'inline-flex items-center justify-center rounded-lg border border-slate-300 bg-white px-5 py-2.5 text-sm font-semibold text-slate-700 transition active:scale-[0.97] hover:border-emerald-600 hover:text-emerald-700';
-export const card = 'rounded-xl border border-slate-200 bg-white p-6 shadow-sm';
 
 export function Field({ label, children }: { label: string; children: React.ReactNode }) {
   return (
@@ -62,14 +62,49 @@ export const SearchLabel = ({ pending }: { pending: boolean }) =>
 export const ErrorText =({ msg }: { msg: string }) =>
   msg ? <p className="text-sm text-red-600" role="alert">{msg}</p> : null;
 
+// A boxed message with an icon, for form results that need more than one red line:
+// what happened, and what to do next (children: hints and links).
+export function FormAlert({ tone, title, children }: { tone: 'error' | 'success'; title: string; children?: React.ReactNode }) {
+  const error = tone === 'error';
+  return (
+    <div role={error ? 'alert' : 'status'} className={`flex gap-3 rounded-lg border p-3.5 text-sm ${error ? 'border-red-200 bg-red-50 text-red-900' : 'border-emerald-200 bg-emerald-50 text-emerald-900'}`}>
+      <svg viewBox="0 0 24 24" className={`mt-0.5 h-5 w-5 shrink-0 ${error ? 'text-red-500' : 'text-emerald-600'}`} fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+        {error ? <><circle cx="12" cy="12" r="9" /><path d="M12 8v4.5M12 16h.01" /></> : <><circle cx="12" cy="12" r="9" /><path d="m8 12.5 2.5 2.5L16 9.5" /></>}
+      </svg>
+      <div className="space-y-1">
+        <p className="font-semibold">{title}</p>
+        {children && <div className="space-y-1 [&_a]:font-semibold [&_a]:underline [&_a]:underline-offset-2">{children}</div>}
+      </div>
+    </div>
+  );
+}
+
+// Full-page message when a page's main data can't load: missing things (404) get a way out,
+// anything else (server trouble, no internet) gets a Try again button.
+export function LoadError({ msg, status, onRetry, back = ['/jobs', 'Browse jobs'] }: { msg: string; status: number; onRetry: () => void; back?: [string, string] }) {
+  if (status === 404) return (
+    <StatusPage code="404" title={msg} text="It may have been removed, or the link may be wrong.">
+      <Link href={back[0]} className={button}>{back[1]}</Link>
+      <Link href="/" className={buttonGhost}>Go to homepage</Link>
+    </StatusPage>
+  );
+  return (
+    <StatusPage code="Oops" title="We couldn’t load this page" text={msg}>
+      <button type="button" onClick={onRetry} className={button}>Try again</button>
+      <Link href="/" className={buttonGhost}>Go to homepage</Link>
+    </StatusPage>
+  );
+}
+
 // Initials in a circle; with `id`, the user's photo covers them (users without one get a transparent image).
+// If the photo fails to load for any reason, it hides itself so the initials show instead of a broken image.
 export function Initials({ name, id, size = 'h-12 w-12 text-base' }: { name: string; id?: number; size?: string }) {
   const v = useSyncExternalStore(photoStore.subscribe, photoStore.version, () => 0);
   return (
     <span className={`${size} relative inline-flex shrink-0 items-center justify-center overflow-hidden rounded-full bg-gradient-to-br from-emerald-700 to-emerald-950 font-semibold text-white`}>
       {name.split(' ').map((p) => p[0]).slice(0, 2).join('').toUpperCase()}
       {/* eslint-disable-next-line @next/next/no-img-element -- served from our API via a signed redirect */}
-      {id && <img src={`${API}/users/${id}/photo?v=${v}`} alt="" loading="lazy" className="absolute inset-0 h-full w-full object-cover" />}
+      {id && <img key={v} src={`${API}/users/${id}/photo?v=${v}`} alt="" loading="lazy" onError={(e) => { e.currentTarget.hidden = true; }} className="absolute inset-0 h-full w-full object-cover" />}
     </span>
   );
 }
@@ -78,7 +113,7 @@ export function Initials({ name, id, size = 'h-12 w-12 text-base' }: { name: str
 export function Logo({ light = false }: { light?: boolean }) {
   const line = light ? '#ffffff' : '#022c22';
   return (
-    <Link href="/" aria-label="RemotePinas home" className="flex items-center gap-2 font-display text-[1.4rem] leading-none tracking-tight">
+    <Link href="/" aria-label="ReadyToWork.ph home" className="flex items-center gap-2 font-display text-[1.4rem] leading-none tracking-tight">
       <svg viewBox="0 0 64 64" className="h-9 w-9" aria-hidden="true">
         <rect x="10" y="12" width="44" height="30" rx="4" fill="none" stroke={line} strokeWidth="4" />
         <path d="M22 40A10 10 0 0 1 42 40Z" fill="#fbbf24" />
@@ -88,14 +123,15 @@ export function Logo({ light = false }: { light?: boolean }) {
         <rect x="4" y="46" width="56" height="5" rx="2.5" fill={line} />
       </svg>
       <span>
-        <span className={`font-medium ${light ? 'text-emerald-100' : 'text-slate-700'}`}>remote</span>
-        <span className={`font-extrabold ${light ? 'text-amber-400' : 'text-emerald-950'}`}>pinas</span>
+        <span className={`font-medium ${light ? 'text-emerald-100' : 'text-slate-700'}`}>ReadyToWork</span>
+        <span className={`font-extrabold ${light ? 'text-amber-400' : 'text-emerald-950'}`}>.ph</span>
       </span>
     </Link>
   );
 }
 
-// Avatar button that opens a small account menu (Dashboard, My Profile, Log out).
+// Avatar button that opens a small account menu: workers get My Profile and My Applications; employers get
+// My Jobs, Hiring analytics and Plan & billing (where their plan card, switching and Paddle's billing page live).
 function ProfileMenu({ user, onSignOut }: { user: User; onSignOut: () => void }) {
   const [open, setOpen] = useState(false);
   const root = useRef<HTMLDivElement>(null);
@@ -151,6 +187,26 @@ function ProfileMenu({ user, onSignOut }: { user: User; onSignOut: () => void })
           <Link href="/dashboard" onClick={close} className={item}>
             <svg {...icon}><path d="M4 4h7v7H4zM13 4h7v4h-7zM13 10h7v10h-7zM4 13h7v7H4z" /></svg>{user.role === 'worker' ? 'My Applications' : 'My Jobs'}
           </Link>
+          {user.role === 'employer' && (
+            <>
+              <Link href="/workers?view=saved" onClick={close} className={item}>
+                <svg {...icon}><path d="m12 3 2.8 5.7 6.2.9-4.5 4.4 1.1 6.2L12 17.3 6.4 20.2l1.1-6.2L3 9.6l6.2-.9L12 3Z" /></svg>Saved workers
+              </Link>
+              <Link href="/dashboard/analytics" onClick={close} className={item}>
+                <svg {...icon}><path d="M4 20V10M10 20V4M16 20v-7M22 20H2" /></svg>Hiring analytics
+                {user.plan !== 'premium' && <span className="ml-auto rounded bg-amber-100 px-1.5 py-0.5 text-[10px] font-bold uppercase text-amber-900">Premium</span>}
+              </Link>
+              <Link href="/pricing" onClick={close} className={item}>
+                <svg {...icon}><rect x="3" y="5" width="18" height="14" rx="2" /><path d="M3 10h18M7 15h3" /></svg>Plan &amp; billing
+              </Link>
+            </>
+          )}
+          <Link href="/contact" onClick={close} className={item}>
+            <svg {...icon}><circle cx="12" cy="12" r="9" /><path d="M9.5 9.5a2.5 2.5 0 1 1 3.5 2.3c-.6.3-1 .9-1 1.5v.5M12 17h.01" /></svg>Help &amp; support
+          </Link>
+          <button type="button" onClick={() => { close(); openFeedback(); }} className={item}>
+            <svg {...icon}><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2Z" /></svg>Send feedback
+          </button>
           <div className="my-1 border-t border-slate-100" />
           <button type="button" onClick={() => { close(); onSignOut(); router.push('/'); }} className={`${item} text-red-600 hover:bg-red-50`}>
             <svg {...icon} className="h-4 w-4 text-red-400"><path d="M15 4h4v16h-4M10 8l-4 4 4 4M6 12h10" /></svg>Log out
@@ -177,6 +233,7 @@ export function Nav() {
         ? 'border border-emerald-950 bg-emerald-950 text-white shadow-sm [&>svg]:text-amber-400'
         : 'border border-emerald-200 bg-white text-emerald-900 shadow-sm hover:border-emerald-600 hover:bg-emerald-50 [&>svg]:text-emerald-600'}`;
   const icon = { viewBox: '0 0 24 24', className: 'h-4 w-4', fill: 'none', stroke: 'currentColor', strokeWidth: 2, strokeLinecap: 'round', strokeLinejoin: 'round', 'aria-hidden': true } as const;
+  if (path.startsWith('/admin')) return null; // the admin has its own menu and login
   return (
     <header className="sticky top-0 z-20 border-b border-slate-200 bg-white/90 backdrop-blur">
       <nav className="mx-auto flex max-w-6xl flex-wrap items-center gap-x-2.5 gap-y-2 px-4 py-3 text-sm">
@@ -229,6 +286,8 @@ export function Nav() {
 }
 
 export function Footer() {
+  const path = usePathname();
+  if (path.startsWith('/admin')) return null;
   const col = (title: string, links: [string, string][]) => (
     <div>
       <h3 className="mb-3 text-sm font-semibold text-white">{title}</h3>
@@ -239,19 +298,27 @@ export function Footer() {
   );
   return (
     <footer className="mt-20 bg-slate-900 text-slate-400">
+      <FeedbackDialog />
       <div className="mx-auto grid max-w-6xl gap-10 px-4 py-14 sm:grid-cols-2 lg:grid-cols-4">
         <div className="space-y-3">
           <Logo light />
           <p className="text-sm leading-relaxed">Remote jobs for Filipino professionals. Employers hire direct, with no agency markups, and workers always join free.</p>
-          <a href="mailto:hello@remotepinas.com" className="inline-block text-sm font-medium text-slate-300 hover:text-white">hello@remotepinas.com</a>
+          <a href="mailto:support@readytowork.ph" className="inline-block text-sm font-medium text-slate-300 hover:text-white">support@readytowork.ph</a>
         </div>
         {col('Find work', [['Browse remote jobs', '/jobs'], ['Full-time jobs', '/jobs?type=full-time'], ['Part-time jobs', '/jobs?type=part-time'], ['Gigs and projects', '/jobs?type=gig'], ['Create a free profile', '/register']])}
         {col('Hire talent', [['Post a job', '/jobs/new'], ['Pricing', '/pricing'], ['Sign up as an employer', '/register?role=employer']])}
-        {col('Help', [['Frequently asked questions', '/pricing#faq'], ['Contact us', 'mailto:hello@remotepinas.com']])}
+        <div>
+          {col('Help', [['Frequently asked questions', '/pricing#faq'], ['Contact us', '/contact']])}
+          <button type="button" onClick={openFeedback} className="mt-2 text-sm hover:text-white">Send feedback</button>
+        </div>
       </div>
       <div className="mx-auto flex max-w-6xl flex-wrap items-center justify-between gap-2 border-t border-slate-800 px-4 py-6 text-xs">
-        <span>© 2026 RemotePinas. All rights reserved.</span>
-        <span>Made for Filipino remote professionals</span>
+        <span>© 2026 ReadyToWork.ph. All rights reserved.</span>
+        <nav className="flex flex-wrap gap-4">
+          <Link href="/terms" className="hover:text-white">Terms</Link>
+          <Link href="/privacy" className="hover:text-white">Privacy</Link>
+          <Link href="/refunds" className="hover:text-white">Refunds</Link>
+        </nav>
       </div>
     </footer>
   );

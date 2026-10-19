@@ -1,4 +1,4 @@
-# RemotePinas
+# ReadyToWork.ph
 
 Job board connecting employers with Filipino remote workers.
 
@@ -24,6 +24,9 @@ Backend config lives in `backend/.env` (DATABASE_URL, JWT_SECRET, PORT, FRONTEND
 Frontend reads `NEXT_PUBLIC_API_URL` and `NEXT_PUBLIC_GOOGLE_CLIENT_ID` from `frontend/.env.local`.
 
 Message notification emails go through Resend when `RESEND_API_KEY` and `EMAIL_FROM` are set in `backend/.env`; without a key they are printed in the backend terminal.
+
+Paid plans are sold through Paddle (it's the seller of record and handles sales tax). Set these in `backend/.env`; until `PADDLE_CLIENT_TOKEN` and `PADDLE_API_KEY` are set, the pricing page says "email us to upgrade":
+`PADDLE_ENV` (`sandbox` or `production`), `PADDLE_API_KEY`, `PADDLE_CLIENT_TOKEN`, `PADDLE_WEBHOOK_SECRET`, and the four price IDs `PADDLE_PRICE_PRO_MONTHLY`, `PADDLE_PRICE_PRO_YEARLY`, `PADDLE_PRICE_PREMIUM_MONTHLY`, `PADDLE_PRICE_PREMIUM_YEARLY`. Paddle's webhook goes to `https://readytowork.ph/api/billing/webhook` (subscription events); it is the only thing that changes an employer's plan.
 
 Google sign-in stays hidden until the same OAuth Client ID is set in both files; restart both dev servers after changing them.
 

@@ -3,10 +3,11 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 
 process.env.DATABASE_URL = 'postgres://localhost:5432/remotepinas_test';
+delete process.env.TURNSTILE_SECRET; // tests that need the robot check switch it on themselves
 const { pool } = await import('../src/db.js');
 const { app } = await import('../src/app.js');
 
-await pool.query('DROP TABLE IF EXISTS settings, messages, applications, jobs, worker_profiles, users');
+await pool.query('DROP TABLE IF EXISTS hires, saved_workers, feedback, ai_analyses, password_resets, settings, messages, applications, jobs, worker_profiles, users');
 // Never send real email from tests, even if .env has a Resend key; tests read `sent` instead.
 const sent = [];
 app.locals.sendEmail = async (e) => { sent.push(e); };
@@ -26,13 +27,20 @@ const server = app.listen(0);
 const base = `http://localhost:${server.address().port}/api`;
 after(() => { server.close(); pool.end(); });
 
+// Logins travel as HttpOnly cookies, like in a browser. For brevity the helper hands the session
+// value back as `body.token`, and `token` sends it again as the user (and admin) cookie.
+const asCookie = (token) => ({ cookie: `rw_session=${token}; rw_admin=${token}` });
+const sessionFrom = (res) => res.headers.getSetCookie().map((c) => c.match(/^rw_(?:session|admin)=([^;]+)/)?.[1]).find(Boolean);
+
 async function call(path, { token, ...body } = {}, method = Object.keys(body).length ? 'POST' : 'GET') {
   const res = await fetch(base + path, {
     method,
-    headers: { 'content-type': 'application/json', ...(token && { authorization: `Bearer ${token}` }) },
+    headers: { 'content-type': 'application/json', ...(token && asCookie(token)) },
     body: method === 'GET' ? undefined : JSON.stringify(body),
   });
-  return { status: res.status, body: res.status === 204 ? null : await res.json() };
+  const json = res.status === 204 ? null : await res.json();
+  const session = sessionFrom(res);
+  return { status: res.status, body: session && json ? { ...json, token: session } : json };
 }
 
 test('employer posts, worker applies, permissions hold', async () => {
@@ -58,7 +66,7 @@ test('employer posts, worker applies, permissions hold', async () => {
   assert.equal((await call('/jobs/99999/apply', { token: wrk.body.token, cover_letter: 'x' })).status, 404);
 
   const apps = await call(`/jobs/${job.body.id}/applications`, { token: emp.body.token }, 'GET');
-  assert.equal(apps.body[0].name, 'Juan');
+  assert.equal(apps.body.applicants[0].name, 'Juan');
 
   const profile = { token: wrk.body.token, title: 'VA', bio: 'Admin pro', skills: ['Excel'], hourly_rate: '5', availability: 'part-time' };
   const badLink = async (extra) => (await call('/profile', { ...profile, ...extra }, 'PUT')).status;
@@ -69,7 +77,7 @@ test('employer posts, worker applies, permissions hold', async () => {
   const prof = await call('/profile', { ...profile, portfolio_url: 'juan.dev/work', linkedin_url: 'www.linkedin.com/in/juan' }, 'PUT');
   assert.deepEqual([prof.body.portfolio_url, prof.body.linkedin_url], ['https://juan.dev/work', 'https://www.linkedin.com/in/juan']);
   assert.equal(prof.status, 200);
-  assert.equal((await call('/workers?skill=excel', { token: emp.body.token }, 'GET')).body[0].name, 'Juan');
+  assert.equal((await call('/workers?skill=excel', { token: emp.body.token }, 'GET')).body.workers[0].name, 'Juan');
   assert.equal((await call('/workers?skill=excel')).status, 401); // talent isn't public
   assert.equal((await call('/workers?skill=excel', { token: wrk.body.token }, 'GET')).status, 403); // workers can't browse other workers
   const juanId = (await call('/me', { token: wrk.body.token }, 'GET')).body.id;
@@ -79,7 +87,7 @@ test('employer posts, worker applies, permissions hold', async () => {
   assert.deepEqual((await call('/stats')).body, { jobs: 1, workers: 1, employers: 1, upgraded_this_month: 0 });
 
   const other = await call('/auth/register', { email: 'other@co.com', password: 'password1', name: 'Other', role: 'employer' });
-  assert.equal((await call(`/jobs/${job.body.id}/applications`, { token: other.body.token }, 'GET')).body.length, 0);
+  assert.equal((await call(`/jobs/${job.body.id}/applications`, { token: other.body.token }, 'GET')).body.total, 0);
   assert.equal((await call(`/jobs/${job.body.id}`, { token: other.body.token }, 'DELETE')).status, 404);
   assert.equal((await call(`/jobs/${job.body.id}`, { token: emp.body.token }, 'DELETE')).status, 204);
 });
@@ -109,7 +117,7 @@ test('credits: daily budget, bidding order, validation', async () => {
   assert.deepEqual([c.used, c.remaining, c.applications], [60, 0, 3]);
   assert.ok(new Date(c.resets_at) > new Date());
 
-  const applicants = (await call(`/jobs/${j1}/applications`, { token: boss }, 'GET')).body;
+  const applicants = (await call(`/jobs/${j1}/applications`, { token: boss }, 'GET')).body.applicants;
   const mine = (await call('/my/jobs', { token: boss }, 'GET')).body.find((j) => j.id === j1);
   assert.deepEqual([mine.applicant_count, mine.new_count, mine.analyzed_count, mine.top_applicants], [2, 2, 0, ['high', 'low']]);
   assert.deepEqual(applicants.map((a) => [a.name, a.credits]), [['high', 40], ['low', 1]]);
@@ -118,7 +126,9 @@ test('credits: daily budget, bidding order, validation', async () => {
   // Daily cap on applications, since 0-credit ones cost nothing.
   const spam = await reg('spam@x.ph', 'worker');
   for (let i = 0; i < 60; i++) {
-    await pool.query("INSERT INTO applications (job_id, worker_id, cover_letter, credits) SELECT $1, id, 'x', 0 FROM users WHERE email = 'spam@x.ph'", [await newJob()]);
+    // jobs made directly: the API caps job posts per month
+    const { rows: [j] } = await pool.query("INSERT INTO jobs (employer_id, title, description, job_type) SELECT id, 'VA', 'x', 'gig' FROM users WHERE email = 'boss2@co.com' RETURNING id");
+    await pool.query("INSERT INTO applications (job_id, worker_id, cover_letter, credits) SELECT $1, id, 'x', 0 FROM users WHERE email = 'spam@x.ph'", [j.id]);
   }
   assert.equal((await apply(spam, j3, 0)).status, 429);
 });
@@ -132,6 +142,7 @@ test('messages: who can write, read tracking, one email per unread batch', async
   const maria = await reg('maria@x.ph', 'worker', 'Maria');
   const job = (await call('/jobs', { token: boss.token, title: 'Bookkeeper', description: 'x', job_type: 'gig' })).body;
   const rivalJob = (await call('/jobs', { token: rival.token, title: 'Other', description: 'x', job_type: 'gig' })).body;
+  await pool.query("UPDATE users SET plan = 'pro' WHERE id = $1", [boss.user.id]); // paid: may reach out first
   const send = (from, to, body, job_id) => call(`/messages/${to.user.id}`, { token: from.token, body, ...(job_id && { job_id }) });
   const thread = (me, other) => call(`/messages/${other.user.id}`, { token: me.token }, 'GET');
 
@@ -147,7 +158,7 @@ test('messages: who can write, read tracking, one email per unread batch', async
   await send(boss, maria, 'Are you free for a call?');
   assert.equal(emails.length, 1); // second unread message: no extra email
   assert.equal(emails[0].to, 'maria@x.ph');
-  assert.match(emails[0].text, /Acme HR sent you a message on RemotePinas about "Bookkeeper"/);
+  assert.match(emails[0].text, /Acme HR sent you a message on ReadyToWork.ph about "Bookkeeper"/);
   assert.match(emails[0].text, new RegExp(`/messages\\?with=${boss.user.id}`));
   assert.ok(emails[0].html.includes('<a href=')); // branded HTML version is sent too
   assert.ok(!/<script|<img/i.test(emails[0].html));
@@ -231,12 +242,14 @@ test('analyzer: 10 free analyses, cached results free, premium unlimited, owner 
   assert.equal(calls.length, 10); // the 11th never reached the AI
   assert.equal((await analyze(boss, appIds[3])).status, 200); // re-opening an analyzed one still works
 
-  const list = (await call(`/jobs/${job.id}/applications`, { token: boss }, 'GET')).body;
+  const list = (await call(`/jobs/${job.id}/applications`, { token: boss }, 'GET')).body.applicants;
   assert.equal(list.filter((a) => a.analysis).length, 10);
 
+  const upgraded = async () => (await call('/stats', {}, 'GET')).body.upgraded_this_month;
+  const upgradedBefore = await upgraded();
   await pool.query("UPDATE users SET plan = 'pro' WHERE email = 'ai.boss@co.com'");
   assert.equal((await call('/analyzer/usage', { token: boss }, 'GET')).body.limit, 500); // pro: bigger allowance
-  assert.equal((await call('/stats', {}, 'GET')).body.upgraded_this_month, 1); // plan change is stamped by the trigger
+  assert.equal(await upgraded(), upgradedBefore + 1); // plan change is stamped by the trigger
   await pool.query("UPDATE users SET plan = 'premium' WHERE email = 'ai.boss@co.com'");
   const premium = await analyze(boss, appIds[10]);
   assert.equal(premium.status, 200);
@@ -254,7 +267,7 @@ test('resumes: PDF only, size limit, attach on apply, private to the hiring empl
   const boss = await reg('cv.boss@co.com', 'employer');
   const rival = await reg('cv.rival@co.com', 'employer');
   const upload = (token, body, name = 'Maria CV.pdf', type = 'application/pdf') =>
-    fetch(`${base}/profile/resume`, { method: 'PUT', headers: { authorization: `Bearer ${token}`, 'content-type': type, 'x-file-name': encodeURIComponent(name) }, body })
+    fetch(`${base}/profile/resume`, { method: 'PUT', headers: { ...asCookie(token), 'content-type': type, 'x-file-name': encodeURIComponent(name) }, body })
       .then(async (r) => ({ status: r.status, body: await r.json() }));
   const pdf = (text) => Buffer.from(`%PDF-1.7\n${text}`);
 
@@ -277,7 +290,7 @@ test('resumes: PDF only, size limit, attach on apply, private to the hiring empl
   assert.equal(noCv.resume_attached, false);
 
   const view = (token, id) => call(`/applications/${id}/resume`, { token }, 'GET');
-  const listed = async () => (await call(`/jobs/${job.id}/applications`, { token: boss }, 'GET')).body[0].resume_name;
+  const listed = async () => (await call(`/jobs/${job.id}/applications`, { token: boss }, 'GET')).body.applicants[0].resume_name;
   assert.match((await view(boss, withCv.id)).body.url, new RegExp(firstKey));
   assert.equal(await listed(), '.._.._etc_Maria CV_script_.pdf');
   assert.equal((await view(boss, noCv.id)).status, 404);
@@ -354,7 +367,7 @@ test('analyzer reads resume text extracted at upload, and says when it could not
   const reg = async (email, role) => (await call('/auth/register', { email, password: 'password1', name: email, role })).body.token;
   const boss = await reg('rt.boss@co.com', 'employer');
   const job = (await call('/jobs', { token: boss, title: 'Bookkeeper', description: 'QuickBooks', job_type: 'gig' })).body;
-  const put = (token, body) => fetch(`${base}/profile/resume`, { method: 'PUT', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/pdf' }, body });
+  const put = (token, body) => fetch(`${base}/profile/resume`, { method: 'PUT', headers: { ...asCookie(token), 'content-type': 'application/pdf' }, body });
   const applyAndAnalyze = async (email, pdf, attach = true) => {
     const w = await reg(email, 'worker');
     if (pdf) assert.equal((await put(w, pdf)).status, 200);
@@ -375,7 +388,7 @@ test('analyzer reads resume text extracted at upload, and says when it could not
 test('profile photos: images only, size limit, replace deletes old, public link falls back to blank', async () => {
   const token = (await call('/auth/register', { email: 'ph.user@x.ph', password: 'password1', name: 'Pic', role: 'worker' })).body;
   const put = (body, type = 'image/jpeg') =>
-    fetch(`${base}/profile/photo`, { method: 'PUT', headers: { authorization: `Bearer ${token.token}`, 'content-type': type }, body });
+    fetch(`${base}/profile/photo`, { method: 'PUT', headers: { ...asCookie(token.token), 'content-type': type }, body });
   const view = () => fetch(`${base}/users/${token.user.id}/photo`, { redirect: 'manual' });
   const jpeg = (tag) => Buffer.concat([Buffer.from([0xff, 0xd8, 0xff, 0xe0]), Buffer.from(`jpeg body ${tag}`)]);
   const photoKeys = () => [...files.keys()].filter((k) => k.startsWith('photos/'));
@@ -394,7 +407,7 @@ test('profile photos: images only, size limit, replace deletes old, public link 
   assert.equal((await put(jpeg('v2'))).status, 200); // replace: old file deleted
   assert.equal(photoKeys().length, 1);
   assert.ok(!files.has(first));
-  assert.equal((await fetch(`${base}/profile/photo`, { method: 'DELETE', headers: { authorization: `Bearer ${token.token}` } })).status, 204);
+  assert.equal((await fetch(`${base}/profile/photo`, { method: 'DELETE', headers: { ...asCookie(token.token) } })).status, 204);
   assert.equal(photoKeys().length, 0);
   assert.equal((await view()).headers.get('content-type'), 'image/gif');
 });
@@ -429,7 +442,8 @@ test('auth rate limits: wrong passwords and sign-ups per visitor', async () => {
   app.locals.relaxedLimits = false;
   try {
     await call('/auth/register', { email: 'rl@x.ph', password: 'password1', name: 'RL', role: 'worker' });
-    for (let i = 0; i < 10; i++) assert.equal((await call('/auth/login', { email: 'rl@x.ph', password: 'wrong' })).status, 401);
+    // different emails, so this measures the per-visitor limit (one account locks after 5: tested below)
+    for (let i = 0; i < 10; i++) assert.equal((await call('/auth/login', { email: `rl.nobody${i}@x.ph`, password: 'wrong' })).status, 401);
     assert.equal((await call('/auth/login', { email: 'rl@x.ph', password: 'password1' })).status, 429); // locked even with the right password
   } finally {
     app.locals.relaxedLimits = true;
@@ -459,11 +473,483 @@ test('google sign-in: signup needs a role, links existing email, rejects bad tok
   assert.equal(ana.status, 201);
   assert.deepEqual([ana.body.user.email, ana.body.user.name, ana.body.user.role], ['ana@gmail.com', 'Ana Cruz', 'worker']);
   assert.equal((await google('good-new')).body.user.id, ana.body.user.id); // returning user, no role needed
-  assert.equal((await call('/auth/login', { email: 'ana@gmail.com', password: 'anything1' })).body.error, 'This account uses Google sign-in');
+  const asEmployer = await google('good-new', 'employer'); // same Google account, other role: no silent login
+  assert.equal(asEmployer.status, 409);
+  assert.equal(asEmployer.body.existingRole, 'worker');
+  assert.equal(asEmployer.body.token, undefined);
+  assert.equal((await google('good-new', 'worker')).body.user.id, ana.body.user.id); // same role just logs in
+  assert.equal((await call('/auth/login', { email: 'ana@gmail.com', password: 'anything1' })).body.code, 'google_account');
 
   const juan = await google('good-existing'); // password account with same email gets linked
   assert.equal(sent.length, 1); // returning/linked users: no welcome email
   assert.equal(juan.status, 200);
   assert.equal(juan.body.user.role, 'worker');
   assert.equal((await call('/auth/login', { email: 'juan@x.ph', password: 'password1' })).status, 200);
+});
+
+test('security: only Cloudflare may call the API, per-visitor and per-user limits, bad JSON is a 400', async () => {
+  const raw = (path, headers = {}, init = {}) => fetch(base + path, { headers, ...init });
+  process.env.ORIGIN_SECRET = 'test-origin-secret';
+  try {
+    assert.equal((await raw('/stats')).status, 403); // straight to Cloud Run
+    assert.equal((await raw('/stats', { 'x-origin-secret': 'guess' })).status, 403);
+    assert.equal((await raw('/stats', { 'x-origin-secret': 'test-origin-secret' })).status, 200);
+  } finally {
+    delete process.env.ORIGIN_SECRET;
+  }
+
+  const broken = await raw('/auth/login', { 'content-type': 'application/json' }, { method: 'POST', body: '{nope' });
+  assert.equal(broken.status, 400);
+
+  app.locals.relaxedLimits = false;
+  try {
+    // Each visitor (Cloudflare's address header) gets its own 300-a-minute budget.
+    process.env.ORIGIN_SECRET = 's';
+    const as = (ip) => raw('/settings', { 'x-origin-secret': 's', 'x-visitor-ip': ip });
+    for (let i = 0; i < 300; i++) await as('9.9.9.9');
+    assert.equal((await as('9.9.9.9')).status, 429);
+    assert.equal((await as('8.8.8.8')).status, 200);
+  } finally {
+    delete process.env.ORIGIN_SECRET;
+    app.locals.relaxedLimits = true;
+  }
+});
+
+test('admin dashboard stats: counts, activity and country (no IPs)', async () => {
+  const { signAdminToken } = await import('../src/auth.js');
+  const admin = signAdminToken();
+  const w = (await call('/auth/register', { email: 'stats.w@x.ph', password: 'password1', name: 'Stat W', role: 'worker' })).body.token;
+  assert.equal((await call('/admin/stats', { token: w }, 'GET')).status, 401); // users can't see it
+
+  // A signed-in request records last activity and Cloudflare's country code.
+  await fetch(`${base}/me`, { headers: { ...asCookie(w), 'cf-ipcountry': 'PH' } });
+  await new Promise((r) => setTimeout(r, 100)); // the write happens after the response
+  const { status, body } = await call('/admin/stats', { token: admin }, 'GET');
+  assert.equal(status, 200);
+  assert.ok(body.totals.users >= 1 && body.totals.workers >= 1 && body.totals.active_now >= 1);
+  assert.equal(body.signups.length, 30);
+  assert.ok(body.countries.some((c) => c.country === 'PH'));
+  assert.ok(body.recent.length && body.recent.every((u) => !('email' in u))); // no emails in the dashboard data
+});
+
+test('login says what went wrong; forgot password sends a one-time, expiring link', async () => {
+  await call('/auth/register', { email: 'forgot@x.ph', password: 'password1', name: 'Forgetful', role: 'worker' });
+  const wrong = await call('/auth/login', { email: 'forgot@x.ph', password: 'nope-nope' });
+  assert.deepEqual([wrong.status, wrong.body.code, typeof wrong.body.attemptsLeft], [401, 'wrong_password', 'number']);
+  assert.equal((await call('/auth/login', { email: 'nobody@x.ph', password: 'whatever1' })).body.code, 'no_account');
+
+  sent.length = 0;
+  app.locals.sendEmail = async (e) => { sent.push(e); };
+  assert.equal((await call('/auth/forgot', { email: 'nobody@x.ph' })).status, 200); // same answer, no email
+  assert.equal(sent.length, 0);
+  assert.equal((await call('/auth/forgot', { email: 'Forgot@X.ph' })).status, 200);
+  assert.equal(sent.length, 1);
+  // (call() treats a `token` field as the login token, so reset requests are sent directly)
+  const reset = async (token, password) => {
+    const res = await fetch(`${base}/auth/reset`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ token, password }) });
+    return { status: res.status, body: await res.json() };
+  };
+  const token = sent[0].text.match(/reset-password\?token=([\w-]+)/)[1];
+  const { rows } = await pool.query('SELECT token_hash FROM password_resets');
+  assert.ok(rows.every((r) => r.token_hash !== token)); // only a hash is stored
+
+  assert.equal((await reset(token, 'short')).status, 400);
+  const done = await reset(token, 'brand-new-pass');
+  assert.equal(done.status, 200);
+  assert.equal(done.body.user.email, 'forgot@x.ph');
+  assert.equal((await reset(token, 'another-pass')).body.code, 'invalid_link'); // one use only
+  assert.equal((await call('/auth/login', { email: 'forgot@x.ph', password: 'brand-new-pass' })).status, 200);
+  assert.equal((await call('/auth/login', { email: 'forgot@x.ph', password: 'password1' })).status, 401);
+
+  await pool.query(`UPDATE password_resets SET expires_at = now() - interval '1 minute'`);
+  await call('/auth/forgot', { email: 'forgot@x.ph' });
+  const late = sent.at(-1).text.match(/reset-password\?token=([\w-]+)/)[1];
+  await pool.query(`UPDATE password_resets SET expires_at = now() - interval '1 minute'`);
+  assert.equal((await reset(late, 'too-late-pass')).body.code, 'invalid_link'); // expired
+});
+
+test('emails in job posts are hidden from visitors, shown to signed-in members', async () => {
+  const boss = (await call('/auth/register', { email: 'mask.boss@co.com', password: 'password1', name: 'Mask Co', role: 'employer' })).body.token;
+  const job = (await call('/jobs', { token: boss, title: 'VA (apply: hr@maskco.com.ph)', description: 'Send your CV to Jobs.Team+va@mask-co.com or HR@maskco.com.ph today. Not an email: 5 @ 10am.', job_type: 'gig' })).body;
+  const visitor = (await call(`/jobs/${job.id}`)).body;
+  assert.ok(!/@mask/i.test(visitor.title + visitor.description));
+  assert.equal(visitor.description, 'Send your CV to [email hidden, log in to see it] or [email hidden, log in to see it] today. Not an email: 5 @ 10am.');
+  assert.ok(!(await call('/jobs')).body.some((j) => /@mask/i.test(j.description + j.title))); // the list too
+  const member = (await call(`/jobs/${job.id}`, { token: boss }, 'GET')).body;
+  assert.match(member.description, /Jobs\.Team\+va@mask-co\.com/);
+});
+
+test('logins are HttpOnly SameSite=Strict cookies; tokens never reach page scripts', async () => {
+  const res = await fetch(`${base}/auth/register`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ email: 'cookie@x.ph', password: 'password1', name: 'Cookie', role: 'worker' }),
+  });
+  const body = await res.json();
+  assert.equal(body.token, undefined); // nothing for JavaScript to steal
+  const cookie = res.headers.getSetCookie().find((c) => c.startsWith('rw_session='));
+  assert.match(cookie, /HttpOnly/i);
+  assert.match(cookie, /SameSite=Strict/i);
+  assert.match(cookie, /Path=\/api/);
+  const token = cookie.match(/^rw_session=([^;]+)/)[1];
+
+  assert.equal((await call('/me', { token }, 'GET')).status, 200);
+  const bearer = await fetch(`${base}/me`, { headers: { authorization: `Bearer ${token}` } });
+  assert.equal(bearer.status, 401); // the old header style doesn't work any more
+
+  const out = await fetch(`${base}/auth/logout`, { method: 'POST', headers: asCookie(token) });
+  assert.equal(out.status, 204);
+  assert.match(out.headers.getSetCookie().join(), /rw_session=;/); // cookie cleared
+});
+
+test('sitemap lists open jobs only', async () => {
+  const boss = (await call('/auth/register', { email: 'sm.boss@co.com', password: 'password1', name: 'SM', role: 'employer' })).body.token;
+  const open = (await call('/jobs', { token: boss, title: 'Open one', description: 'x', job_type: 'gig' })).body;
+  const shut = (await call('/jobs', { token: boss, title: 'Closed one', description: 'x', job_type: 'gig' })).body;
+  await call(`/jobs/${shut.id}/closed`, { token: boss, closed: true }, 'PUT');
+  const ids = (await call('/jobs/sitemap')).body.map((j) => j.id);
+  assert.ok(ids.includes(open.id) && !ids.includes(shut.id));
+});
+
+test('Paddle webhook switches plans, and only when signed', async () => {
+  const { createHmac } = await import('node:crypto');
+  Object.assign(process.env, { PADDLE_WEBHOOK_SECRET: 'whsec', PADDLE_PRICE_PRO_MONTHLY: 'pri_pro', PADDLE_PRICE_PREMIUM_YEARLY: 'pri_prem' });
+  const boss = await call('/auth/register', { email: 'paying@co.com', password: 'password1', name: 'Payer', role: 'employer' });
+  const id = boss.body.user.id;
+  const send = async (sub, { secret = 'whsec', ts = Math.floor(Date.now() / 1000) } = {}) => {
+    const body = JSON.stringify({ event_type: 'subscription.updated', data: { customer_id: 'ctm_1', custom_data: { user_id: String(id) }, ...sub } });
+    const h1 = createHmac('sha256', secret).update(`${ts}:${body}`).digest('hex');
+    return (await fetch(`${base}/billing/webhook`, { method: 'POST', headers: { 'content-type': 'application/json', 'paddle-signature': `ts=${ts};h1=${h1}` }, body })).status;
+  };
+  const plan = async () => (await pool.query('SELECT plan FROM users WHERE id = $1', [id])).rows[0].plan;
+  const sub = (status, price, updated_at, subId = 'sub_1') => ({ id: subId, status, updated_at, items: [{ price: { id: price } }] });
+
+  assert.equal(await send(sub('active', 'pri_pro', '2026-01-01T00:00:00Z'), { secret: 'wrong' }), 401);
+  assert.equal(await send(sub('active', 'pri_pro', '2026-01-01T00:00:00Z'), { ts: 1 }), 401); // too old to trust
+  assert.equal(await plan(), 'free');
+
+  assert.equal(await send(sub('active', 'pri_pro', '2026-01-01T00:00:00Z')), 204);
+  assert.equal(await plan(), 'pro');
+  assert.equal(await send(sub('active', 'pri_prem', '2026-01-03T00:00:00Z')), 204);
+  assert.equal(await plan(), 'premium');
+  await send(sub('active', 'pri_pro', '2026-01-02T00:00:00Z')); // late, older event is ignored
+  assert.equal(await plan(), 'premium');
+  await send(sub('canceled', 'pri_prem', '2026-01-04T00:00:00Z', 'sub_other')); // not their subscription
+  assert.equal(await plan(), 'premium');
+  assert.equal(await send(sub('active', 'pri_unknown', '2026-01-05T00:00:00Z')), 500); // misconfigured: Paddle retries
+  const stranger = { ...sub('active', 'pri_unknown', '2026-01-05T00:00:00Z', 'sub_sample'), custom_data: null };
+  assert.equal(await send(stranger), 204); // not one of our accounts (e.g. a Paddle simulation): ignored
+  await send(sub('canceled', 'pri_prem', '2026-01-06T00:00:00Z'));
+  assert.equal(await plan(), 'free');
+});
+
+test('plan limits: job posts per month, visible applicants, outreach, monthly AI analyses', async () => {
+  const reg = async (email, role) => (await call('/auth/register', { email, password: 'password1', name: email.split('@')[0], role })).body;
+  const boss = await reg('limits@co.com', 'employer');
+  const setPlan = (plan) => pool.query('UPDATE users SET plan = $1 WHERE id = $2', [plan, boss.user.id]);
+  const post = () => call('/jobs', { token: boss.token, title: 'VA', description: 'x', job_type: 'gig' });
+
+  // Free: 3 job posts a month; last month's posts don't count.
+  const jobs = [(await post()).body.id, (await post()).body.id, (await post()).body.id];
+  const fourth = await post();
+  assert.equal(fourth.status, 402);
+  assert.match(fourth.body.error, /3 jobs this month.*Upgrade to Pro/);
+  assert.equal((await call('/my/job-quota', { token: boss.token }, 'GET')).body.remaining, 0);
+  await pool.query("UPDATE jobs SET created_at = now() - interval '40 days' WHERE id = $1", [jobs[0]]);
+  assert.equal((await post()).status, 201);
+
+  // Everyone can apply; Free sees the top 20 (most Credits first), the rest wait behind an upgrade.
+  const { rows: workers } = await pool.query(
+    "INSERT INTO users (email, name, role) SELECT 'lw' || i || '@x.ph', 'Worker ' || i, 'worker' FROM generate_series(1, 25) i RETURNING id");
+  for (const [i, w] of workers.entries())
+    await pool.query("INSERT INTO applications (job_id, worker_id, cover_letter, credits) VALUES ($1, $2, 'hi', $3)", [jobs[1], w.id, i === 24 ? 50 : 1]);
+  const list = (await call(`/jobs/${jobs[1]}/applications`, { token: boss.token }, 'GET')).body;
+  assert.deepEqual([list.applicants.length, list.total, list.limit, list.plan], [20, 25, 20, 'free']);
+  assert.equal(list.applicants[0].name, 'Worker 25'); // highest bid is seen first, even though it came last
+  const { rows: [hidden] } = await pool.query('SELECT id FROM applications WHERE job_id = $1 AND worker_id = $2', [jobs[1], workers[23].id]);
+  app.locals.analyzeApplication = async () => ({ score: 70, verdict: 'ok', strengths: [], concerns: [] });
+  assert.equal((await call(`/applications/${hidden.id}/analyze`, { token: boss.token }, 'POST')).status, 402);
+  await pool.query("INSERT INTO worker_profiles (user_id, resume_key, resume_name) VALUES ($1, 'k', 'cv.pdf')", [workers[23].id]);
+  await pool.query('UPDATE applications SET resume_attached = true WHERE id = $1', [hidden.id]);
+  assert.equal((await call(`/applications/${hidden.id}/resume`, { token: boss.token }, 'GET')).status, 402);
+  await setPlan('premium');
+  assert.equal((await call(`/jobs/${jobs[1]}/applications`, { token: boss.token }, 'GET')).body.applicants.length, 25);
+  await setPlan('free');
+
+  // Free employers can message applicants, not cold-message other workers; paid plans can.
+  const stranger = await reg('stranger@x.ph', 'worker');
+  const msg = (to) => call(`/messages/${to}`, { token: boss.token, body: 'Hi!' });
+  assert.equal((await msg(workers[0].id)).status, 201);
+  const cold = await msg(stranger.user.id);
+  assert.equal(cold.status, 403);
+  assert.equal(cold.body.upgrade, true);
+  await setPlan('pro');
+  assert.equal((await msg(stranger.user.id)).status, 201);
+
+  // AI analyses count per calendar month: last month's don't use this month's allowance.
+  await setPlan('free');
+  const { rows: [first] } = await pool.query('SELECT id FROM applications WHERE job_id = $1 ORDER BY credits DESC LIMIT 1', [jobs[1]]);
+  assert.equal((await call(`/applications/${first.id}/analyze`, { token: boss.token }, 'POST')).body.usage.used, 1);
+  await pool.query("UPDATE ai_analyses SET created_at = now() - interval '40 days' WHERE application_id = $1", [first.id]);
+  assert.equal((await call('/analyzer/usage', { token: boss.token }, 'GET')).body.used, 0);
+});
+
+test('hiring analytics: Premium only, filters by period and job, funnel, fit mix, best candidates', async () => {
+  const reg = async (email, role) => (await call('/auth/register', { email, password: 'password1', name: email.split('@')[0], role })).body;
+  const boss = await reg('stats.boss@co.com', 'employer');
+  const [a, b, c] = [await reg('stats.a@x.ph', 'worker'), await reg('stats.b@x.ph', 'worker'), await reg('stats.c@x.ph', 'worker')];
+  const post = async (title) => (await pool.query("INSERT INTO jobs (employer_id, title, description, job_type) VALUES ($1, $2, 'x', 'gig') RETURNING id", [boss.user.id, title])).rows[0].id;
+  const [editor, va] = [await post('Editor'), await post('VA')];
+  const apply = (job, w, credits, score, ago = 0) => pool.query(
+    `INSERT INTO applications (job_id, worker_id, cover_letter, credits, analysis, created_at) VALUES ($1, $2, 'hi', $3, $4, now() - $5 * interval '1 day')`,
+    [job, w.user.id, credits, score == null ? null : { score }, ago]);
+  await apply(editor, a, 5, 90); await apply(editor, b, 1, 50); await apply(va, c, 20, 70);
+  await apply(va, a, 0, null, 45); // older than 30 days
+  await call(`/messages/${a.user.id}`, { token: boss.token, body: 'Hi!' }); // boss is Free but a applied: allowed
+  await call(`/messages/${boss.user.id}`, { token: a.token, body: 'Hello!' });
+
+  const get = (q = '') => call(`/analytics${q}`, { token: boss.token }, 'GET');
+  assert.equal((await get()).status, 402);
+  await pool.query("UPDATE users SET plan = 'premium' WHERE id = $1", [boss.user.id]);
+
+  const all = (await get()).body;
+  assert.deepEqual([all.days, all.unit, all.chart.length], [30, 'day', 30]);
+  assert.deepEqual(all.funnel, { applied: 3, scored: 3, messaged: 1, replied: 1 });
+  assert.deepEqual(all.mix, { strong: 1, good: 1, partial: 1, poor: 0 });
+  assert.equal(all.tiles.avg_score, 70);
+  assert.equal(all.chart.at(-1).applicants, 3); // today
+  assert.deepEqual(all.candidates.map((x) => x.name), ['stats.c', 'stats.b']); // a was messaged; best fit first
+  assert.deepEqual(all.jobs.map((j) => [j.title, j.applicants, j.trend.length]), [['VA', 1, 12], ['Editor', 2, 12]]);
+
+  assert.equal((await get('?days=90')).body.funnel.applied, 4); // the older application counts
+  assert.equal((await get('?days=90')).body.unit, 'week');
+  const one = (await get(`?job=${editor}`)).body;
+  assert.deepEqual([one.funnel.applied, one.candidates.length, one.jobs.length], [2, 1, 2]); // the job list stays whole for the picker
+  assert.equal((await get('?job=999999')).status, 404);
+});
+
+test('job title and description: too long is a clear error, not a silent cut', async () => {
+  const boss = (await call('/auth/register', { email: 'long.post@co.com', password: 'password1', name: 'Long', role: 'employer' })).body.token;
+  const post = (fields) => call('/jobs', { token: boss, title: 'VA', description: 'x', job_type: 'gig', ...fields });
+  assert.match((await post({ title: 'a'.repeat(121) })).body.error, /title is too long/);
+  assert.match((await post({ description: 'a'.repeat(10_001) })).body.error, /too long \(max 10,000/);
+  const ok = await post({ title: 'a'.repeat(120), description: 'a'.repeat(10_000), skills: ['s'.repeat(80)] });
+  assert.equal(ok.status, 201);
+  assert.equal(ok.body.description.length, 10_000);
+  assert.equal(ok.body.skills[0].length, 50);
+});
+
+test('Premium AI analyses: unlimited up to the monthly fair-use ceiling', async () => {
+  const { PREMIUM_FAIR_USE } = await import('../src/app.js');
+  const boss = (await call('/auth/register', { email: 'fair.use@co.com', password: 'password1', name: 'Fair', role: 'employer' })).body;
+  await pool.query("UPDATE users SET plan = 'premium' WHERE id = $1", [boss.user.id]);
+  const { rows: [job] } = await pool.query("INSERT INTO jobs (employer_id, title, description, job_type) VALUES ($1, 'VA', 'x', 'gig') RETURNING id", [boss.user.id]);
+  // PREMIUM_FAIR_USE analyses already made this month, plus one fresh applicant
+  await pool.query(
+    `WITH w AS (INSERT INTO users (email, name, role) VALUES ('fu@x.ph', 'W', 'worker') RETURNING id)
+     INSERT INTO applications (job_id, worker_id, cover_letter) SELECT $1, id, 'hi' FROM w`, [job.id]);
+  await pool.query('INSERT INTO ai_analyses (employer_id) SELECT $1 FROM generate_series(1, $2::int)', [boss.user.id, PREMIUM_FAIR_USE]);
+  const usage = (await call('/analyzer/usage', { token: boss.token }, 'GET')).body;
+  assert.deepEqual([usage.limit, usage.remaining, usage.used], [null, 0, PREMIUM_FAIR_USE]);
+  const { rows: [fresh] } = await pool.query('SELECT id FROM applications WHERE job_id = $1 AND analysis IS NULL', [job.id]);
+  const blocked = await call(`/applications/${fresh.id}/analyze`, { token: boss.token }, 'POST');
+  assert.equal(blocked.status, 402);
+  assert.match(blocked.body.error, /fair-use limit of 10,000/);
+});
+
+test('re-analyze: a fresh AI look on demand, and each run uses one from the allowance', async () => {
+  const reg = async (email, role) => (await call('/auth/register', { email, password: 'password1', name: email.split('@')[0], role })).body.token;
+  const boss = await reg('again.boss@co.com', 'employer');
+  const worker = await reg('again.w@x.ph', 'worker');
+  const job = (await call('/jobs', { token: boss, title: 'VA', description: 'x', job_type: 'gig' })).body;
+  const appId = (await call(`/jobs/${job.id}/apply`, { token: worker, cover_letter: 'hi' })).body.id;
+  let score = 60;
+  app.locals.analyzeApplication = async () => ({ score: score++, verdict: 'ok', strengths: [], concerns: [] });
+  const analyze = (body) => call(`/applications/${appId}/analyze`, { token: boss, ...body }, 'POST');
+
+  const first = (await analyze()).body;
+  assert.deepEqual([first.analysis.score, first.usage.used], [60, 1]);
+  assert.deepEqual([(await analyze()).body.analysis.score, (await analyze()).body.usage.used], [60, 1]); // saved result: free
+  const again = (await analyze({ again: true })).body;
+  assert.deepEqual([again.analysis.score, again.usage.used], [61, 2]); // fresh look, counted
+});
+
+test('feedback: anyone can send it, support gets an email, the admin reads it and marks it done', async () => {
+  app.locals.sendEmail = async (e) => { sent.push(e); };
+  const user = await call('/auth/register', { email: 'fb.user@co.com', password: 'password1', name: 'Fiona', role: 'employer' });
+  await new Promise((r) => setImmediate(r));
+  sent.length = 0; // drop the welcome email
+  const send = (body, token) => call('/feedback', { ...(token && { token }), ...body });
+
+  assert.equal((await send({ type: 'nope', message: 'x' })).status, 400);
+  assert.equal((await send({ type: 'idea', message: '   ' })).status, 400);
+  assert.equal((await send({ type: 'idea', message: 'a'.repeat(2001) })).status, 400);
+  assert.equal((await send({ type: 'idea', message: 'hi', email: 'not an email' })).status, 400);
+  assert.equal((await send({ type: 'bug', message: 'Score all froze', page: '/dashboard/jobs/3', contact_ok: true }, user.body.token)).status, 201);
+  assert.equal((await send({ type: 'idea', message: 'Dark mode please', email: 'guest@mail.ph' })).status, 201);
+  await new Promise((r) => setImmediate(r));
+  assert.equal(sent.length, 2);
+  assert.equal(sent[0].to, 'support@readytowork.ph');
+  assert.match(sent[0].text, /Something broke from Fiona <fb.user@co.com> \(employer, free\)/);
+
+  const { signAdminToken } = await import('../src/auth.js');
+  const adminToken = signAdminToken();
+  const list = (await call('/admin/feedback', { token: adminToken }, 'GET')).body;
+  assert.deepEqual(list.map((f) => [f.type, f.email]), [['idea', 'guest@mail.ph'], ['bug', 'fb.user@co.com']]);
+  assert.equal((await call(`/admin/feedback/${list[1].id}`, { token: adminToken, done: true }, 'PUT')).status, 204);
+  assert.ok((await call('/admin/feedback', { token: adminToken }, 'GET')).body.at(-1).done_at);
+  assert.equal((await call('/admin/feedback', { token: user.body.token }, 'GET')).status, 401);
+});
+
+test('admin: users, jobs and subscriptions pages; close a job; admin only', async () => {
+  const { signAdminToken } = await import('../src/auth.js');
+  const admin = signAdminToken();
+  const reg = async (email, role, name) => (await call('/auth/register', { email, password: 'password1', name, role })).body;
+  const boss = await reg('adm.boss@acme.ph', 'employer', 'Adm Boss');
+  await reg('adm.worker@x.ph', 'worker', 'Adm Worker');
+  const job = (await call('/jobs', { token: boss.token, title: 'Spammy 100% legit job', description: 'x', job_type: 'gig' })).body;
+
+  const users = (await call('/admin/users?q=adm.boss%40acme&role=employer', { token: admin }, 'GET')).body;
+  assert.deepEqual([users.total, users.users[0].email, users.users[0].jobs], [1, 'adm.boss@acme.ph', 1]);
+  assert.equal((await call('/admin/users?q=100%', { token: admin }, 'GET')).body.total, 0); // % is searched literally
+  assert.equal((await call('/admin/users', { token: boss.token }, 'GET')).status, 401);
+
+  const jobs = (await call('/admin/jobs?q=100%25', { token: admin }, 'GET')).body;
+  assert.deepEqual([jobs.total, jobs.jobs[0].title, jobs.jobs[0].employer_name], [1, 'Spammy 100% legit job', 'Adm Boss']);
+  assert.equal((await call(`/admin/jobs/${job.id}/closed`, { token: admin, closed: true }, 'PUT')).status, 204);
+  assert.equal((await call('/admin/jobs?q=Spammy&status=open', { token: admin }, 'GET')).body.total, 0);
+  assert.equal((await call(`/jobs/${job.id}/apply`, { token: (await reg('adm.w2@x.ph', 'worker', 'W2')).token, cover_letter: 'hi' })).status, 409);
+
+  const key = process.env.PADDLE_API_KEY;
+  delete process.env.PADDLE_API_KEY; // never call Paddle from tests
+  await pool.query("UPDATE users SET plan = 'premium' WHERE id = $1", [boss.user.id]);
+  const subs = (await call('/admin/subscriptions', { token: admin }, 'GET')).body;
+  process.env.PADDLE_API_KEY = key ?? '';
+  const mine = subs.subscriptions.find((x) => x.email === 'adm.boss@acme.ph');
+  assert.deepEqual([mine.plan, mine.source], ['premium', 'manual']);
+  assert.ok(subs.totals.premium >= 1 && subs.totals.manual >= 1);
+});
+
+test('worker privacy: free employers see "Maria S." and no links until they may contact the worker', async () => {
+  const reg = async (email, role, name) => (await call('/auth/register', { email, password: 'password1', name, role })).body;
+  const boss = await reg('priv.boss@co.com', 'employer', 'Priv Boss');
+  const maria = await reg('priv.maria@x.ph', 'worker', 'Maria Clara Santos');
+  const bio = 'QuickBooks pro using Node.js. Portfolio: mariasantos.com/work, email maria@gmail.com, call +63 917 123 4567 or @maria_books';
+  await call('/profile', { token: maria.token, title: 'Bookkeeper', bio, skills: ['quickbooks'], availability: 'full-time', linkedin_url: 'linkedin.com/in/mariasantos' }, 'PUT');
+  const view = async () => (await call(`/workers/${maria.user.id}`, { token: boss.token }, 'GET')).body;
+
+  let w = await view();
+  assert.deepEqual([w.name, w.linkedin_url, w.limited], ['Maria S.', null, true]);
+  const { HIDDEN } = await import('../src/app.js');
+  assert.equal(w.bio, `QuickBooks pro using Node.js. Portfolio: ${HIDDEN}, email ${HIDDEN}, call ${HIDDEN} or ${HIDDEN}`); // Node.js stays
+  const { hideContacts } = await import('../src/app.js');
+  assert.equal(hideContacts('email me at @juan.cruz@gmail.com'), `email me at @${HIDDEN}`); // one email, not a handle plus a site
+  assert.equal((await call('/workers?q=QuickBooks', { token: boss.token }, 'GET')).body.workers.find((x) => x.id === maria.user.id).name, 'Maria S.');
+  assert.equal((await call(`/workers/${maria.user.id}`, { token: maria.token }, 'GET')).body.name, 'Maria Clara Santos'); // her own profile
+
+  const job = (await call('/jobs', { token: boss.token, title: 'Bookkeeper', description: 'x', job_type: 'gig' })).body;
+  await call(`/jobs/${job.id}/apply`, { token: maria.token, cover_letter: 'Hi' });
+  w = await view();
+  assert.deepEqual([w.name, w.linkedin_url, w.limited, w.bio], ['Maria Clara Santos', 'https://linkedin.com/in/mariasantos', undefined, bio]); // she applied
+
+  const other = await reg('priv.pro@co.com', 'employer', 'Pro Co');
+  await pool.query("UPDATE users SET plan = 'pro' WHERE id = $1", [other.user.id]);
+  assert.equal((await call(`/workers/${maria.user.id}`, { token: other.token }, 'GET')).body.name, 'Maria Clara Santos'); // paid plan
+});
+
+test('contact form and robot check: support requests reach the inbox; bots are turned away', async () => {
+  app.locals.sendEmail = async (e) => { sent.push(e); };
+  sent.length = 0;
+  const msg = { name: 'Ana', email: 'ana@shop.ph', subject: 'Refund question', message: 'How do refunds work?' };
+  assert.equal((await call('/contact', { ...msg, email: 'nope' })).status, 400);
+  assert.equal((await call('/contact', { ...msg, message: 'hi' })).status, 400);
+  assert.equal((await call('/contact', msg)).status, 201); // no TURNSTILE_SECRET in tests: check skipped
+  await new Promise((r) => setImmediate(r));
+  assert.deepEqual([sent[0].to, sent[0].replyTo, sent[0].subject], ['support@readytowork.ph', 'ana@shop.ph', `Support #${(await pool.query("SELECT id FROM feedback WHERE subject = 'Refund question'")).rows[0].id}: Refund question`]);
+
+  process.env.TURNSTILE_SECRET = 'test-secret'; // now a token is required
+  try {
+    const robot = await call('/contact', msg);
+    assert.deepEqual([robot.status, robot.body.code], [400, 'robot_check']);
+    assert.equal((await call('/auth/register', { email: 'bot@x.ph', password: 'password1', name: 'Bot', role: 'worker' })).body.code, 'robot_check');
+    assert.equal((await call('/auth/forgot', { email: 'bot@x.ph' })).body.code, 'robot_check');
+  } finally {
+    delete process.env.TURNSTILE_SECRET;
+  }
+});
+
+test('Hire Talent: filters, sort, pages; save workers; mark as hired', async () => {
+  const reg = async (email, role, name) => (await call('/auth/register', { email, password: 'password1', name, role })).body;
+  const boss = await reg('r1.boss@co.com', 'employer', 'R1 Boss');
+  const mk = async (n, profile, seenDaysAgo) => {
+    const w = await reg(`r1.w${n}@x.ph`, 'worker', `Worker${n} Cruz`);
+    await call('/profile', { token: w.token, bio: 'x', ...profile }, 'PUT');
+    await pool.query("UPDATE users SET last_seen_at = now() - $2 * interval '1 day' WHERE id = $1", [w.user.id, seenDaysAgo]);
+    return w;
+  };
+  const a = await mk(1, { title: 'Zebra Bookkeeper', skills: ['zebrabooks', 'excel'], availability: 'full-time', hourly_rate: '8' }, 0);
+  const b = await mk(2, { title: 'Zebra VA', skills: ['zebrabooks'], availability: 'part-time', hourly_rate: '4' }, 3);
+  const c = await mk(3, { title: 'Writer', bio: 'I love zebra stories', skills: ['writing'], availability: 'gig', hourly_rate: '12' }, 60);
+  const find = async (qs) => (await call(`/workers?${qs}`, { token: boss.token }, 'GET')).body;
+  const ids = (r) => r.workers.map((w) => w.id);
+
+  assert.deepEqual(ids(await find('q=zebra')), [a.user.id, b.user.id, c.user.id]); // title matches first, then most recently active
+  assert.deepEqual(ids(await find('skills=zebrabooks,excel')), [a.user.id]);
+  assert.deepEqual(ids(await find('q=zebra&availability=part-time')), [b.user.id]);
+  assert.deepEqual(ids(await find('q=zebra&rate_min=5&rate_max=10')), [a.user.id]);
+  assert.deepEqual(ids(await find('q=zebra&active=7')), [a.user.id, b.user.id]);
+  assert.deepEqual(ids(await find('q=zebra&sort=rate')), [b.user.id, a.user.id, c.user.id]);
+  assert.equal((await find('q=Cruz')).total, 0); // names aren't searchable
+  const page2 = await find('q=zebra&page=1');
+  assert.deepEqual([page2.total, page2.workers.length], [3, 0]);
+
+  assert.equal((await call(`/saved/${b.user.id}`, { token: boss.token }, 'PUT')).status, 204);
+  assert.equal((await find('q=zebra')).workers.find((w) => w.id === b.user.id).saved, true);
+  assert.deepEqual((await call('/saved', { token: boss.token }, 'GET')).body.map((w) => [w.id, w.name]), [[b.user.id, 'Worker2 C.']]);
+  assert.equal((await call(`/workers/${b.user.id}`, { token: boss.token }, 'GET')).body.saved, true);
+  assert.equal((await call(`/saved/${b.user.id}`, { token: boss.token }, 'DELETE')).status, 204);
+  assert.equal((await call('/saved', { token: boss.token }, 'GET')).body.length, 0);
+  assert.equal((await call(`/saved/${boss.user.id}`, { token: boss.token }, 'PUT')).status, 404); // only workers
+
+  assert.equal((await call(`/hires/${a.user.id}`, { token: boss.token }, 'PUT')).status, 403); // no relationship yet
+  const job = (await call('/jobs', { token: boss.token, title: 'Books', description: 'x', job_type: 'gig' })).body;
+  await call(`/jobs/${job.id}/apply`, { token: a.token, cover_letter: 'hi' });
+  assert.equal((await call(`/hires/${a.user.id}`, { token: boss.token, job_id: job.id }, 'PUT')).status, 204);
+  const hires = (await call('/my/hires', { token: boss.token }, 'GET')).body;
+  assert.deepEqual(hires.map((h) => [h.name, h.job_title]), [['Worker1 Cruz', 'Books']]);
+  assert.ok((await call(`/workers/${a.user.id}`, { token: boss.token }, 'GET')).body.hired_at);
+});
+
+test('login protection: 5 wrong passwords pause the account for 15 minutes, email the owner; reset lifts it', async () => {
+  app.locals.relaxedLimits = true; // the per-visitor limit is tested elsewhere; this is the per-account one
+  app.locals.sendEmail = async (e) => { sent.push(e); };
+  await call('/auth/register', { email: 'lock.me@x.ph', password: 'password1', name: 'Lock Me', role: 'worker' });
+  sent.length = 0;
+  const login = (password) => call('/auth/login', { email: 'lock.me@x.ph', password });
+  for (let i = 1; i <= 4; i++) {
+    const r = await login('wrong-pass');
+    assert.deepEqual([r.status, r.body.code], [401, 'wrong_password']);
+    assert.equal(r.body.attemptsLeft, 5 - i); // tries left on this account
+    if (i >= 2) assert.equal(r.body.robotCheck, true); // from the 2nd miss, the next try needs the robot check
+  }
+  const locked = await login('wrong-pass');
+  assert.deepEqual([locked.status, locked.body.code], [429, 'locked']);
+  assert.equal((await login('password1')).status, 429); // even the right password waits
+  await new Promise((r) => setImmediate(r));
+  assert.match(sent.at(-1).subject, /Someone tried to log in/);
+
+  process.env.TURNSTILE_SECRET = 'test-secret';
+  await pool.query("UPDATE users SET login_locked_until = NULL, failed_logins = 2, failed_login_at = now() WHERE email = 'lock.me@x.ph'");
+  try {
+    assert.equal((await login('password1')).body.code, 'robot_check'); // 2 recent misses: robot check needed
+  } finally { delete process.env.TURNSTILE_SECRET; }
+
+  await pool.query("UPDATE users SET login_locked_until = now() + interval '15 minutes' WHERE email = 'lock.me@x.ph'");
+  await call('/auth/forgot', { email: 'lock.me@x.ph' });
+  await new Promise((r) => setImmediate(r)); // the email goes out in the background
+  const token = sent.at(-1).text.match(/token=([\w-]+)/)?.[1];
+  assert.ok(token, 'reset link sent');
+  // (the call() helper treats a "token" field as the login cookie, so send this one directly)
+  const reset = await fetch(`${base}/auth/reset`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ token, password: 'password2' }) });
+  assert.equal(reset.status, 200);
+  assert.equal((await login('password2')).status, 200); // a new password ends the pause
 });

@@ -62,7 +62,7 @@ export default function MessagesPage() {
 }
 
 function ThreadView({ otherId, jobId, myId, onSent }: { otherId: string; jobId: string | null; myId: number; onSent: () => void }) {
-  const { data: thread, error, reload } = useApi<Thread>(`/messages/${otherId}`, 5000);
+  const { data: thread, error, reload } = useApi<Thread>(`/messages/${otherId}`, 10_000);
   const { data: job } = useApi<Job>(jobId ? `/jobs/${jobId}` : null);
   const [draft, setDraft] = useState('');
   const [status, setStatus] = useState({ busy: false, error: '' });
@@ -145,7 +145,14 @@ function ThreadView({ otherId, jobId, myId, onSent }: { otherId: string; jobId: 
           </div>
         </form>
       ) : (
-        <p className="border-t border-slate-200 p-4 text-center text-sm text-slate-500">You can reply once this employer messages you.</p>
+        other.role === 'worker' ? (
+          <p className="border-t border-slate-200 p-4 text-center text-sm text-slate-500">
+            On the Free plan you can message workers who applied to your jobs.{' '}
+            <Link href="/pricing" className="font-semibold text-emerald-800 hover:underline">Upgrade to Pro</Link> to reach out to any worker first.
+          </p>
+        ) : (
+          <p className="border-t border-slate-200 p-4 text-center text-sm text-slate-500">You can reply once this employer messages you.</p>
+        )
       )}
     </>
   );

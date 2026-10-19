@@ -1,7 +1,7 @@
 import Anthropic from '@anthropic-ai/sdk';
 import { betaJSONSchemaOutputFormat } from '@anthropic-ai/sdk/helpers/beta/json-schema';
 
-const SYSTEM = `You help employers on RemotePinas, a job board for Filipino remote workers, screen job applications.
+const SYSTEM = `You help employers on ReadyToWork.ph, a job board for Filipino remote workers, screen job applications.
 Score how well one applicant fits one job, using only the job post and the applicant's own profile, cover letter and resume (when attached).
 
 Scoring guide:
@@ -32,7 +32,9 @@ let client;
 
 // Returns { score, verdict, strengths, concerns } as Claude wrote them. Throws if Claude can't produce a usable result.
 export async function analyzeApplication({ job, applicant }) {
-  client ??= new Anthropic(); // reads ANTHROPIC_API_KEY
+  // Reads ANTHROPIC_API_KEY. With AI_GATEWAY_URL set, calls go through Cloudflare AI Gateway
+  // (https://gateway.ai.cloudflare.com/v1/<account>/<gateway>/anthropic) for usage and cost charts.
+  client ??= new Anthropic({ baseURL: process.env.AI_GATEWAY_URL || undefined });
   const response = await client.beta.messages.parse({
     model: 'claude-haiku-5-5', // cheapest current model; Haiku has no server-side refusal fallback
     max_tokens: 16000,

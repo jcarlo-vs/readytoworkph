@@ -2,17 +2,36 @@ import express from 'express';
 import cors from 'cors';
 import { OAuth2Client } from 'google-auth-library';
 import { pool, q } from './db.js';
-import { hashPassword, verifyPassword, signToken, requireAuth, signAdminToken, requireAdmin } from './auth.js';
+import { hashPassword, verifyPassword, requireAuth, signedInUser, requireAdmin, startSession, endSession, startAdminSession, endAdminSession } from './auth.js';
 import { sendEmail, renderEmail } from './email.js';
 import { analyzeApplication } from './analyzer.js';
 import { extractText, getDocumentProxy } from 'unpdf';
 import { storage } from './storage.js';
-import { randomUUID, createHash, timingSafeEqual } from 'node:crypto';
+import { randomUUID, randomBytes, createHash, createHmac, timingSafeEqual } from 'node:crypto';
 
 const TYPES = ['full-time', 'part-time', 'gig'];
 const PAGE_SIZE = 20;
 const PERIODS = ['hour', 'month', 'year', 'fixed'];
-const PRO_ANALYSES = 500; // ponytail: counts all-time like the free limit; make both monthly when billing lands
+// What each employer plan includes (null = unlimited); the pricing page promises exactly this.
+// Free's AI analyses are set by the admin. Job posts and analyses count per calendar month in
+// Philippine time, so they reset on the 1st.
+const PLAN_LIMITS = {
+  free: { name: 'Free', posts: 3, applicants: 20, outreach: false },
+  pro: { name: 'Pro', posts: 5, applicants: 150, analyses: 500, outreach: true },
+  premium: { name: 'Premium', posts: 10, applicants: null, analyses: null, outreach: true },
+};
+// Premium's AI analyses are unlimited for any real hiring; this fair-use ceiling only stops a runaway
+// script (each analysis costs about $0.001-0.002, so the ceiling bounds one account at ~$10-20 a month).
+export const PREMIUM_FAIR_USE = 10_000;
+const MONTH_PH = `(date_trunc('month', now() AT TIME ZONE 'Asia/Manila') AT TIME ZONE 'Asia/Manila')`;
+const planOf = async (db, userId) => (await db.query('SELECT plan FROM users WHERE id = $1', [userId])).rows[0]?.plan ?? 'free';
+// An application's place in its job's list (0 = top): most Credits first, then earliest. Employers see
+// their top applicants up to their plan's limit; the rest stay hidden until they upgrade.
+const RANK = `(SELECT count(*) FROM applications b WHERE b.job_id = a.job_id
+  AND (b.credits > a.credits OR (b.credits = a.credits AND (b.created_at, b.id) < (a.created_at, a.id))))::int`;
+const hiddenApplicant = (res, plan) => res.status(402).json({
+  error: `This applicant is beyond the ${PLAN_LIMITS[plan].applicants} you can see on the ${PLAN_LIMITS[plan].name} plan. Upgrade to see them.`, upgrade: true,
+});
 export const DAILY_CREDITS = 60;
 
 // Site settings the admin can change at /admin, stored in the settings table (defaults apply until changed).
@@ -43,18 +62,56 @@ const str = (v, max = 5000) => (typeof v === 'string' ? v.trim().slice(0, max) :
 const num = (v) => (v === '' || v == null || isNaN(Number(v)) ? null : Number(v));
 const skillList = (v) =>
   [...new Set((Array.isArray(v) ? v : String(v ?? '').split(','))
-    .map((s) => String(s).trim().toLowerCase()).filter(Boolean))].slice(0, 30);
+    .map((s) => String(s).trim().toLowerCase().slice(0, 50)).filter(Boolean))].slice(0, 30);
 const bad = (res, error) => res.status(400).json({ error });
+// Compares secrets in constant time, so response timing reveals nothing about them.
+// Robot check (Cloudflare Turnstile) for the forms bots abuse: sign-up, forgot password, contact, visitor
+// feedback. The page sends the widget's token; Cloudflare says whether a person earned it. Without
+// TURNSTILE_SECRET (local development, tests) the check is skipped. Swappable for tests.
+async function verifyHuman(req) {
+  const secret = process.env.TURNSTILE_SECRET;
+  if (!secret) return true;
+  const token = typeof req.body?.turnstile === 'string' ? req.body.turnstile : '';
+  if (!token) return false;
+  try {
+    const res = await fetch('https://challenges.cloudflare.com/turnstile/v0/siteverify', {
+      method: 'POST',
+      body: new URLSearchParams({ secret, response: token, remoteip: req.visitor ?? req.ip }),
+    });
+    return (await res.json()).success === true;
+  } catch (err) {
+    console.error('Turnstile check failed', err); // Cloudflare unreachable: let people through rather than lock everyone out
+    return true;
+  }
+}
+const notHuman = (res) => res.status(400).json({ error: 'Please complete the “I’m human” check and try again.', code: 'robot_check' });
+
+const sameText = (a, b) => timingSafeEqual(createHash('sha256').update(String(a)).digest(), createHash('sha256').update(String(b)).digest());
 
 export const app = express();
 app.set('trust proxy', 1); // behind Cloud Run's load balancer: req.ip is the real visitor
+app.disable('x-powered-by');
 app.locals.sendEmail = sendEmail; // swappable so tests can capture emails
+
+// In production the API is only reachable through Cloudflare: the site's Worker forwards /api requests
+// with this secret header, so calls straight to the Cloud Run address are refused. Cloudflare also
+// tells us the visitor's real address (otherwise every visitor would look like the Worker).
+app.use((req, res, next) => {
+  res.set('X-Content-Type-Options', 'nosniff');
+  const secret = process.env.ORIGIN_SECRET;
+  if (!secret) return next(); // local development
+  if (!sameText(req.get('x-origin-secret') ?? '', secret)) return res.status(403).json({ error: 'Forbidden' });
+  req.visitor = req.get('x-visitor-ip') || req.ip;
+  next();
+});
+const visitor = (req) => req.visitor ?? req.ip;
 // FRONTEND_ORIGIN can list several sites, comma-separated (e.g. the live domain and a test address).
 // Browsers may call the API from any of them; links in emails use the first one.
 const SITES = (process.env.FRONTEND_ORIGIN ?? '').split(',').map((s) => s.trim()).filter(Boolean);
 const SITE = SITES[0];
 app.use(cors({ origin: SITES }));
-app.use(express.json({ limit: '100kb' }));
+// Paddle signs the exact bytes it sends, so the webhook keeps the raw body for checking.
+app.use(express.json({ limit: '100kb', verify: (req, res, buf) => { if (req.url === '/api/billing/webhook') req.rawBody = buf; } }));
 
 // Welcome email for every new account (email or Google sign-up); sending happens in the background.
 function welcome({ email, name, role }) {
@@ -63,51 +120,84 @@ function welcome({ email, name, role }) {
   const email_ = renderEmail(worker ? {
     preheader: 'Your worker account is ready. Here’s how to land your first remote job.',
     greeting: `Hi ${name},`,
-    intro: ['Welcome to RemotePinas! Your worker account is ready. Here’s how to get hired:'],
+    intro: ['Welcome to ReadyToWork.ph! Your worker account is ready. Here’s how to get hired:'],
     steps: [
       ['Complete your profile', 'Add a professional title, your skills and your rate so employers can find you. A resume helps too.'],
       ['Browse remote jobs', 'Full-time, part-time and gig work from employers around the world.'],
       ['Apply with Credits', 'You get 60 free Credits every day. They’re optional: put more on the jobs you want most and employers see you first.'],
     ],
     button: { label: 'Complete your profile', url: `${site}/profile` },
-    reason: 'You’re receiving this because you created a worker account on RemotePinas.',
+    reason: 'You’re receiving this because you created a worker account on ReadyToWork.ph.',
   } : {
     preheader: 'Your employer account is ready. Here’s how to make your first hire.',
     greeting: `Hi ${name},`,
-    intro: ['Welcome to RemotePinas! Your employer account is ready. Here’s how to find your next great hire:'],
+    intro: ['Welcome to ReadyToWork.ph! Your employer account is ready. Here’s how to find your next great hire:'],
     steps: [
       ['Post your first job', 'Describe the role, the skills you need and your budget. Posting is free.'],
       ['Review applicants', 'Applicants are sorted by interest, and the AI score shows how well each one fits.'],
       ['Message and hire directly', 'Talk to candidates, agree on pay together, and pay them directly. No markups.'],
     ],
     button: { label: 'Post your first job', url: `${site}/jobs/new` },
-    reason: 'You’re receiving this because you created an employer account on RemotePinas.',
+    reason: 'You’re receiving this because you created an employer account on ReadyToWork.ph.',
   });
   app.locals.sendEmail({
     to: email,
-    subject: worker ? 'Welcome to RemotePinas: let’s get you hired' : 'Welcome to RemotePinas: start hiring Filipino talent',
+    subject: worker ? 'Welcome to ReadyToWork.ph: let’s get you hired' : 'Welcome to ReadyToWork.ph: start hiring Filipino talent',
     ...email_,
   }).catch((err) => console.error(err));
 }
 
-// ponytail: in-memory attempt counters per key, reset on restart and kept per server copy; move to a
-// shared store (e.g. Postgres or Redis) if abuse ever gets past it.
+// ponytail: in-memory counters per key (fixed windows), reset on restart and kept per server copy;
+// Cloudflare's rate limit is the outer wall. Move to a shared store (e.g. Redis) if abuse gets past both.
 function limiter(max, windowMs, strict = false) {
-  const hits = new Map();
-  const recent = (key) => (hits.get(key) ?? []).filter((t) => Date.now() - t < windowMs);
+  const hits = new Map(); // key -> { n, until }
+  const on = () => strict || !app.locals.relaxedLimits;
+  const current = (key) => { const e = hits.get(key); return e && e.until > Date.now() ? e : null; };
+  // Forget expired visitors, so a flood of different addresses can't fill the server's memory.
+  setInterval(() => { for (const [k, e] of hits) if (e.until <= Date.now()) hits.delete(k); }, windowMs).unref();
   return {
-    blocked: (key) => (strict || !app.locals.relaxedLimits) && recent(key).length >= max,
-    hit: (key) => hits.set(key, [...recent(key), Date.now()]),
+    blocked: (key) => on() && (current(key)?.n ?? 0) >= max,
+    hit: (key) => { if (!on()) return; const e = current(key); if (e) e.n++; else hits.set(key, { n: 1, until: Date.now() + windowMs }); },
     clear: (key) => hits.delete(key),
+    left: (key) => max - (current(key)?.n ?? 0),
   };
 }
+const tooMany = (res, wait) => res.status(429).json({ error: `Too many attempts. Please try again in ${wait}.` });
+// Route guard: counts every request; `key` picks who is counted (the visitor's address, or the signed-in user).
+const throttle = (max, windowMs, wait, key = visitor) => {
+  const l = limiter(max, windowMs);
+  return (req, res, next) => {
+    const k = key(req);
+    if (l.blocked(k)) return tooMany(res, wait);
+    l.hit(k);
+    next();
+  };
+};
+const perUser = (req) => `u${req.user.id}`;
+
+app.use('/api', throttle(300, 60_000, 'a minute')); // any request, per visitor
+// Remembers when each signed-in user was last active and their country (Cloudflare's guess from the
+// IP; the IP itself isn't stored), for the admin dashboard. At most one write per user per minute.
+const lastSeen = new Map();
+app.use('/api', (req, res, next) => {
+  res.on('finish', () => {
+    const id = req.user?.id;
+    if (!id || Date.now() - (lastSeen.get(id) ?? 0) < 60_000) return;
+    lastSeen.set(id, Date.now());
+    const country = req.get('cf-ipcountry');
+    q('UPDATE users SET last_seen_at = now(), last_country = coalesce($2, last_country) WHERE id = $1',
+      [id, /^[A-Z]{2}$/.test(country ?? '') ? country : null]).catch((err) => console.error(err));
+  });
+  next();
+});
+
 const loginFails = limiter(10, 15 * 60_000); // wrong passwords per visitor
 const signups = limiter(10, 60 * 60_000); // new accounts per visitor
-const tooMany = (res, wait) => res.status(429).json({ error: `Too many attempts. Please try again in ${wait}.` });
 
 // --- Auth ---
 app.post('/api/auth/register', async (req, res) => {
-  if (signups.blocked(req.ip)) return tooMany(res, 'an hour');
+  if (signups.blocked(visitor(req))) return tooMany(res, 'an hour');
+  if (!(await verifyHuman(req))) return notHuman(res);
   const email = str(req.body.email, 200).toLowerCase();
   const name = str(req.body.name, 100);
   const { password, role } = req.body;
@@ -121,24 +211,128 @@ app.post('/api/auth/register', async (req, res) => {
      ON CONFLICT (email) DO NOTHING RETURNING id, email, name, role, plan, photo_key IS NOT NULL AS has_photo`,
     [email, await hashPassword(password), name, role]
   );
-  if (!rows[0]) return res.status(409).json({ error: 'Email already registered' });
-  signups.hit(req.ip);
+  if (!rows[0]) return res.status(409).json({ error: 'This email already has an account. Log in, or use a different email to create another account.' });
+  signups.hit(visitor(req));
   if (role === 'worker') await q('INSERT INTO worker_profiles (user_id) VALUES ($1)', [rows[0].id]);
   welcome(rows[0]);
-  res.status(201).json({ token: signToken(rows[0]), user: rows[0] });
+  startSession(req, res, rows[0]);
+  res.status(201).json({ user: rows[0] });
 });
 
+// Password guessing is stopped three ways:
+//  - per visitor: 10 wrong tries in 15 minutes pauses that visitor (loginFails);
+//  - per account: 5 wrong passwords in 15 minutes pauses password login for that account for 15 minutes,
+//    from anywhere, and emails the owner. It's in the database, so restarts and server copies don't reset it.
+//    Resetting the password lifts the pause, and Google sign-in still works, so nobody can lock a real
+//    person out of their own account for long;
+//  - after 2 wrong tries (by the visitor or on the account) the robot check is required too.
+export const ACCOUNT_TRIES = 5;
+const LOCK_MINUTES = 15;
 app.post('/api/auth/login', async (req, res) => {
-  if (loginFails.blocked(req.ip)) return tooMany(res, '15 minutes');
-  const { rows } = await q('SELECT * FROM users WHERE email = $1', [str(req.body.email, 200).toLowerCase()]);
+  if (loginFails.blocked(visitor(req))) return tooMany(res, '15 minutes');
+  const { rows } = await q(
+    `SELECT *, CASE WHEN failed_login_at > now() - interval '${LOCK_MINUTES} minutes' THEN failed_logins ELSE 0 END AS recent_fails
+     FROM users WHERE email = $1`, [str(req.body.email, 200).toLowerCase()]);
   const user = rows[0];
-  if (!user?.password_hash || !(await verifyPassword(String(req.body.password ?? ''), user.password_hash))) {
-    loginFails.hit(req.ip);
-    return res.status(401).json({ error: user && !user.password_hash ? 'This account uses Google sign-in' : 'Wrong email or password' });
+  if (user?.login_locked_until > new Date()) {
+    const minutes = Math.ceil((user.login_locked_until - Date.now()) / 60_000);
+    return res.status(429).json({ error: `Too many wrong passwords. Try again in ${minutes} minute${minutes === 1 ? '' : 's'}, or reset your password.`, code: 'locked', minutes });
   }
-  loginFails.clear(req.ip);
+  const triedBefore = 10 - loginFails.left(visitor(req)) >= 2 || (user?.recent_fails ?? 0) >= 2;
+  if (triedBefore && !(await verifyHuman(req))) return notHuman(res);
+  // Say exactly what's wrong, with a way forward. (Sign-up already tells people when an email is taken,
+  // so naming "no account" here reveals nothing new; the attempt limits still stop password guessing.)
+  const fail = (code, error, extra = {}) => {
+    loginFails.hit(visitor(req));
+    const left = Math.min(loginFails.left(visitor(req)), extra.accountLeft ?? Infinity);
+    res.status(401).json({ error, code, attemptsLeft: left, robotCheck: triedBefore || 10 - loginFails.left(visitor(req)) >= 2 || extra.accountTries >= 2 });
+  };
+  if (!user) return fail('no_account', 'No account uses this email.');
+  if (!user.password_hash) return fail('google_account', 'This account signs in with Google. Use the Google button above.');
+  if (!(await verifyPassword(String(req.body.password ?? ''), user.password_hash))) {
+    const tries = user.recent_fails + 1;
+    if (tries >= ACCOUNT_TRIES) {
+      await q(`UPDATE users SET failed_logins = 0, failed_login_at = NULL, login_locked_until = now() + interval '${LOCK_MINUTES} minutes' WHERE id = $1`, [user.id]);
+      loginFails.hit(visitor(req));
+      app.locals.sendEmail({
+        to: user.email,
+        subject: 'Someone tried to log in to your ReadyToWork.ph account',
+        ...renderEmail({
+          preheader: `${ACCOUNT_TRIES} wrong passwords in a row, so we paused password login for ${LOCK_MINUTES} minutes.`,
+          greeting: `Hi ${user.name},`,
+          intro: [
+            `Someone entered the wrong password for your account ${ACCOUNT_TRIES} times in a row, so we paused logging in with a password for ${LOCK_MINUTES} minutes to keep your account safe.`,
+            'If it was you, you can wait or reset your password now (that also ends the pause). If it wasn’t you, your account is safe, and choosing a new password is a good idea.',
+          ],
+          button: { label: 'Reset my password', url: `${SITE}/forgot-password?email=${encodeURIComponent(user.email)}` },
+          reason: 'You’re receiving this because of failed login attempts on your ReadyToWork.ph account.',
+        }),
+      }).catch((err) => console.error(err));
+      return res.status(429).json({ error: `Too many wrong passwords. Try again in ${LOCK_MINUTES} minutes, or reset your password.`, code: 'locked', minutes: LOCK_MINUTES });
+    }
+    await q('UPDATE users SET failed_logins = $2, failed_login_at = now() WHERE id = $1', [user.id, tries]);
+    return fail('wrong_password', 'Incorrect password.', { accountLeft: ACCOUNT_TRIES - tries, accountTries: tries });
+  }
+  loginFails.clear(visitor(req));
+  if (user.recent_fails || user.login_locked_until) await q('UPDATE users SET failed_logins = 0, failed_login_at = NULL, login_locked_until = NULL WHERE id = $1', [user.id]);
   const { id, email, name, role, plan } = user;
-  res.json({ token: signToken(user), user: { id, email, name, role, plan, has_photo: !!user.photo_key } });
+  startSession(req, res, user);
+  res.json({ user: { id, email, name, role, plan, has_photo: !!user.photo_key } });
+});
+
+app.post('/api/auth/logout', (req, res) => {
+  endSession(req, res);
+  res.status(204).end();
+});
+
+// --- Forgot password ---
+const resetRequests = limiter(5, 60 * 60_000); // reset emails per visitor per hour
+const hashToken = (t) => createHash('sha256').update(t).digest('hex');
+
+// Always answers the same way, so this can't be used to check which emails have accounts.
+app.post('/api/auth/forgot', async (req, res) => {
+  if (resetRequests.blocked(visitor(req))) return tooMany(res, 'an hour');
+  if (!(await verifyHuman(req))) return notHuman(res);
+  resetRequests.hit(visitor(req));
+  const email = str(req.body.email, 200).toLowerCase();
+  const { rows: [user] } = await q('SELECT id, name, email FROM users WHERE email = $1', [email]);
+  if (user) {
+    const token = randomBytes(32).toString('base64url');
+    await q(`INSERT INTO password_resets (token_hash, user_id, expires_at) VALUES ($1, $2, now() + interval '1 hour')`, [hashToken(token), user.id]);
+    app.locals.sendEmail({
+      to: user.email,
+      subject: 'Reset your ReadyToWork.ph password',
+      ...renderEmail({
+        preheader: 'Choose a new password. This link works for 1 hour.',
+        greeting: `Hi ${user.name},`,
+        intro: ['We got a request to reset the password for your ReadyToWork.ph account. Choose a new one with the button below. The link works once and expires in 1 hour.'],
+        button: { label: 'Choose a new password', url: `${SITE}/reset-password?token=${token}` },
+        reason: 'You’re receiving this because someone asked to reset your password. If it wasn’t you, ignore this email: your password stays the same.',
+      }),
+    }).catch((err) => console.error(err));
+  }
+  res.json({ ok: true });
+});
+
+// Sets the new password from a reset link and signs the person in.
+app.post('/api/auth/reset', async (req, res) => {
+  const { password } = req.body;
+  if (typeof password !== 'string' || password.length < 8) return bad(res, 'Password must be at least 8 characters');
+  const { rows: [reset] } = await q(
+    `UPDATE password_resets SET used_at = now() WHERE token_hash = $1 AND used_at IS NULL AND expires_at > now() RETURNING user_id`,
+    [hashToken(String(req.body.token ?? ''))]
+  );
+  if (!reset) return res.status(400).json({ error: 'This reset link has expired or was already used. Request a new one.', code: 'invalid_link' });
+  const { rows: [user] } = await q(
+    // a new password also ends any login pause on the account
+    `UPDATE users SET password_hash = $2, failed_logins = 0, failed_login_at = NULL, login_locked_until = NULL
+     WHERE id = $1 RETURNING id, email, name, role, plan, photo_key IS NOT NULL AS has_photo`,
+    [reset.user_id, await hashPassword(password)]
+  );
+  await q('DELETE FROM password_resets WHERE user_id = $1', [user.id]); // older links stop working too
+  loginFails.clear(visitor(req));
+  startSession(req, res, user);
+  res.json({ user });
 });
 
 // Swappable so tests can fake Google; real tokens are checked against GOOGLE_CLIENT_ID.
@@ -146,7 +340,7 @@ const googleClient = new OAuth2Client();
 app.locals.verifyGoogle = async (idToken) =>
   (await googleClient.verifyIdToken({ idToken, audience: process.env.GOOGLE_CLIENT_ID })).getPayload();
 
-app.post('/api/auth/google', async (req, res) => {
+app.post('/api/auth/google', throttle(30, 15 * 60_000, '15 minutes'), async (req, res) => {
   if (!process.env.GOOGLE_CLIENT_ID) return res.status(503).json({ error: 'Google sign-in is not configured' });
   let g;
   try {
@@ -163,18 +357,25 @@ app.post('/api/auth/google', async (req, res) => {
     'UPDATE users SET google_sub = $1 WHERE email = $2 AND google_sub IS NULL RETURNING id, email, name, role, plan, photo_key IS NOT NULL AS has_photo',
     [g.sub, email]
   ));
-  if (rows[0]) return res.json({ token: signToken(rows[0]), user: rows[0] });
-
   const { role } = req.body;
+  // One account per email, with one role. Signing up as the other role doesn't silently log into this account.
+  if (rows[0] && role && role !== rows[0].role)
+    return res.status(409).json({ error: `This Google account already has a ${rows[0].role === 'worker' ? 'job seeker' : 'employer'} account. To ${role === 'employer' ? 'hire' : 'look for work'}, sign up with a different email.`, existingRole: rows[0].role });
+  if (rows[0]) {
+    startSession(req, res, rows[0]);
+    return res.json({ user: rows[0] });
+  }
+
   if (!['worker', 'employer'].includes(role))
-    return res.status(404).json({ error: 'No account yet. Choose how you’ll use RemotePinas to sign up.', needsRole: true });
+    return res.status(404).json({ error: 'No account yet. Choose how you’ll use ReadyToWork.ph to sign up.', needsRole: true });
   ({ rows } = await q(
     `INSERT INTO users (email, name, role, google_sub) VALUES ($1, $2, $3, $4) RETURNING id, email, name, role, plan, photo_key IS NOT NULL AS has_photo`,
     [email, str(g.name, 100) || email.split('@')[0], role, g.sub]
   ));
   if (role === 'worker') await q('INSERT INTO worker_profiles (user_id) VALUES ($1)', [rows[0].id]);
   welcome(rows[0]);
-  res.status(201).json({ token: signToken(rows[0]), user: rows[0] });
+  startSession(req, res, rows[0]);
+  res.status(201).json({ user: rows[0] });
 });
 
 app.get('/api/me', requireAuth(), async (req, res) => {
@@ -193,6 +394,13 @@ app.get('/api/stats', async (req, res) => {
 });
 
 // --- Jobs ---
+// Email addresses in job posts are only shown to signed-in members, so scrapers and spam bots
+// reading the public pages or this API can't harvest them.
+const EMAIL = /[A-Z0-9._%+-]+@[A-Z0-9-]+(?:\.[A-Z0-9-]+)*\.[A-Z]{2,}/gi;
+export const EMAIL_HIDDEN = '[email hidden, log in to see it]';
+const forViewer = (req, jobs) => (signedInUser(req) ? jobs
+  : jobs.map((j) => ({ ...j, title: j.title.replace(EMAIL, EMAIL_HIDDEN), description: j.description.replace(EMAIL, EMAIL_HIDDEN) })));
+
 app.get('/api/jobs', async (req, res) => {
   const where = ['j.closed_at IS NULL'];
   const params = [];
@@ -200,7 +408,7 @@ app.get('/api/jobs', async (req, res) => {
   if (req.query.q) add('(j.title ILIKE ? OR j.description ILIKE ?)', `%${str(req.query.q, 100)}%`);
   if (req.query.skill) add('? = ANY(j.skills)', str(req.query.skill, 50).toLowerCase());
   if (TYPES.includes(req.query.type)) add('j.job_type = ?', req.query.type);
-  const page = Math.max(1, parseInt(req.query.page) || 1);
+  const page = Math.min(500, Math.max(1, parseInt(req.query.page) || 1));
 
   const { rows } = await q(
     `SELECT j.*, u.name AS employer_name FROM jobs j JOIN users u ON u.id = j.employer_id
@@ -208,7 +416,14 @@ app.get('/api/jobs', async (req, res) => {
      ORDER BY j.created_at DESC LIMIT ${PAGE_SIZE} OFFSET ${(page - 1) * PAGE_SIZE}`,
     params
   );
-  res.json(rows);
+  res.json(forViewer(req, rows));
+});
+
+// Open jobs for the sitemap Google reads (ids and dates only). Declared before /api/jobs/:id.
+app.get('/api/jobs/sitemap', async (req, res) => {
+  const { rows } = await q(`SELECT id, coalesce(updated_at, created_at) AS updated_at FROM jobs
+    WHERE closed_at IS NULL ORDER BY created_at DESC LIMIT 5000`);
+  res.set('Cache-Control', 'public, max-age=600').json(rows);
 });
 
 app.get('/api/jobs/:id', async (req, res) => {
@@ -216,13 +431,20 @@ app.get('/api/jobs/:id', async (req, res) => {
     `SELECT j.*, u.name AS employer_name FROM jobs j JOIN users u ON u.id = j.employer_id WHERE j.id = $1`,
     [num(req.params.id)]
   );
-  rows[0] ? res.json(rows[0]) : res.status(404).json({ error: 'Job not found' });
+  rows[0] ? res.json(forViewer(req, rows)[0]) : res.status(404).json({ error: 'Job not found' });
 });
 
 // Validates a job post (create or edit). Returns { error } or the cleaned fields in column order.
+// Generous for any real job post, and keeps what the AI analyzer reads (and pays for) bounded.
+// Too long is an error rather than a silent cut, so nobody loses the end of their post.
+export const JOB_TITLE_MAX = 120;
+export const JOB_DESCRIPTION_MAX = 10_000;
 function jobFields(body) {
-  const title = str(body.title, 200);
-  const description = str(body.description);
+  const tooLong = (v, max) => typeof v === 'string' && v.trim().length > max;
+  if (tooLong(body.title, JOB_TITLE_MAX)) return { error: `Job title is too long (max ${JOB_TITLE_MAX} characters)` };
+  if (tooLong(body.description, JOB_DESCRIPTION_MAX)) return { error: `Description is too long (max ${JOB_DESCRIPTION_MAX.toLocaleString('en-US')} characters)` };
+  const title = str(body.title, JOB_TITLE_MAX);
+  const description = str(body.description, JOB_DESCRIPTION_MAX);
   const { job_type } = body;
   // Pay in USD with cents, per hour / month / year, or a fixed price for the whole job.
   const money = (v) => (num(v) == null ? null : Math.round(num(v) * 100) / 100);
@@ -237,18 +459,52 @@ function jobFields(body) {
   return { values: [title, description, skillList(body.skills), job_type, salary_min, salary_max, salary_period] };
 }
 
-app.post('/api/jobs', requireAuth('employer'), async (req, res) => {
+// ponytail: deleting a job frees its slot for the month; keep deleted jobs (soft delete) if that gets abused.
+const postLimitMessage = (plan, max) => `You've posted ${max} jobs this month, the most on the ${PLAN_LIMITS[plan].name} plan. ` +
+  (plan === 'free' ? 'Upgrade to Pro for 5 a month or Premium for 10, or wait' : plan === 'pro' ? 'Upgrade to Premium for 10 a month, or wait' : 'Wait')
+  + ' until the 1st, when your limit resets.';
+
+app.post('/api/jobs', requireAuth('employer'), throttle(30, 60 * 60_000, 'an hour', perUser), async (req, res) => {
   const { error, values } = jobFields(req.body);
   if (error) return bad(res, error);
-  const { rows } = await q(
-    `INSERT INTO jobs (employer_id, title, description, skills, job_type, salary_min, salary_max, salary_period)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING *`,
-    [req.user.id, ...values]
-  );
-  res.status(201).json(rows[0]);
+  const db = await pool.connect();
+  try {
+    await db.query('BEGIN');
+    // Lock the employer's row so parallel posts can't slip past the monthly limit.
+    await db.query('SELECT 1 FROM users WHERE id = $1 FOR UPDATE', [req.user.id]);
+    const plan = await planOf(db, req.user.id);
+    const max = PLAN_LIMITS[plan].posts;
+    const { rows: [{ posted }] } = await db.query(
+      `SELECT count(*)::int AS posted FROM jobs WHERE employer_id = $1 AND created_at >= ${MONTH_PH}`, [req.user.id]);
+    if (posted >= max) {
+      await db.query('ROLLBACK');
+      return res.status(402).json({ error: postLimitMessage(plan, max), upgrade: plan !== 'premium' });
+    }
+    const { rows } = await db.query(
+      `INSERT INTO jobs (employer_id, title, description, skills, job_type, salary_min, salary_max, salary_period)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING *`,
+      [req.user.id, ...values]
+    );
+    await db.query('COMMIT');
+    res.status(201).json(rows[0]);
+  } catch (err) {
+    await db.query('ROLLBACK');
+    throw err;
+  } finally {
+    db.release();
+  }
 });
 
-app.put('/api/jobs/:id', requireAuth('employer'), async (req, res) => {
+// How many jobs the employer can still post this month, for the post-a-job page.
+app.get('/api/my/job-quota', requireAuth('employer'), async (req, res) => {
+  const plan = await planOf(pool, req.user.id);
+  const { rows: [{ posted }] } = await q(
+    `SELECT count(*)::int AS posted FROM jobs WHERE employer_id = $1 AND created_at >= ${MONTH_PH}`, [req.user.id]);
+  const max = PLAN_LIMITS[plan].posts;
+  res.json({ plan, posted, limit: max, remaining: Math.max(0, max - posted), message: posted >= max ? postLimitMessage(plan, max) : null });
+});
+
+app.put('/api/jobs/:id', requireAuth('employer'), throttle(60, 60 * 60_000, 'an hour', perUser), async (req, res) => {
   const { error, values } = jobFields(req.body);
   if (error) return bad(res, error);
   const { rows } = await q(
@@ -282,22 +538,69 @@ app.get('/api/settings', async (req, res) => {
 });
 
 const adminFails = limiter(5, 15 * 60_000, true); // always strict, even in tests
-const sameText = (a, b) => timingSafeEqual(createHash('sha256').update(String(a)).digest(), createHash('sha256').update(String(b)).digest());
 
 app.post('/api/admin/login', async (req, res) => {
   const { ADMIN_EMAIL, ADMIN_PASSWORD } = process.env;
   if (!ADMIN_EMAIL || !ADMIN_PASSWORD) return res.status(503).json({ error: 'Admin login is not set up' });
-  if (adminFails.blocked(req.ip)) return tooMany(res, '15 minutes');
+  if (adminFails.blocked(visitor(req))) return tooMany(res, '15 minutes');
   const ok = sameText(str(req.body.email).toLowerCase(), ADMIN_EMAIL.toLowerCase()) & sameText(req.body.password ?? '', ADMIN_PASSWORD);
   if (!ok) {
-    adminFails.hit(req.ip);
+    adminFails.hit(visitor(req));
     return res.status(401).json({ error: 'Wrong email or password' });
   }
-  adminFails.clear(req.ip);
-  res.json({ token: signAdminToken() });
+  adminFails.clear(visitor(req));
+  startAdminSession(req, res);
+  res.json({ ok: true });
+});
+
+app.post('/api/admin/logout', (req, res) => {
+  endAdminSession(req, res);
+  res.status(204).end();
 });
 
 app.get('/api/admin/settings', requireAdmin, async (req, res) => res.json(await getSettings()));
+
+// Numbers for the admin dashboard. "Active" means signed in and using the site.
+app.get('/api/admin/stats', requireAdmin, async (req, res) => {
+  const count = (sql) => `(SELECT count(*)::int ${sql})`;
+  const since = (col, period) => `${col} > now() - interval '${period}'`;
+  const { rows: [totals] } = await q(`SELECT
+    ${count("FROM users")} AS users,
+    ${count("FROM users WHERE role = 'worker'")} AS workers,
+    ${count("FROM users WHERE role = 'employer'")} AS employers,
+    ${count(`FROM users WHERE ${since('created_at', '1 day')}`)} AS new_24h,
+    ${count(`FROM users WHERE ${since('created_at', '7 days')}`)} AS new_7d,
+    ${count("FROM users WHERE google_sub IS NOT NULL")} AS google_users,
+    ${count("FROM users WHERE role = 'employer' AND plan <> 'free'")} AS paid_employers,
+    ${count(`FROM users WHERE ${since('last_seen_at', '5 minutes')}`)} AS active_now,
+    ${count(`FROM users WHERE ${since('last_seen_at', '1 day')}`)} AS active_24h,
+    ${count(`FROM users WHERE ${since('last_seen_at', '7 days')}`)} AS active_7d,
+    ${count("FROM worker_profiles WHERE title <> ''")} AS profiles_completed,
+    ${count("FROM worker_profiles WHERE resume_key IS NOT NULL")} AS resumes,
+    (SELECT count(DISTINCT worker_id)::int FROM applications) AS workers_applied,
+    ${count("FROM applications")} AS applications,
+    ${count(`FROM applications WHERE ${since('created_at', '7 days')}`)} AS applications_7d,
+    ${count("FROM ai_analyses")} AS ai_analyses,
+    ${count(`FROM ai_analyses WHERE ${since('created_at', '7 days')}`)} AS ai_analyses_7d,
+    ${count("FROM feedback WHERE done_at IS NULL")} AS open_feedback,
+    (SELECT count(DISTINCT employer_id)::int FROM jobs) AS employers_posted,
+    ${count("FROM jobs")} AS jobs,
+    ${count("FROM jobs WHERE closed_at IS NULL")} AS open_jobs,
+    ${count(`FROM jobs WHERE ${since('created_at', '7 days')}`)} AS jobs_7d,
+    ${count("FROM messages")} AS messages,
+    ${count(`FROM messages WHERE ${since('created_at', '7 days')}`)} AS messages_7d`);
+  // Sign-ups per day for the last 30 days, Philippine time.
+  const { rows: signups } = await q(`SELECT to_char(d, 'YYYY-MM-DD') AS day,
+      count(u.id) FILTER (WHERE u.role = 'worker')::int AS workers,
+      count(u.id) FILTER (WHERE u.role = 'employer')::int AS employers
+    FROM generate_series((now() AT TIME ZONE 'Asia/Manila')::date - 29, (now() AT TIME ZONE 'Asia/Manila')::date, interval '1 day') d
+    LEFT JOIN users u ON (u.created_at AT TIME ZONE 'Asia/Manila')::date = d::date
+    GROUP BY d ORDER BY d`);
+  const { rows: countries } = await q(`SELECT coalesce(last_country, '??') AS country, count(*)::int AS users
+    FROM users WHERE ${since('last_seen_at', '30 days')} GROUP BY 1 ORDER BY 2 DESC LIMIT 15`);
+  const { rows: recent } = await q('SELECT id, name, role, created_at, last_seen_at, last_country FROM users ORDER BY created_at DESC LIMIT 10');
+  res.json({ totals, signups, countries, recent });
+});
 
 app.put('/api/admin/settings', requireAdmin, async (req, res) => {
   const changes = Object.entries(req.body ?? {});
@@ -378,15 +681,20 @@ app.get('/api/credits', requireAuth('worker'), async (req, res) => {
   res.json(await creditsToday(pool, req.user.id));
 });
 
+// Everyone can apply whatever the employer's plan; the employer sees their top applicants up to the
+// plan's limit (`total` counts everyone, so the page can say how many are waiting behind an upgrade).
 app.get('/api/jobs/:id/applications', requireAuth('employer'), async (req, res) => {
+  const plan = await planOf(pool, req.user.id);
+  const limit = PLAN_LIMITS[plan].applicants;
   const { rows } = await q(
-    `SELECT a.id, a.cover_letter, a.credits, a.analysis, a.analyzed_at, CASE WHEN a.resume_attached THEN p.resume_name END AS resume_name, a.created_at, u.id AS worker_id, u.name, u.email, p.title, p.skills
+    `SELECT a.id, a.cover_letter, a.credits, a.analysis, a.analyzed_at, CASE WHEN a.resume_attached THEN p.resume_name END AS resume_name, a.created_at, u.id AS worker_id, u.name, u.email, p.title, p.skills,
+       count(*) OVER ()::int AS total
      FROM applications a JOIN jobs j ON j.id = a.job_id
      JOIN users u ON u.id = a.worker_id LEFT JOIN worker_profiles p ON p.user_id = u.id
-     WHERE a.job_id = $1 AND j.employer_id = $2 ORDER BY a.credits DESC, a.created_at ASC`,
-    [num(req.params.id), req.user.id]
+     WHERE a.job_id = $1 AND j.employer_id = $2 ORDER BY a.credits DESC, a.created_at ASC, a.id LIMIT $3`,
+    [num(req.params.id), req.user.id, limit]
   );
-  res.json(rows);
+  res.json({ applicants: rows.map(({ total: _, ...a }) => a), total: rows[0]?.total ?? 0, limit, plan });
 });
 
 app.get('/api/my/jobs', requireAuth('employer'), async (req, res) => {
@@ -416,23 +724,138 @@ app.get('/api/my/applications', requireAuth('worker'), async (req, res) => {
 });
 
 // --- Workers ---
-const WORKER_SELECT = `SELECT u.id, u.name, p.title, p.bio, p.skills, p.hourly_rate, p.availability, p.portfolio_url, p.linkedin_url, p.updated_at
+const WORKER_SELECT = `SELECT u.id, u.name, p.title, p.bio, p.skills, p.hourly_rate, p.availability, p.portfolio_url, p.linkedin_url, p.updated_at,
+    u.created_at AS member_since, u.last_seen_at
   FROM users u JOIN worker_profiles p ON p.user_id = u.id`;
 
+// A worker's surname, LinkedIn and portfolio would let an employer find them elsewhere and skip both the
+// upgrade and our messaging. So an employer sees them only once they may contact the worker here anyway:
+// on a paid plan, or when the worker applied to one of their jobs, or they already have a conversation.
+// Everyone else sees "Maria S." and no links (`limited: true`, so the page can say how to see more).
+export const shortName = (name) => {
+  const [first, ...rest] = String(name).trim().split(/\s+/);
+  return rest.length ? `${first} ${rest.at(-1)[0].toUpperCase()}.` : first;
+};
+async function revealFor(employerId, workerIds) {
+  if (PLAN_LIMITS[await planOf(pool, employerId)].outreach) return () => true;
+  const { rows } = await q(
+    `SELECT a.worker_id AS id FROM applications a JOIN jobs j ON j.id = a.job_id WHERE j.employer_id = $1 AND a.worker_id = ANY($2)
+     UNION SELECT recipient_id FROM messages WHERE sender_id = $1 AND recipient_id = ANY($2)
+     UNION SELECT sender_id FROM messages WHERE recipient_id = $1 AND sender_id = ANY($2)`,
+    [employerId, workerIds]);
+  const known = new Set(rows.map((r) => r.id));
+  return (id) => known.has(id);
+}
+// Contact details written into a headline or bio (emails, links, phone numbers, @handles) are swapped for
+// HIDDEN before the text leaves the server; the page shows a blurred "upgrade to see" in their place.
+export const HIDDEN = '[hidden: upgrade to see]';
+const CONTACT_RE = new RegExp([
+  EMAIL.source,
+  String.raw`(?:https?:\/\/|www\.)[^\s,;)]+`, // a link ends at a space, comma, semicolon or bracket
+  String.raw`\b[a-z0-9-]+(?:\.[a-z0-9-]+)*\.(?:com|ph|io|dev|me|co|org|app|link|site|xyz|info|biz)(?:\/[^\s,;)]*)?`,
+  String.raw`(?:\+?\d[\d\s().-]{7,}\d)`,
+  String.raw`(?<![\w.])@[a-z0-9_.]{3,}(?![\w.]*@)`, // an @handle, but not the start of an email ("@juan@gmail.com")
+].join('|'), 'gi');
+export const hideContacts = (text) => String(text ?? '').replace(CONTACT_RE, HIDDEN);
+const limitWorker = (w) => ({
+  ...w, name: shortName(w.name), title: hideContacts(w.title), bio: hideContacts(w.bio),
+  portfolio_url: null, linkedin_url: null, limited: true,
+});
+
 // Talent isn't public: only signed-in employers can browse workers (workers can load their own profile).
+// Search title, bio and skills; filter by skills (all of them), availability, hourly rate and how recently
+// they were active; sort; 20 per page. Names aren't searchable, so a hidden surname can't be confirmed.
+const WORKER_SORTS = {
+  active: 'u.last_seen_at DESC NULLS LAST, p.updated_at DESC',
+  rate: 'p.hourly_rate ASC NULLS LAST, u.last_seen_at DESC NULLS LAST',
+  newest: 'u.created_at DESC',
+};
 app.get('/api/workers', requireAuth('employer'), async (req, res) => {
-  const params = [];
+  const params = [req.user.id];
+  const add = (v) => { params.push(v); return `$${params.length}`; };
   const where = ["p.title <> ''"];
-  if (req.query.q) { params.push(`%${str(req.query.q, 100)}%`); where.push(`(p.title ILIKE $${params.length} OR p.bio ILIKE $${params.length})`); }
-  if (req.query.skill) { params.push(str(req.query.skill, 50).toLowerCase()); where.push(`$${params.length} = ANY(p.skills)`); }
-  const { rows } = await q(`${WORKER_SELECT} WHERE ${where.join(' AND ')} ORDER BY p.updated_at DESC LIMIT ${PAGE_SIZE}`, params);
-  res.json(rows);
+  const text = str(req.query.q, 100);
+  let match = '';
+  if (text) {
+    const t = add(like(text));
+    where.push(`(p.title ILIKE ${t} OR p.bio ILIKE ${t} OR EXISTS (SELECT 1 FROM unnest(p.skills) s WHERE s ILIKE ${t}))`);
+    match = `(p.title ILIKE ${t}) DESC, `; // title matches first
+  }
+  const skills = skillList(req.query.skills ?? req.query.skill).slice(0, 10);
+  if (skills.length) where.push(`p.skills @> ${add(skills)}::text[]`);
+  if (TYPES.includes(req.query.availability)) where.push(`p.availability = ${add(req.query.availability)}`);
+  if (num(req.query.rate_min) !== null) where.push(`p.hourly_rate >= ${add(num(req.query.rate_min))}`);
+  if (num(req.query.rate_max) !== null) where.push(`p.hourly_rate <= ${add(num(req.query.rate_max))}`);
+  if ([1, 7, 30].includes(num(req.query.active))) where.push(`u.last_seen_at > now() - ${add(num(req.query.active))} * interval '1 day'`);
+  const sort = WORKER_SORTS[req.query.sort] ?? WORKER_SORTS.active;
+  const { rows } = await q(
+    `${WORKER_SELECT.replace(' FROM users u', `, EXISTS (SELECT 1 FROM saved_workers s WHERE s.employer_id = $1 AND s.worker_id = u.id) AS saved,
+       count(*) OVER ()::int AS total FROM users u`)}
+     WHERE ${where.join(' AND ')} ORDER BY ${match}${sort} LIMIT ${PAGE_SIZE} OFFSET ${add(pageOf(req) * PAGE_SIZE)}`,
+    params);
+  const full = await revealFor(req.user.id, rows.map((w) => w.id));
+  // past the last page there's no row to carry the total, so count separately
+  const total = rows[0]?.total ?? (pageOf(req) ? (await q(
+    `SELECT count(*)::int AS n FROM users u JOIN worker_profiles p ON p.user_id = u.id WHERE $1::int IS NOT NULL AND ${where.join(' AND ')}`,
+    params.slice(0, -1))).rows[0].n : 0);
+  res.json({ workers: rows.map(({ total: _, ...w }) => (full(w.id) ? w : limitWorker(w))), total, page_size: PAGE_SIZE });
 });
 
 app.get('/api/workers/:id', requireAuth(), async (req, res) => {
   if (req.user.role !== 'employer' && req.user.id !== num(req.params.id)) return res.status(403).json({ error: 'Only employers can view worker profiles' });
-  const { rows } = await q(`${WORKER_SELECT} WHERE u.id = $1`, [num(req.params.id)]);
-  rows[0] ? res.json(rows[0]) : res.status(404).json({ error: 'Worker not found' });
+  const { rows: [w] } = await q(`${WORKER_SELECT} WHERE u.id = $1`, [num(req.params.id)]);
+  if (!w) return res.status(404).json({ error: 'Worker not found' });
+  if (req.user.id === w.id) return res.json(w);
+  const { rows: [rel] } = await q(
+    `SELECT EXISTS (SELECT 1 FROM saved_workers WHERE employer_id = $1 AND worker_id = $2) AS saved,
+       (SELECT created_at FROM hires WHERE employer_id = $1 AND worker_id = $2) AS hired_at`, [req.user.id, w.id]);
+  res.json({ ...((await revealFor(req.user.id, [w.id]))(w.id) ? w : limitWorker(w)), ...rel });
+});
+
+// --- Saved workers (bookmarks) and hires ---
+const isWorker = async (id) => (await q("SELECT 1 FROM users WHERE id = $1 AND role = 'worker'", [id])).rowCount > 0;
+
+app.put('/api/saved/:workerId', requireAuth('employer'), async (req, res) => {
+  const id = num(req.params.workerId);
+  if (!(await isWorker(id))) return res.status(404).json({ error: 'Worker not found' });
+  await q('INSERT INTO saved_workers (employer_id, worker_id) VALUES ($1, $2) ON CONFLICT DO NOTHING', [req.user.id, id]);
+  res.status(204).end();
+});
+app.delete('/api/saved/:workerId', requireAuth('employer'), async (req, res) => {
+  await q('DELETE FROM saved_workers WHERE employer_id = $1 AND worker_id = $2', [req.user.id, num(req.params.workerId)]);
+  res.status(204).end();
+});
+// Saved workers, most recently saved first (same privacy rules as search).
+app.get('/api/saved', requireAuth('employer'), async (req, res) => {
+  const { rows } = await q(
+    `${WORKER_SELECT.replace(' FROM users u', ', true AS saved, s.created_at AS saved_at FROM users u')}
+     JOIN saved_workers s ON s.worker_id = u.id AND s.employer_id = $1 ORDER BY s.created_at DESC LIMIT 200`, [req.user.id]);
+  const full = await revealFor(req.user.id, rows.map((w) => w.id));
+  res.json(rows.map((w) => (full(w.id) ? w : limitWorker(w))));
+});
+
+// Mark as hired: only for someone the employer can already talk to here (applied, chatting, or a paid plan).
+app.put('/api/hires/:workerId', requireAuth('employer'), async (req, res) => {
+  const id = num(req.params.workerId);
+  if (!(await isWorker(id))) return res.status(404).json({ error: 'Worker not found' });
+  if (!(await revealFor(req.user.id, [id]))(id))
+    return res.status(403).json({ error: 'You can mark someone as hired once they’ve applied to your job or you’ve talked with them.' });
+  let jobId = req.body?.job_id == null ? null : num(req.body.job_id);
+  if (jobId !== null && !(await q('SELECT 1 FROM jobs WHERE id = $1 AND employer_id = $2', [jobId, req.user.id])).rowCount) jobId = null;
+  await q(`INSERT INTO hires (employer_id, worker_id, job_id) VALUES ($1, $2, $3)
+           ON CONFLICT (employer_id, worker_id) DO UPDATE SET job_id = coalesce($3, hires.job_id)`, [req.user.id, id, jobId]);
+  res.status(204).end();
+});
+app.delete('/api/hires/:workerId', requireAuth('employer'), async (req, res) => {
+  await q('DELETE FROM hires WHERE employer_id = $1 AND worker_id = $2', [req.user.id, num(req.params.workerId)]);
+  res.status(204).end();
+});
+app.get('/api/my/hires', requireAuth('employer'), async (req, res) => {
+  const { rows } = await q(
+    `SELECT u.id, u.name, p.title, h.created_at AS hired_at, j.id AS job_id, j.title AS job_title
+     FROM hires h JOIN users u ON u.id = h.worker_id LEFT JOIN worker_profiles p ON p.user_id = u.id LEFT JOIN jobs j ON j.id = h.job_id
+     WHERE h.employer_id = $1 ORDER BY h.created_at DESC`, [req.user.id]);
+  res.json(rows);
 });
 
 // Optional profile link: blank is fine; otherwise a real http(s) URL ("linkedin.com/in/x" gets https:// added).
@@ -469,27 +892,33 @@ app.put('/api/profile', requireAuth('worker'), async (req, res) => {
 // --- AI application analyzer (employers) ---
 app.locals.analyzeApplication = analyzeApplication; // swappable so tests don't call the real AI
 
+// AI runs this calendar month (Philippine time), re-analyses included; they reset on the 1st.
 async function analyzerUsage(db, employerId) {
   const { rows } = await db.query(
-    `SELECT u.plan, (SELECT count(*)::int FROM applications a JOIN jobs j ON j.id = a.job_id
-       WHERE j.employer_id = u.id AND a.analysis IS NOT NULL) AS used
+    `SELECT u.plan, (SELECT count(*)::int FROM ai_analyses WHERE employer_id = u.id AND created_at >= ${MONTH_PH}) AS used
      FROM users u WHERE u.id = $1`,
     [employerId]
   );
   const { plan, used } = rows[0];
-  const { free_ai_analyses } = await getSettings();
-  const limit = plan === 'pro' ? PRO_ANALYSES : free_ai_analyses;
-  return { plan, used, limit, remaining: plan === 'premium' ? null : Math.max(0, limit - used) };
+  const limit = plan === 'free' ? (await getSettings()).free_ai_analyses : PLAN_LIMITS[plan].analyses;
+  if (limit === null) return { plan, used, limit, remaining: used >= PREMIUM_FAIR_USE ? 0 : null };
+  return { plan, used, limit, remaining: Math.max(0, limit - used) };
 }
+const outOfAnalyses = (res, usage) => res.status(402).json(usage.limit === null
+  ? { error: `You've reached this month's fair-use limit of ${PREMIUM_FAIR_USE.toLocaleString('en-US')} AI fit scores. It resets on the 1st; email support@readytowork.ph if you need more sooner.`, usage }
+  : { error: `You've used this month's ${usage.limit} AI fit scores on the ${PLAN_LIMITS[usage.plan].name} plan. They reset on the 1st.`, upgrade: true, usage });
 
 app.get('/api/analyzer/usage', requireAuth('employer'), async (req, res) => {
   res.json(await analyzerUsage(pool, req.user.id));
 });
 
-// Scores one application against its job. Saved results are returned again for free.
-app.post('/api/applications/:id/analyze', requireAuth('employer'), async (req, res) => {
+// Scores one application against its job. Saved results are returned again for free; `again: true`
+// asks the AI for a fresh look (e.g. after the job or the applicant's resume changed) and uses one more.
+// 300 an hour leaves room for Premium's "score all applicants"; quotas are checked below.
+app.post('/api/applications/:id/analyze', requireAuth('employer'), throttle(300, 60 * 60_000, 'an hour', perUser), async (req, res) => {
+  const plan = await planOf(pool, req.user.id);
   const { rows: [row] } = await q(
-    `SELECT a.id, a.cover_letter, a.analysis, j.title, j.description, j.skills AS job_skills, j.job_type,
+    `SELECT a.id, a.cover_letter, a.analysis, ${RANK} AS rank, j.title, j.description, j.skills AS job_skills, j.job_type,
        p.title AS worker_title, p.bio, p.skills AS worker_skills, p.hourly_rate, p.availability,
        CASE WHEN a.resume_attached THEN coalesce(p.resume_text, '') END AS resume_text
      FROM applications a JOIN jobs j ON j.id = a.job_id LEFT JOIN worker_profiles p ON p.user_id = a.worker_id
@@ -497,10 +926,12 @@ app.post('/api/applications/:id/analyze', requireAuth('employer'), async (req, r
     [num(req.params.id), req.user.id]
   );
   if (!row) return res.status(404).json({ error: 'Application not found' });
-  if (row.analysis) return res.json({ analysis: row.analysis, usage: await analyzerUsage(pool, req.user.id) });
+  if (PLAN_LIMITS[plan].applicants !== null && row.rank >= PLAN_LIMITS[plan].applicants) return hiddenApplicant(res, plan);
+  const again = req.body?.again === true;
+  if (row.analysis && !again) return res.json({ analysis: row.analysis, usage: await analyzerUsage(pool, req.user.id) });
 
   const before = await analyzerUsage(pool, req.user.id);
-  if (before.remaining === 0) return res.status(402).json({ error: 'You’ve used all your free analyses', upgrade: true, usage: before });
+  if (before.remaining === 0) return outOfAnalyses(res, before);
 
   let analysis;
   try {
@@ -530,21 +961,262 @@ app.post('/api/applications/:id/analyze', requireAuth('employer'), async (req, r
     const usage = await analyzerUsage(db, req.user.id);
     if (usage.remaining === 0) {
       await db.query('ROLLBACK');
-      return res.status(402).json({ error: 'You’ve used all your free analyses', upgrade: true, usage });
+      return outOfAnalyses(res, usage);
     }
-    const { rows } = await db.query(
-      `UPDATE applications SET analysis = COALESCE(analysis, $2), analyzed_at = COALESCE(analyzed_at, now())
-       WHERE id = $1 RETURNING analysis`,
+    // A first analysis only saves if no parallel click saved one already (that one wins, and only it counts).
+    const { rows: [saved] } = await db.query(
+      `UPDATE applications SET analysis = $2, analyzed_at = now() WHERE id = $1 ${again ? '' : 'AND analysis IS NULL'} RETURNING analysis`,
       [row.id, analysis]
     );
+    if (saved) await db.query('INSERT INTO ai_analyses (employer_id, application_id) VALUES ($1, $2)', [req.user.id, row.id]);
+    const result = saved?.analysis ?? (await db.query('SELECT analysis FROM applications WHERE id = $1', [row.id])).rows[0].analysis;
     await db.query('COMMIT');
-    res.json({ analysis: rows[0].analysis, usage: await analyzerUsage(pool, req.user.id) });
+    res.json({ analysis: result, usage: await analyzerUsage(pool, req.user.id) });
   } catch (err) {
     await db.query('ROLLBACK');
     throw err;
   } finally {
     db.release();
   }
+});
+
+// --- Feedback ---
+// Anyone can tell us what to improve, signed in or not. Each message is saved for the admin panel and
+// emailed to support so nothing gets missed.
+const FEEDBACK_TYPES = { idea: 'Idea', bug: 'Something broke', other: 'Other' };
+const FEEDBACK_MAX = 2000;
+app.post('/api/feedback', throttle(10, 60 * 60_000, 'an hour'), async (req, res) => {
+  const type = req.body?.type;
+  if (!(type in FEEDBACK_TYPES)) return bad(res, 'Choose Idea, Something broke or Other');
+  if (typeof req.body.message === 'string' && req.body.message.trim().length > FEEDBACK_MAX)
+    return bad(res, `Please keep it under ${FEEDBACK_MAX.toLocaleString('en-US')} characters`);
+  const message = str(req.body.message, FEEDBACK_MAX);
+  if (!message) return bad(res, 'Please write a message');
+  const me = signedInUser(req);
+  if (!me && !(await verifyHuman(req))) return notHuman(res); // visitors only; signed-in people are known
+  const email = me ? null : str(req.body.email, 200) || null;
+  if (email && !EMAIL.test(email)) return bad(res, 'That email address doesn’t look right');
+  EMAIL.lastIndex = 0; // EMAIL is a global regex; reset it after .test()
+  const page = str(req.body.page, 300) || null;
+  const contactOk = req.body.contact_ok === true;
+  const { rows: [fb] } = await q(
+    'INSERT INTO feedback (user_id, type, message, page, contact_ok, email) VALUES ($1, $2, $3, $4, $5, $6) RETURNING id',
+    [me?.id ?? null, type, message, page, contactOk, email]);
+  const { rows: [u] } = me ? await q('SELECT name, email, role, plan FROM users WHERE id = $1', [me.id]) : { rows: [] };
+  const from = u ? `${u.name} <${u.email}> (${u.role}${u.role === 'employer' ? `, ${u.plan}` : ''})` : email ? `Visitor <${email}>` : 'Anonymous visitor';
+  app.locals.sendEmail({
+    to: 'support@readytowork.ph',
+    subject: `Feedback #${fb.id}: ${FEEDBACK_TYPES[type]}`,
+    text: `${FEEDBACK_TYPES[type]} from ${from}\nPage: ${page ?? 'unknown'}\nOK to contact: ${contactOk ? 'yes' : 'no'}\n\n${message}\n\nSee all feedback: ${SITE}/admin`,
+  }).catch((err) => console.error(err));
+  res.status(201).json({ id: fb.id });
+});
+
+// Contact us: a support request from anyone. It lands in the admin inbox (type "support") and in the
+// support mailbox, where Reply goes straight to the person who wrote.
+app.post('/api/contact', throttle(5, 60 * 60_000, 'an hour'), async (req, res) => {
+  const me = signedInUser(req);
+  const name = str(req.body?.name, 100);
+  const email = str(req.body?.email, 200).toLowerCase();
+  const subject = str(req.body?.subject, 150);
+  const message = str(req.body?.message, 5000);
+  if (!name) return bad(res, 'Please enter your name');
+  const validEmail = EMAIL.test(email); EMAIL.lastIndex = 0; // EMAIL is a global regex; reset it after .test()
+  if (!validEmail) return bad(res, 'Please enter a valid email address so we can reply');
+  if (!subject) return bad(res, 'Please add a subject');
+  if (message.length < 5) return bad(res, 'Please write a little more so we can help');
+  if (!me && !(await verifyHuman(req))) return notHuman(res);
+  const { rows: [fb] } = await q(
+    `INSERT INTO feedback (user_id, type, message, page, contact_ok, email, sender_name, subject)
+     VALUES ($1, 'support', $2, $3, true, $4, $5, $6) RETURNING id`,
+    [me?.id ?? null, message, str(req.body.page, 300) || null, email, name, subject]);
+  app.locals.sendEmail({
+    to: 'support@readytowork.ph', replyTo: email,
+    subject: `Support #${fb.id}: ${subject}`,
+    text: `From: ${name} <${email}>${me ? ` (signed in as ${me.role} #${me.id})` : ' (not signed in)'}\n\n${message}\n\nReply to this email to answer them. All messages: ${SITE}/admin/feedback`,
+  }).catch((err) => console.error(err));
+  res.status(201).json({ id: fb.id });
+});
+
+app.get('/api/admin/feedback', requireAdmin, async (req, res) => {
+  const { rows } = await q(
+    `SELECT f.id, f.type, f.message, f.page, f.contact_ok, f.created_at, f.done_at, f.subject,
+       coalesce(u.email, f.email) AS email, coalesce(u.name, f.sender_name) AS name, u.role
+     FROM feedback f LEFT JOIN users u ON u.id = f.user_id
+     ORDER BY f.done_at IS NOT NULL, f.created_at DESC LIMIT 200`);
+  res.json(rows);
+});
+
+app.put('/api/admin/feedback/:id', requireAdmin, async (req, res) => {
+  const { rowCount } = await q('UPDATE feedback SET done_at = CASE WHEN $2 THEN now() END WHERE id = $1', [num(req.params.id), req.body?.done === true]);
+  rowCount ? res.status(204).end() : res.status(404).json({ error: 'Feedback not found' });
+});
+
+// --- Admin: users, jobs, subscriptions ---
+const ADMIN_PAGE = 25;
+const like = (v) => `%${str(v, 100).replace(/[\\%_]/g, (c) => `\\${c}`)}%`; // a search term, with LIKE's wildcards taken literally
+const pageOf = (req) => Math.max(0, Math.floor(num(req.query.page) ?? 0));
+
+// Everyone, newest first; search by name or email, filter by role or plan.
+app.get('/api/admin/users', requireAdmin, async (req, res) => {
+  const role = ['worker', 'employer'].includes(req.query.role) ? req.query.role : '';
+  const plan = ['free', 'pro', 'premium'].includes(req.query.plan) ? req.query.plan : '';
+  const { rows } = await q(
+    `SELECT u.id, u.name, u.email, u.role, u.plan, u.created_at, u.last_seen_at, u.last_country, u.google_sub IS NOT NULL AS google,
+       (SELECT count(*)::int FROM jobs j WHERE j.employer_id = u.id) AS jobs,
+       (SELECT count(*)::int FROM applications a WHERE a.worker_id = u.id) AS applications,
+       count(*) OVER ()::int AS total
+     FROM users u
+     WHERE ($1 = '%%' OR u.name ILIKE $1 OR u.email ILIKE $1) AND ($2 = '' OR u.role = $2) AND ($3 = '' OR (u.role = 'employer' AND u.plan = $3))
+     ORDER BY u.created_at DESC LIMIT ${ADMIN_PAGE} OFFSET $4`,
+    [like(req.query.q), role, plan, pageOf(req) * ADMIN_PAGE]);
+  res.json({ users: rows.map(({ total: _, ...u }) => u), total: rows[0]?.total ?? 0, page_size: ADMIN_PAGE });
+});
+
+// Every job post, newest first; search by title or employer, filter open/closed.
+app.get('/api/admin/jobs', requireAdmin, async (req, res) => {
+  const status = ['open', 'closed'].includes(req.query.status) ? req.query.status : '';
+  const { rows } = await q(
+    `SELECT j.id, j.title, j.job_type, j.created_at, j.closed_at, u.id AS employer_id, u.name AS employer_name, u.email AS employer_email, u.plan,
+       (SELECT count(*)::int FROM applications a WHERE a.job_id = j.id) AS applicants,
+       count(*) OVER ()::int AS total
+     FROM jobs j JOIN users u ON u.id = j.employer_id
+     WHERE ($1 = '%%' OR j.title ILIKE $1 OR u.name ILIKE $1 OR u.email ILIKE $1)
+       AND ($2 = '' OR ($2 = 'open' AND j.closed_at IS NULL) OR ($2 = 'closed' AND j.closed_at IS NOT NULL))
+     ORDER BY j.created_at DESC LIMIT ${ADMIN_PAGE} OFFSET $3`,
+    [like(req.query.q), status, pageOf(req) * ADMIN_PAGE]);
+  res.json({ jobs: rows.map(({ total: _, ...j }) => j), total: rows[0]?.total ?? 0, page_size: ADMIN_PAGE });
+});
+
+// Close a post (spam, scams, a job the employer forgot) or reopen it. Closing hides it from search and stops applications.
+app.put('/api/admin/jobs/:id/closed', requireAdmin, async (req, res) => {
+  const { rowCount } = await q('UPDATE jobs SET closed_at = CASE WHEN $2 THEN coalesce(closed_at, now()) END WHERE id = $1', [num(req.params.id), req.body?.closed === true]);
+  rowCount ? res.status(204).end() : res.status(404).json({ error: 'Job not found' });
+});
+
+// Who pays and how much: paid employers from our database, with price, billing period, renewal and status
+// from Paddle. Plans switched on by hand (no Paddle subscription) show as "manual".
+// ponytail: reads the first 200 live subscriptions from Paddle; page through meta.pagination when there are more.
+app.get('/api/admin/subscriptions', requireAdmin, async (req, res) => {
+  const { rows: paying } = await q(
+    `SELECT id, name, email, plan, plan_changed_at, paddle_subscription_id FROM users
+     WHERE role = 'employer' AND plan <> 'free' ORDER BY plan_changed_at DESC NULLS LAST`);
+  const { rows: [{ employers }] } = await q("SELECT count(*)::int AS employers FROM users WHERE role = 'employer'");
+  let live = new Map(), paddleError = null;
+  if (process.env.PADDLE_API_KEY && paying.some((u) => u.paddle_subscription_id)) {
+    try {
+      const subs = await paddle('/subscriptions?status=active,past_due,paused&per_page=200');
+      live = new Map(subs.map((s) => [s.id, s]));
+    } catch (err) {
+      console.error(err.message);
+      paddleError = 'Couldn’t reach Paddle, so prices and renewals are missing.';
+    }
+  }
+  const rows = paying.map((u) => {
+    const s = live.get(u.paddle_subscription_id);
+    const item = s?.items?.[0]?.price;
+    const price = item ? Number(item.unit_price.amount) / 100 : null;
+    const yearly = item?.billing_cycle?.interval === 'year';
+    return {
+      id: u.id, name: u.name, email: u.email, plan: u.plan, since: u.plan_changed_at,
+      source: !u.paddle_subscription_id ? 'manual' : s ? 'paddle' : 'unknown',
+      status: s?.status ?? null, price, yearly, monthly: price === null ? null : yearly ? Math.round((price / 12) * 100) / 100 : price,
+      next_billed_at: s?.next_billed_at ?? null,
+      cancels_at: s?.scheduled_change?.action === 'cancel' ? s.scheduled_change.effective_at : null,
+    };
+  });
+  const sum = (f) => Math.round(rows.filter(f).reduce((n, r) => n + (r.monthly ?? 0), 0) * 100) / 100;
+  res.json({
+    totals: {
+      monthly_revenue: sum((r) => r.status === 'active' || r.status === 'past_due'),
+      paying: rows.length, pro: rows.filter((r) => r.plan === 'pro').length, premium: rows.filter((r) => r.plan === 'premium').length,
+      cancelling: rows.filter((r) => r.cancels_at).length, past_due: rows.filter((r) => r.status === 'past_due').length,
+      manual: rows.filter((r) => r.source === 'manual').length, employers,
+    },
+    subscriptions: rows, paddle_error: paddleError,
+  });
+});
+
+// --- Hiring analytics (Premium) ---
+// One employer's hiring at a glance, for the last 7, 30 or 90 days and for all jobs or one job:
+// headline numbers against the period before, applications over time (Philippine days or weeks),
+// the funnel from applied to replied, the fit-score mix, the best candidates not yet messaged, and
+// every job's numbers. Premium sees everyone who applied, so these count every application.
+const RANGES = [7, 30, 90];
+app.get('/api/analytics', requireAuth('employer'), async (req, res) => {
+  if ((await planOf(pool, req.user.id)) !== 'premium')
+    return res.status(402).json({ error: 'Hiring analytics is part of the Premium plan', upgrade: true });
+  const days = RANGES.includes(Number(req.query.days)) ? Number(req.query.days) : 30;
+  const jobId = req.query.job ? num(req.query.job) : null;
+  if (jobId !== null) {
+    const { rowCount } = await q('SELECT 1 FROM jobs WHERE id = $1 AND employer_id = $2', [jobId, req.user.id]);
+    if (!rowCount) return res.status(404).json({ error: 'Job not found' });
+  }
+  const now = Date.now();
+  const since = new Date(now - days * 864e5), before = new Date(now - 2 * days * 864e5);
+  const mineAt = (n) => `j.employer_id = $1 AND ($${n}::int IS NULL OR j.id = $${n})`; // $n is the job filter
+  const mine = mineAt(4);
+  const messaged = 'EXISTS (SELECT 1 FROM messages m WHERE m.sender_id = $1 AND m.recipient_id = a.worker_id)';
+  const replied = 'EXISTS (SELECT 1 FROM messages m WHERE m.sender_id = a.worker_id AND m.recipient_id = $1)';
+  const score = "(a.analysis->>'score')::int";
+  const cur = 'a.created_at >= $2', prev = 'a.created_at >= $3 AND a.created_at < $2';
+  const p = [req.user.id, since, before, jobId];
+  const unit = days <= 30 ? 'day' : 'week';
+  const buckets = unit === 'day' ? days : 13;
+
+  const [{ rows: [t] }, { rows: [first] }, { rows: chart }, { rows: candidates }, { rows: jobs }] = await Promise.all([
+    q(`SELECT
+         (count(*) FILTER (WHERE ${cur}))::int AS applicants, (count(*) FILTER (WHERE ${prev}))::int AS applicants_prev,
+         round(avg(${score}) FILTER (WHERE ${cur}))::int AS avg_score, round(avg(${score}) FILTER (WHERE ${prev}))::int AS avg_score_prev,
+         (count(*) FILTER (WHERE ${cur} AND a.analysis IS NOT NULL))::int AS scored,
+         (count(*) FILTER (WHERE ${cur} AND ${messaged}))::int AS messaged, (count(*) FILTER (WHERE ${prev} AND ${messaged}))::int AS messaged_prev,
+         (count(*) FILTER (WHERE ${cur} AND ${messaged} AND ${replied}))::int AS replied, (count(*) FILTER (WHERE ${prev} AND ${messaged} AND ${replied}))::int AS replied_prev,
+         (count(*) FILTER (WHERE ${cur} AND ${score} >= 85))::int AS strong,
+         (count(*) FILTER (WHERE ${cur} AND ${score} BETWEEN 65 AND 84))::int AS good,
+         (count(*) FILTER (WHERE ${cur} AND ${score} BETWEEN 40 AND 64))::int AS partial,
+         (count(*) FILTER (WHERE ${cur} AND ${score} < 40))::int AS poor
+       FROM applications a JOIN jobs j ON j.id = a.job_id WHERE ${mine}`, p),
+    // median hours from posting a job to its first application
+    q(`SELECT round(percentile_cont(0.5) WITHIN GROUP (ORDER BY h))::int AS hours FROM (
+         SELECT extract(epoch FROM min(a.created_at) - j.created_at) / 3600 AS h
+         FROM jobs j JOIN applications a ON a.job_id = j.id WHERE ${mineAt(2)} GROUP BY j.id) x`, [req.user.id, jobId]),
+    q(`SELECT to_char(b, 'YYYY-MM-DD') AS start, count(a.id)::int AS applicants
+       FROM generate_series(date_trunc($3, now() AT TIME ZONE 'Asia/Manila') - ($4::int - 1) * ('1 ' || $3)::interval,
+                            date_trunc($3, now() AT TIME ZONE 'Asia/Manila'), ('1 ' || $3)::interval) b
+       LEFT JOIN (applications a JOIN jobs j ON j.id = a.job_id AND ${mineAt(2)})
+         ON date_trunc($3, a.created_at AT TIME ZONE 'Asia/Manila') = b
+       GROUP BY b ORDER BY b`, [req.user.id, jobId, unit, buckets]),
+    // open jobs only: people you could still hire
+    q(`SELECT a.id, a.job_id, a.worker_id, u.name, j.title, ${score} AS score, a.credits
+       FROM applications a JOIN jobs j ON j.id = a.job_id JOIN users u ON u.id = a.worker_id
+       WHERE ${mineAt(2)} AND j.closed_at IS NULL AND a.analysis IS NOT NULL AND NOT ${messaged}
+       ORDER BY score DESC, a.credits DESC, a.created_at LIMIT 5`, [req.user.id, jobId]),
+    // every job (it's also the job picker), its numbers for the period, and a 12-week trend
+    q(`SELECT j.id, j.title, j.created_at, j.closed_at,
+         (count(a.id) FILTER (WHERE ${cur}))::int AS applicants,
+         (count(a.id) FILTER (WHERE a.created_at > now() - interval '7 days'))::int AS new_7d,
+         (count(a.analysis) FILTER (WHERE ${cur}))::int AS scored,
+         round(avg(${score}) FILTER (WHERE ${cur}))::int AS avg_score,
+         max(${score}) FILTER (WHERE ${cur}) AS top_score,
+         (count(DISTINCT a.worker_id) FILTER (WHERE ${cur} AND ${messaged}))::int AS messaged,
+         round(extract(epoch FROM min(a.created_at) - j.created_at) / 3600)::int AS hours_to_first,
+         (SELECT array_agg(n ORDER BY w) FROM (
+            SELECT w, count(b.id)::int AS n
+            FROM generate_series(date_trunc('week', now() AT TIME ZONE 'Asia/Manila') - interval '11 weeks',
+                                 date_trunc('week', now() AT TIME ZONE 'Asia/Manila'), interval '1 week') w
+            LEFT JOIN applications b ON b.job_id = j.id AND date_trunc('week', b.created_at AT TIME ZONE 'Asia/Manila') = w
+            GROUP BY w) s) AS trend
+       FROM jobs j LEFT JOIN applications a ON a.job_id = j.id
+       WHERE j.employer_id = $1 GROUP BY j.id ORDER BY j.closed_at IS NOT NULL, j.created_at DESC`, [req.user.id, since]),
+  ]);
+  const { strong, good, partial, poor, ...tiles } = t;
+  res.json({
+    days, job: jobId, unit, chart,
+    tiles: { ...tiles, first_applicant_hours: first?.hours ?? null },
+    funnel: { applied: t.applicants, scored: t.scored, messaged: t.messaged, replied: t.replied },
+    mix: { strong, good, partial, poor },
+    candidates, jobs,
+  });
 });
 
 // --- Messages ---
@@ -576,9 +1248,20 @@ async function counterpart(me, otherId) {
   return other && other.id !== me.id && other.role !== me.role ? other : null;
 }
 
-// Workers may only reply to employers who messaged them first.
+// Workers may only reply to employers who messaged them first. Employers on a paid plan can reach out to
+// any worker; on Free, only to workers who applied to one of their jobs, or to keep a conversation going.
 async function canSend(me, other) {
-  if (me.role === 'employer') return true;
+  if (me.role === 'employer') {
+    if (PLAN_LIMITS[await planOf(pool, me.id)].outreach) return true;
+    const { rowCount } = await q(
+      `SELECT 1 FROM applications a JOIN jobs j ON j.id = a.job_id WHERE j.employer_id = $1 AND a.worker_id = $2
+       UNION ALL
+       SELECT 1 FROM messages WHERE (sender_id = $1 AND recipient_id = $2) OR (sender_id = $2 AND recipient_id = $1)
+       LIMIT 1`,
+      [me.id, other.id]
+    );
+    return rowCount > 0;
+  }
   const { rowCount } = await q('SELECT 1 FROM messages WHERE sender_id = $1 AND recipient_id = $2 LIMIT 1', [other.id, me.id]);
   return rowCount > 0;
 }
@@ -598,12 +1281,14 @@ app.get('/api/messages/:userId', requireAuth(), async (req, res) => {
   res.json({ user: { id: other.id, name: other.name, role: other.role }, can_send: await canSend(req.user, other), messages: rows });
 });
 
-app.post('/api/messages/:userId', requireAuth(), async (req, res) => {
+app.post('/api/messages/:userId', requireAuth(), throttle(60, 60 * 60_000, 'an hour', perUser), async (req, res) => {
   const other = await counterpart(req.user, req.params.userId);
-  if (!other) return res.status(404).json({ error: 'You can only message employers or workers on RemotePinas' });
+  if (!other) return res.status(404).json({ error: 'You can only message employers or workers on ReadyToWork.ph' });
   const body = str(req.body.body, 5000);
   if (!body) return bad(res, 'Message can’t be empty');
-  if (!(await canSend(req.user, other))) return res.status(403).json({ error: 'You can reply once this employer messages you' });
+  if (!(await canSend(req.user, other))) return res.status(403).json(req.user.role === 'employer'
+    ? { error: 'On the Free plan you can message workers who applied to your jobs. Upgrade to Pro to reach out to any worker first.', upgrade: true }
+    : { error: 'You can reply once this employer messages you' });
 
   let job = null;
   if (req.body.job_id != null) {
@@ -627,14 +1312,14 @@ app.post('/api/messages/:userId', requireAuth(), async (req, res) => {
     const preview = body.length > 400 ? `${body.slice(0, 400)}…` : body;
     app.locals.sendEmail({
       to: other.email,
-      subject: `New message from ${me.name} on RemotePinas`,
+      subject: `New message from ${me.name} on ReadyToWork.ph`,
       ...renderEmail({
         preheader: preview.slice(0, 120),
         greeting: `Hi ${other.name},`,
-        intro: [`${me.name} sent you a message on RemotePinas${job ? ` about "${job.title}"` : ''}:`],
+        intro: [`${me.name} sent you a message on ReadyToWork.ph${job ? ` about "${job.title}"` : ''}:`],
         quote: preview,
         button: { label: 'Read and reply', url: `${SITE}/messages?with=${req.user.id}` },
-        reason: 'You’re receiving this because someone messaged you on RemotePinas. We email you once, then wait until you’ve read your messages.',
+        reason: 'You’re receiving this because someone messaged you on ReadyToWork.ph. We email you once, then wait until you’ve read your messages.',
       }),
     }).catch((err) => console.error(err));
   }
@@ -644,6 +1329,7 @@ app.post('/api/messages/:userId', requireAuth(), async (req, res) => {
 // --- Resumes (optional, PDF, private) ---
 app.locals.storage = storage; // swappable so tests don't touch real R2
 const MAX_RESUME_MB = 5;
+const uploads = throttle(20, 60 * 60_000, 'an hour', perUser); // resume + photo uploads (reading PDFs is heavy)
 
 app.get('/api/profile/resume', requireAuth('worker'), async (req, res) => {
   const { rows: [p] } = await q('SELECT resume_key, resume_name, resume_uploaded_at FROM worker_profiles WHERE user_id = $1', [req.user.id]);
@@ -666,7 +1352,7 @@ export async function pdfText(buffer) {
 const deleteFile = (key) => key && app.locals.storage.remove(key).catch((err) => console.error(err));
 
 // The browser sends the PDF as the raw request body, with its file name in the X-File-Name header.
-app.put('/api/profile/resume', requireAuth('worker'),
+app.put('/api/profile/resume', requireAuth('worker'), uploads,
   express.raw({ type: 'application/pdf', limit: `${MAX_RESUME_MB}mb` }),
   async (req, res) => {
     const file = req.body;
@@ -714,7 +1400,7 @@ app.get('/api/users/:id/photo', async (req, res) => {
   res.redirect(302, await app.locals.storage.signedUrl(u.photo_key, 'photo', 600));
 });
 
-app.put('/api/profile/photo', requireAuth(),
+app.put('/api/profile/photo', requireAuth(), uploads,
   express.raw({ type: ['image/jpeg', 'image/png', 'image/webp'], limit: `${MAX_PHOTO_MB}mb` }),
   async (req, res) => {
     const file = req.body;
@@ -737,20 +1423,169 @@ app.delete('/api/profile/photo', requireAuth(), async (req, res) => {
 
 // Only the employer who received the application can open the (current) resume attached to it.
 app.get('/api/applications/:id/resume', requireAuth('employer'), async (req, res) => {
+  const plan = await planOf(pool, req.user.id);
   const { rows: [a] } = await q(
-    `SELECT p.resume_key, p.resume_name FROM applications a JOIN jobs j ON j.id = a.job_id
+    `SELECT p.resume_key, p.resume_name, ${RANK} AS rank FROM applications a JOIN jobs j ON j.id = a.job_id
      JOIN worker_profiles p ON p.user_id = a.worker_id
      WHERE a.id = $1 AND j.employer_id = $2 AND a.resume_attached`,
     [num(req.params.id), req.user.id]
   );
+  if (a && PLAN_LIMITS[plan].applicants !== null && a.rank >= PLAN_LIMITS[plan].applicants) return hiddenApplicant(res, plan);
   if (!a?.resume_key) return res.status(404).json({ error: 'No resume attached' });
   res.json({ url: await app.locals.storage.signedUrl(a.resume_key, a.resume_name) });
+});
+
+// --- Billing (Paddle) ---
+// Paddle is the seller: employers pay at Paddle's checkout, Paddle handles sales tax and pays us out.
+// Plans are only switched by what Paddle reports about a subscription (its webhook, or its answer when
+// we change a plan), never by the browser.
+const PADDLE_API = process.env.PADDLE_ENV === 'production' ? 'https://api.paddle.com' : 'https://sandbox-api.paddle.com';
+const PRICES = () => ({
+  pro: { monthly: process.env.PADDLE_PRICE_PRO_MONTHLY, yearly: process.env.PADDLE_PRICE_PRO_YEARLY },
+  premium: { monthly: process.env.PADDLE_PRICE_PREMIUM_MONTHLY, yearly: process.env.PADDLE_PRICE_PREMIUM_YEARLY },
+});
+const planOfPrice = (id) => Object.entries(PRICES()).find(([, p]) => id && (p.monthly === id || p.yearly === id))?.[0];
+const isYearly = (id) => Object.values(PRICES()).some((p) => p.yearly === id);
+
+async function paddle(path, body, method = body ? 'POST' : 'GET') {
+  const res = await fetch(PADDLE_API + path, {
+    method,
+    headers: { authorization: `Bearer ${process.env.PADDLE_API_KEY}`, 'content-type': 'application/json' },
+    body: body && JSON.stringify(body),
+  });
+  const json = await res.json().catch(() => null);
+  if (!res.ok) throw Object.assign(new Error(`Paddle ${method} ${path} answered ${res.status}: ${JSON.stringify(json?.error)}`), { paddle: json?.error });
+  return json.data;
+}
+
+const LIVE = ['active', 'trialing', 'past_due'];
+// Saves what Paddle says about a subscription. The paid plan stays on while it's active or Paddle is
+// retrying a payment, and goes back to Free once it's canceled or paused. Only the account's current
+// subscription changes its plan (a new paid one takes over), and Paddle's messages can arrive out of
+// order, so an older state never overwrites a newer one. Returns false for a price we don't sell.
+async function saveSubscription(sub, userId) {
+  const plan = LIVE.includes(sub.status) ? planOfPrice(sub.items?.[0]?.price?.id) : 'free';
+  if (!plan) return false;
+  await q(
+    `UPDATE users SET plan = $1, paddle_customer_id = $2, paddle_subscription_id = $3, paddle_updated_at = $4
+     WHERE role = 'employer' AND (paddle_subscription_id = $3 OR (id = $5 AND (paddle_subscription_id IS NULL OR $6)))
+       AND (paddle_updated_at IS NULL OR paddle_updated_at < $4::timestamptz)`,
+    [plan, sub.customer_id, sub.id, sub.updated_at, Number(userId) || 0, plan !== 'free']
+  );
+  return true;
+}
+const billingAccount = async (userId) =>
+  (await q('SELECT email, plan, paddle_customer_id, paddle_subscription_id FROM users WHERE id = $1', [userId])).rows[0];
+const portalUrl = async (u) =>
+  (await paddle(`/customers/${u.paddle_customer_id}/portal-sessions`, { subscription_ids: [u.paddle_subscription_id] })).urls.general.overview;
+
+// What the pricing page needs to open Paddle's checkout. No token yet: the page says "email us to upgrade".
+app.get('/api/billing/config', (req, res) => {
+  const ready = process.env.PADDLE_CLIENT_TOKEN && process.env.PADDLE_API_KEY;
+  res.json({ token: ready ? process.env.PADDLE_CLIENT_TOKEN : null, environment: process.env.PADDLE_ENV === 'production' ? 'production' : 'sandbox' });
+});
+
+// Starts a checkout. The transaction is made here, not in the browser, so the page can't change which
+// account it upgrades. Employers already paying switch plans with /api/billing/change instead (a second
+// checkout would bill them twice).
+app.post('/api/billing/checkout', requireAuth('employer'), async (req, res) => {
+  const price = PRICES()[req.body?.plan]?.[req.body?.yearly ? 'yearly' : 'monthly'];
+  if (!price) return bad(res, 'Choose Pro or Premium');
+  const u = await billingAccount(req.user.id);
+  if (u.plan !== 'free' && u.paddle_subscription_id) return res.status(409).json({ error: 'You already have a paid plan. Switch plans from the pricing page.' });
+  const txn = await paddle('/transactions', {
+    items: [{ price_id: price, quantity: 1 }],
+    custom_data: { user_id: String(req.user.id) },
+    ...(u.paddle_customer_id && { customer_id: u.paddle_customer_id }),
+  });
+  res.json({ transaction_id: txn.id, email: u.paddle_customer_id ? null : u.email });
+});
+
+// The employer's subscription as Paddle has it now, for the pricing page: plan, monthly or yearly, next
+// renewal, and whether it's set to cancel.
+app.get('/api/billing/subscription', requireAuth('employer'), async (req, res) => {
+  const u = await billingAccount(req.user.id);
+  if (!u.paddle_subscription_id || u.plan === 'free') return res.json({ subscription: null });
+  const sub = await paddle(`/subscriptions/${u.paddle_subscription_id}`);
+  const price = sub.items?.[0]?.price?.id;
+  res.json({ subscription: {
+    plan: planOfPrice(price), yearly: isYearly(price), status: sub.status, next_billed_at: sub.next_billed_at,
+    cancels_at: sub.scheduled_change?.action === 'cancel' ? sub.scheduled_change.effective_at : null,
+  } });
+});
+
+// Paddle's billing page: card on file, invoices, cancelling.
+app.post('/api/billing/portal', requireAuth('employer'), async (req, res) => {
+  const u = await billingAccount(req.user.id);
+  if (!u.paddle_subscription_id) return res.status(404).json({ error: 'No billing account yet' });
+  res.json({ url: await portalUrl(u) });
+});
+
+// Switches a paying employer's plan (Pro <-> Premium, monthly <-> yearly) on their existing subscription.
+// Without `confirm` it only previews what Paddle would charge today; with it, Paddle charges the card on
+// file at once, crediting the unused part of the old plan, and the new plan applies right away.
+app.post('/api/billing/change', requireAuth('employer'), async (req, res) => {
+  const price = PRICES()[req.body?.plan]?.[req.body?.yearly ? 'yearly' : 'monthly'];
+  if (!price) return bad(res, 'Choose Pro or Premium');
+  const u = await billingAccount(req.user.id);
+  if (u.plan === 'free' || !u.paddle_subscription_id) return res.status(409).json({ error: 'Subscribe first, then you can switch plans' });
+  const change = { items: [{ price_id: price, quantity: 1 }], proration_billing_mode: 'prorated_immediately' };
+  try {
+    if (!req.body.confirm) {
+      const p = await paddle(`/subscriptions/${u.paddle_subscription_id}/preview`, change, 'PATCH');
+      const usd = (t) => (t ? Number(t.details.totals.grand_total) / 100 : 0); // prices are in USD
+      // On a downgrade nothing is charged; the unused part of the old plan becomes credit toward the next bills.
+      const credit = p.update_summary?.result?.action === 'credit' ? Number(p.update_summary.result.amount) / 100 : 0;
+      return res.json({ preview: { today: usd(p.immediate_transaction), credit, next_billed_at: p.next_billed_at } });
+    }
+    const sub = await paddle(`/subscriptions/${u.paddle_subscription_id}`, change, 'PATCH');
+    await saveSubscription(sub, req.user.id); // Paddle's webhook says the same a moment later
+    res.json({ plan: planOfPrice(price) });
+  } catch (err) {
+    if (!err.paddle) throw err;
+    console.error(err.message);
+    res.status(400).json({ error: err.paddle.code === 'subscription_locked_pending_changes'
+      ? 'Your plan has a change waiting to apply (such as a cancellation). Undo it from Manage billing, then switch.'
+      : err.paddle.code === 'forbidden' // our API key lacks Subscriptions: Write
+        ? 'Switching plans isn’t available right now. Please email support@readytowork.ph and we’ll switch it for you.'
+        : `Paddle couldn’t switch your plan: ${err.paddle.detail ?? 'please try again'}` });
+  }
+});
+
+// Paddle-Signature is "ts=<unix time>;h1=<hmac>" (more than one h1 while Paddle rotates secrets).
+function paddleSigned(req) {
+  const secret = process.env.PADDLE_WEBHOOK_SECRET;
+  const fields = (req.get('paddle-signature') ?? '').split(';').map((p) => p.split('='));
+  const ts = fields.find(([k]) => k === 'ts')?.[1];
+  if (!secret || !req.rawBody || !(Math.abs(Date.now() / 1000 - Number(ts)) <= 300)) return false; // 5 min for clock drift
+  const expected = createHmac('sha256', secret).update(`${ts}:`).update(req.rawBody).digest('hex');
+  return fields.some(([k, v]) => k === 'h1' && sameText(v, expected));
+}
+
+// Every subscription change (new, renewed, switched, payment failing, canceled) arrives here. Canceling
+// takes effect at the end of the paid period, so employers keep what they paid for.
+app.post('/api/billing/webhook', async (req, res) => {
+  if (!paddleSigned(req)) return res.status(401).json({ error: 'Bad signature' });
+  const { event_type, data: sub } = req.body;
+  if (!event_type?.startsWith('subscription.')) return res.status(204).end();
+  // Subscriptions that aren't one of our accounts' (like the samples Paddle's Simulations send) are ignored.
+  const { rowCount: ours } = await q(
+    "SELECT 1 FROM users WHERE role = 'employer' AND (paddle_subscription_id = $1 OR id = $2)", [sub.id, Number(sub.custom_data?.user_id) || 0]);
+  if (!ours) return res.status(204).end();
+  // A price we don't know means the PADDLE_PRICE_* settings are wrong. Failing makes Paddle retry,
+  // so the upgrade still lands once they're fixed.
+  if (!(await saveSubscription(sub, sub.custom_data?.user_id))) {
+    console.error(`Paddle webhook: unknown price ${sub.items?.[0]?.price?.id}`);
+    return res.status(500).json({ error: 'Unknown price' });
+  }
+  res.status(204).end();
 });
 
 app.use((err, req, res, next) => {
   if (err.type === 'entity.too.large')
     return res.status(413).json({ error: req.path.endsWith('/resume') ? `Your resume is too large (max ${MAX_RESUME_MB} MB)`
       : req.path.endsWith('/photo') ? `Your photo is too large (max ${MAX_PHOTO_MB} MB)` : 'Request is too large' });
+  if (err.status >= 400 && err.status < 500) return res.status(err.status).json({ error: 'Bad request' }); // e.g. broken JSON
   console.error(err);
   res.status(500).json({ error: 'Server error' });
 });

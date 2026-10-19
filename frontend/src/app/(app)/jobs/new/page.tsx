@@ -1,7 +1,7 @@
 'use client';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
-import { api, type Job } from '@/lib/api';
+import { api, useApi, type Job } from '@/lib/api';
 import { useAuth } from '@/lib/auth';
 import { JobForm } from '@/components/JobForm';
 import { button, buttonGhost, card } from '@/components/ui';
@@ -33,10 +33,24 @@ export default function NewJobPage() {
       </div>
     );
   }
+  return <EmployerNewJob onPosted={(job) => router.push(`/jobs/${job.id}`)} />;
+}
+
+// Each plan includes a number of job posts a month; when they're used up, say so before the form, not after.
+function EmployerNewJob({ onPosted }: { onPosted: (job: Job) => void }) {
+  const { data: quota } = useApi<{ plan: string; remaining: number; limit: number; message: string | null }>('/my/job-quota');
+  if (quota?.message) {
+    return (
+      <div className={`${card} mx-auto max-w-xl space-y-4 p-10 text-center`}>
+        <h1 className="font-display text-2xl font-bold text-slate-900">You&apos;ve used this month&apos;s job posts</h1>
+        <p className="text-slate-600">{quota.message}</p>
+        {quota.plan !== 'premium' && <Link href="/pricing" className={button}>See plans</Link>}
+      </div>
+    );
+  }
   return (
-    <JobForm heading="Post a job" submitLabel="Post job" onSubmit={async (form) => {
-      const job = await api<Job>('/jobs', { body: form });
-      router.push(`/jobs/${job.id}`);
-    }} />
+    <JobForm heading="Post a job" submitLabel="Post job"
+      notice={quota && <p>{quota.remaining} of {quota.limit} job posts left this month.</p>}
+      onSubmit={async (form) => onPosted(await api<Job>('/jobs', { body: form }))} />
   );
 }

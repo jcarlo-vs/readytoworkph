@@ -1,7 +1,9 @@
 'use client';
 import { useEffect, useState } from 'react';
 
-export const API = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:4000/api';
+// Same address as the site: the live Worker forwards /api to the backend, and in development Next does
+// (next.config.ts). The browser then sends the login cookie by itself; no token is handled in code.
+export const API = '/api';
 
 export type User = { id: number; email: string; name: string; role: 'worker' | 'employer'; has_photo?: boolean; plan?: 'free' | 'pro' | 'premium' };
 export type Job = {
@@ -13,6 +15,8 @@ export type Job = {
 export type Worker = {
   id: number; name: string; title: string; bio: string; skills: string[];
   hourly_rate: string | null; availability: string; portfolio_url: string | null; linkedin_url: string | null;
+  limited?: true; // shown to a Free employer who can't contact this worker yet: "Maria S.", no links
+  member_since?: string; last_seen_at?: string | null; saved?: boolean; hired_at?: string | null;
 };
 
 export type Credits = { daily: number; used: number; remaining: number; resets_at: string };
@@ -22,10 +26,6 @@ export const interest = (credits: number) =>
   credits >= 20 ? { label: 'High interest', className: 'bg-amber-400 text-slate-900' }
   : credits >= 5 ? { label: 'Strong interest', className: 'bg-amber-100 text-amber-900' }
   : { label: 'Standard', className: 'bg-slate-100 text-slate-600' };
-
-export const getToken = () => {
-  try { return localStorage.getItem('token'); } catch { return null; }
-};
 
 // Count of in-flight API requests, so the top loading bar can show while anything is fetching.
 let inflight = 0;
@@ -39,21 +39,42 @@ export const loadingStore = {
 };
 const track = (delta: number) => { inflight += delta; loadingListeners.forEach((fn) => fn()); };
 
+// An API error with its HTTP status, so callers can tell "logged out" (401) from a temporary problem.
+export class ApiError extends Error {
+  constructor(message: string, public status: number, public data: Record<string, unknown> | null = null) { super(message); }
+}
+
+// Reads a JSON response. Some answers aren't JSON: Cloudflare's "too many requests" block is plain
+// text, and so are network or server outages. Those get a friendly message instead of a parse error.
+export async function read<T>(res: Response, fallback: string): Promise<T> {
+  const data = await res.json().catch(() => null);
+  if (res.ok && data !== null) return data;
+  if (res.status === 429) throw new ApiError(data?.error ?? 'You’re going a little fast. Please wait a few seconds and try again.', 429);
+  if (res.status >= 500 && !data?.error) throw new ApiError('ReadyToWork.ph is having trouble right now. Please try again in a minute.', res.status);
+  throw new ApiError(data?.error ?? fallback, res.status, data);
+}
+
+// fetch() itself fails when the visitor is offline or the site can't be reached at all.
+async function send(url: string, init: RequestInit) {
+  try {
+    return await fetch(url, init);
+  } catch {
+    throw new ApiError('Can’t connect to ReadyToWork.ph. Check your internet connection and try again.', 0);
+  }
+}
+
 // `quiet` requests (background refreshes) don't show the top loading bar.
 export async function api<T = unknown>(path: string, opts: { method?: string; body?: unknown; quiet?: boolean } = {}): Promise<T> {
-  const token = getToken();
   const step = opts.quiet ? 0 : 1;
   track(step);
   try {
-    const res = await fetch(API + path, {
+    const res = await send(API + path, {
       method: opts.method ?? (opts.body ? 'POST' : 'GET'),
-      headers: { 'content-type': 'application/json', ...(token && { authorization: `Bearer ${token}` }) },
+      headers: { 'content-type': 'application/json' },
       body: opts.body ? JSON.stringify(opts.body) : undefined,
     });
     if (res.status === 204) return null as T;
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.error ?? 'Request failed');
-    return data;
+    return await read<T>(res, 'Something went wrong. Please try again.');
   } finally {
     track(-step);
   }
@@ -61,17 +82,14 @@ export async function api<T = unknown>(path: string, opts: { method?: string; bo
 
 // Uploads a file as the raw request body (the backend checks type and size).
 export async function uploadFile<T>(path: string, file: Blob, name = ''): Promise<T> {
-  const token = getToken();
   track(1);
   try {
-    const res = await fetch(API + path, {
+    const res = await send(API + path, {
       method: 'PUT',
-      headers: { 'content-type': file.type, 'x-file-name': encodeURIComponent(name), ...(token && { authorization: `Bearer ${token}` }) },
+      headers: { 'content-type': file.type, 'x-file-name': encodeURIComponent(name) },
       body: file,
     });
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.error ?? 'Upload failed');
-    return data;
+    return await read<T>(res, 'Upload failed. Please try again.');
   } finally {
     track(-1);
   }
@@ -91,27 +109,53 @@ export const photoStore = {
 
 export type Resume = { name: string; uploaded_at: string; url: string };
 
+// When the person last moved the mouse, typed, scrolled or touched the screen. Background refreshes
+// stop after 5 idle minutes (a tab left open all day would otherwise poll the server forever).
+let lastActive = Date.now();
+if (typeof window !== 'undefined') {
+  for (const e of ['pointermove', 'keydown', 'scroll', 'touchstart']) window.addEventListener(e, () => { lastActive = Date.now(); }, { passive: true });
+}
+const IDLE_MS = 5 * 60_000;
+
 // Fetches `path`; `refreshMs` re-fetches in the background, and `reload()` re-fetches on demand.
-export function useApi<T>(path: string | null, refreshMs?: number) {
-  const [data, setData] = useState<T | null>(null);
+// `initial` is data the server already rendered the page with (shown at once, then refreshed).
+export function useApi<T>(path: string | null, refreshMs?: number, initial?: T) {
+  const [data, setData] = useState<T | null>(initial ?? null);
   const [error, setError] = useState('');
+  const [status, setStatus] = useState(0); // HTTP status of the error, e.g. 404 when the thing doesn't exist
   const [version, setVersion] = useState(0);
   useEffect(() => {
     if (!path) return;
     let live = true;
-    api<T>(path, { quiet: version > 0 }).then((d) => live && setData(d), (e) => live && setError(e.message));
+    api<T>(path, { quiet: version > 0 }).then(
+      (d) => { if (live) { setData(d); setError(''); } },
+      (e) => { if (live) { setError(e.message); setStatus(e instanceof ApiError ? e.status : 0); } },
+    );
     return () => { live = false; };
   }, [path, version]);
-  // Background refresh pauses while the tab is hidden (saves server and database work),
-  // and catches up as soon as the tab is visible again.
+  // Background refresh pauses while the tab is hidden or the person is idle (saves server and database
+  // work), and catches up as soon as they're back.
   useEffect(() => {
     if (!path || !refreshMs) return;
-    const refresh = () => { if (!document.hidden) setVersion((v) => v + 1); };
+    let missed = false;
+    const refresh = () => {
+      if (document.hidden || Date.now() - lastActive > IDLE_MS) { missed = true; return; }
+      missed = false;
+      setVersion((v) => v + 1);
+    };
+    const back = () => { if (missed) refresh(); };
     const t = setInterval(refresh, refreshMs);
-    document.addEventListener('visibilitychange', refresh);
-    return () => { clearInterval(t); document.removeEventListener('visibilitychange', refresh); };
+    document.addEventListener('visibilitychange', back);
+    window.addEventListener('pointermove', back, { passive: true });
+    window.addEventListener('keydown', back);
+    return () => {
+      clearInterval(t);
+      document.removeEventListener('visibilitychange', back);
+      window.removeEventListener('pointermove', back);
+      window.removeEventListener('keydown', back);
+    };
   }, [path, refreshMs]);
-  return { data, error, reload: () => setVersion((v) => v + 1) };
+  return { data, error, status, reload: () => setVersion((v) => v + 1) };
 }
 
 export type Conversation = {
@@ -129,14 +173,4 @@ export const PAY_PERIODS: { value: SalaryPeriod; label: string }[] = [
   { value: 'year', label: 'Per year' },
   { value: 'fixed', label: 'Fixed price' },
 ];
-const PERIOD_SUFFIX: Record<SalaryPeriod, string> = { hour: '/hr', month: '/mo', year: '/yr', fixed: ' fixed' };
-// "$7.50", "$1,200" (cents only when there are any)
-const usd = (v: number | string) => `$${Number(v).toLocaleString('en-US', { minimumFractionDigits: Number(v) % 1 ? 2 : 0, maximumFractionDigits: 2 })}`;
-
-export const salary = (j: Pick<Job, 'salary_min' | 'salary_max'> & { salary_period?: SalaryPeriod }) => {
-  const per = PERIOD_SUFFIX[j.salary_period ?? 'month'];
-  const [min, max] = [Number(j.salary_min) || 0, Number(j.salary_max) || 0];
-  return min && max ? (min === max ? `${usd(min)}${per}` : `${usd(min)} to ${usd(max)}${per}`)
-    : min ? `From ${usd(min)}${per}`
-    : max ? `Up to ${usd(max)}${per}` : 'Salary negotiable';
-};
+export { salary } from './format';
