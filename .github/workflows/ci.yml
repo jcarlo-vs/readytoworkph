@@ -55,6 +55,7 @@ jobs:
           cache: npm
           cache-dependency-path: frontend/package-lock.json
       - run: npm ci
+      - run: npx next typegen # page and layout types Next.js normally makes while the dev server runs
       - run: npx tsc --noEmit
       - run: npm run lint
 
