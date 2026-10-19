@@ -3,7 +3,7 @@ import Link from 'next/link';
 import { useParams } from 'next/navigation';
 import { useRef, useState } from 'react';
 import { api, useApi, interest, salary, type Job } from '@/lib/api';
-import { Skills, ErrorText, BackButton, TimeAgo, buttonGhost, card } from '@/components/ui';
+import { Skills, ErrorText, BackButton, PageBand, TimeAgo, buttonGhost, card } from '@/components/ui';
 import { ResumeModal, type ViewableResume } from '@/components/ResumeModal';
 
 type Analysis = { score: number; verdict: string; strengths: string[]; concerns: string[]; resume?: 'read' | 'unreadable' | 'none' };
@@ -151,20 +151,16 @@ export default function Applicants() {
   return (
     <div className="space-y-6">
       <BackButton href="/dashboard">My Jobs</BackButton>
-      <div className="flex flex-wrap items-end justify-between gap-4">
-        <div>
-          <h1 className="text-2xl font-bold">Applicants{job && <span className="text-slate-400"> · {job.title}</span>}</h1>
-          <p className="text-sm text-slate-500">{page?.total ?? 0} applicant{page?.total === 1 ? '' : 's'}{hidden > 0 && <> · showing your top {list.length}</>}</p>
-        </div>
-        <div className="flex rounded-lg bg-slate-100 p-1 text-sm" role="group" aria-label="Sort applicants">
+      <PageBand eyebrow="Applicants" title={job?.title ?? 'Applicants'}
+        sub={<>{page?.total ?? 0} applicant{page?.total === 1 ? '' : 's'}{hidden > 0 && <> · showing your top {list.length}</>}</>}
+        actions={<div className="inline-flex rounded-full bg-white/10 p-1 text-sm ring-1 ring-white/10" role="group" aria-label="Sort applicants">
           {(['credits', 'score'] as const).map((s) => (
             <button key={s} type="button" onClick={() => setSortBy(s)} aria-pressed={sortBy === s}
-              className={`rounded-md px-3 py-1.5 font-medium transition ${sortBy === s ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-500 hover:text-slate-800'}`}>
+              className={`rounded-full px-3.5 py-1.5 font-medium transition ${sortBy === s ? 'bg-white text-slate-900 shadow-sm' : 'text-emerald-100 hover:text-white'}`}>
               {s === 'credits' ? 'Most Credits' : 'Highest AI score'}
             </button>
           ))}
-        </div>
-      </div>
+        </div>} />
 
       {job && (
         <details className="group overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm">

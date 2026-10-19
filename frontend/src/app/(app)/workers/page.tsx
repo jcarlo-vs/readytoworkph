@@ -3,7 +3,7 @@ import Link from 'next/link';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { useEffect, useState } from 'react';
 import { useApi, type Worker } from '@/lib/api';
-import { Skills, ErrorText, Initials, input, card } from '@/components/ui';
+import { Skills, ErrorText, Initials, PageBand, input, card } from '@/components/ui';
 import { useAuth } from '@/lib/auth';
 import { EmployerGate } from '@/components/EmployerGate';
 import { Select } from '@/components/Select';
@@ -62,19 +62,14 @@ export default function WorkersPage() {
   const filtered = ['q', 'skills', 'availability', 'rate_min', 'rate_max', 'active'].some((k) => params.get(k));
 
   if (ready && !employer) return <EmployerGate signedIn={!!user} />;
-  const seg = (on: boolean) => `rounded-md px-3 py-1.5 font-medium transition ${on ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-500 hover:text-slate-800'}`;
+  const seg = (on: boolean) => `rounded-full px-3.5 py-1.5 font-medium transition ${on ? 'bg-white text-slate-900 shadow-sm' : 'text-emerald-100 hover:text-white'}`;
   return (
     <div className="space-y-6">
-      <div className="flex flex-wrap items-end justify-between gap-4">
-        <div>
-          <h1 className="text-3xl font-bold tracking-tight">Hire Filipino talent</h1>
-          <p className="mt-1 text-slate-600">Browse skilled remote professionals ready to join your team.</p>
-        </div>
-        <div className="inline-flex rounded-lg bg-slate-100 p-1 text-sm" role="group" aria-label="Show">
+      <PageBand title="Hire Filipino talent" sub="Browse skilled remote professionals ready to join your team."
+        actions={<div className="inline-flex rounded-full bg-white/10 p-1 text-sm ring-1 ring-white/10" role="group" aria-label="Show">
           <button type="button" className={seg(!saved)} aria-pressed={!saved} onClick={() => setParams({ view: '' })}>All talent</button>
           <button type="button" className={seg(saved)} aria-pressed={saved} onClick={() => setParams({ view: 'saved' })}>★ Saved{savedList ? ` (${savedList.length})` : ''}</button>
-        </div>
-      </div>
+        </div>} />
 
       <div className={`grid gap-6 ${saved ? '' : 'lg:grid-cols-[16rem_minmax(0,1fr)]'}`}>
         {!saved && (
@@ -146,7 +141,7 @@ export default function WorkersPage() {
 
           <ul className="space-y-3">
             {workers?.map((w) => {
-              const rate = rateLine(w.hourly_rate, w.availability);
+              const rate = rateLine(w.hourly_rate);
               return (
                 <li key={w.id}>
                   {/* The name's link stretches over the whole card; Save and the blurred chips sit above it. */}
@@ -164,7 +159,7 @@ export default function WorkersPage() {
                       </div>
                       <p className="flex flex-wrap gap-x-3 gap-y-1 text-sm text-slate-600">
                         <span className="capitalize">{w.availability}</span>
-                        {rate && <span><strong className="text-emerald-700">{rate.hourly}</strong>{rate.monthly && <span className="text-slate-500"> · {rate.monthly}</span>}</span>}
+                        {rate && <span><strong className="text-emerald-700">{rate.hourly}</strong></span>}
                         <span className="text-slate-500">{lastActive(w.last_seen_at)}</span>
                       </p>
                       <p className="line-clamp-2 text-sm text-slate-500"><MaskedText text={w.bio} /></p>

@@ -4,7 +4,7 @@ import { useRouter, useSearchParams } from 'next/navigation';
 import { useState, useTransition } from 'react';
 import { useApi, salary, type Credits, type Job, type Worker } from '@/lib/api';
 import { useAuth } from '@/lib/auth';
-import { Skills, ErrorText, Initials, TimeAgo, SearchLabel, button, card, input } from '@/components/ui';
+import { Skills, ErrorText, Initials, TimeAgo, SearchLabel, band, button, card, input } from '@/components/ui';
 import { Select, JOB_TYPES } from '@/components/Select';
 
 const TYPE_TAG: Record<string, string> = {
@@ -71,7 +71,7 @@ function Landing({ form, setForm, onSearch, searching, applied }: SearchProps) {
 
   return (
     <div className="space-y-10">
-      <section className="space-y-4 rounded-3xl bg-emerald-950 px-6 py-10 sm:px-10">
+      <section className={`${band} space-y-4 px-6 py-10 sm:px-10`}>
         {!user && <p className="text-sm font-medium text-emerald-200">Remote jobs for Filipino talent</p>}
         <h1 className="font-display text-3xl font-extrabold tracking-tight text-white sm:text-4xl">
           {worker ? 'What do you want to work on next?' : <>Find real remote work, <span className="text-amber-400">paid in dollars</span></>}
@@ -83,12 +83,13 @@ function Landing({ form, setForm, onSearch, searching, applied }: SearchProps) {
         </form>
         <div className="flex flex-wrap items-center gap-x-5 gap-y-2 text-sm text-emerald-100">
           {credits && (
-            <span className="flex items-center gap-1.5">
+            <span className="flex items-center gap-1.5" title="Spend Credits when you apply: more Credits put you higher on the employer's list. They refill every midnight (PH time).">
               <svg viewBox="0 0 20 20" className="h-4 w-4 text-amber-400" aria-hidden="true"><path d="M11 2 4 11h5l-1 7 7-9h-5l1-7Z" fill="currentColor" /></svg>
-              {credits.remaining} credits today
+              {credits.remaining} of {credits.daily} Credits left today
+              <span className="text-emerald-300/80">· refills at midnight</span>
             </span>
           )}
-          {worker && <Link href="/dashboard" className="underline-offset-4 hover:text-white hover:underline">{applied.size} application{applied.size === 1 ? '' : 's'}</Link>}
+          {worker && <Link href="/dashboard" className="underline-offset-4 hover:text-white hover:underline">Applied to {applied.size} job{applied.size === 1 ? '' : 's'}</Link>}
           <span className="flex flex-wrap gap-2">
             {JOB_TYPES.map((t) => (
               <Link key={t.value} href={`/jobs?type=${t.value}`} className="rounded-full border border-emerald-700 px-3 py-1 text-xs font-medium text-emerald-100 hover:border-amber-400 hover:text-white">{t.label}</Link>
@@ -226,7 +227,7 @@ function Results({ query, selectedId, form, setForm, onSearch, searching, applie
                 <span className="rounded-full bg-slate-100 px-2.5 py-0.5 text-xs font-semibold text-slate-700">{salary(selected)}</span>
                 <span className="rounded-full bg-slate-100 px-2.5 py-0.5 text-xs font-semibold text-slate-700">Remote</span>
               </div>
-              <Link href={`/jobs/${selected.id}`} className={`${button} w-full py-3 text-base`}>
+              <Link href={`/jobs/${selected.id}?back=${encodeURIComponent(`${query}&job=${selected.id}`)}`} className={`${button} w-full py-3 text-base`}>
                 {applied.has(selected.id) ? 'View your application' : 'Apply'}
               </Link>
               <p className="whitespace-pre-line leading-relaxed text-slate-700">{selected.description}</p>

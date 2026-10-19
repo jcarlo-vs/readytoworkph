@@ -4,7 +4,7 @@ import { useRouter } from 'next/navigation';
 import { useState, useTransition } from 'react';
 import { useApi } from '@/lib/api';
 import { useAuth } from '@/lib/auth';
-import { button, buttonGold, buttonGhost, SearchLabel } from '@/components/ui';
+import { buttonGold, buttonGhost, SearchLabel } from '@/components/ui';
 
 const CATEGORIES = [
   'Virtual Assistant', 'Customer Service', 'Bookkeeping', 'Social Media Manager', 'Graphic Design',
@@ -26,6 +26,77 @@ const REASONS = [
   ['Service culture', 'A deep talent pool from the country’s large customer-support and outsourcing sector.'],
   ['Cost effective', 'Hire full-time, dedicated professionals at rates that fit growing businesses.'],
 ];
+
+const Arrow = () => (
+  <svg viewBox="0 0 20 20" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M4 10h12M11 5l5 5-5 5" /></svg>
+);
+
+// "Any role" chips, by who's looking: workers search jobs, employers search talent, and visitors are sent to
+// sign up as an employer, then land on that search.
+function Roles() {
+  const { user } = useAuth();
+  const worker = user?.role === 'worker';
+  const employer = user?.role === 'employer';
+  const href = (c: string) => worker ? `/jobs?q=${encodeURIComponent(c)}`
+    : employer ? `/workers?q=${encodeURIComponent(c)}`
+    : `/register?role=employer&next=${encodeURIComponent(`/workers?q=${c}`)}`;
+  return (
+    <section className="bg-white py-20">
+      <div className="mx-auto max-w-6xl px-4">
+        <h2 className="text-3xl font-bold tracking-tight">{worker ? 'Find work in any role' : 'Find talent for any role'}</h2>
+        <p className="mt-2 max-w-2xl text-slate-600">
+          {worker ? 'From admin support to software engineering. Pick a role to see open jobs.'
+            : employer ? 'From admin support to software engineering. Pick a role to see professionals with those skills.'
+            : 'From admin support to software engineering. Create a free employer account to browse professionals by skill.'}
+        </p>
+        <div className="mt-8 flex flex-wrap gap-2.5">
+          {CATEGORIES.map((c) => (
+            <Link key={c} href={href(c)}
+              className="rounded-full border border-slate-200 bg-slate-50 px-4 py-2 text-sm font-medium text-slate-700 transition hover:border-emerald-600 hover:bg-emerald-50 hover:text-emerald-800">
+              {c}
+            </Link>
+          ))}
+        </div>
+        <div className="mt-8 flex flex-wrap items-center gap-x-6 gap-y-3">
+          {worker ? <Link href="/jobs?sort=new" className={`${buttonGold} gap-2`}>Browse all jobs <Arrow /></Link>
+            : employer ? <Link href="/workers" className={`${buttonGold} gap-2`}>Browse all talent <Arrow /></Link>
+            : <>
+              <Link href="/register?role=employer&next=%2Fworkers" className={`${buttonGold} gap-2`}>Hire talent, it&apos;s free <Arrow /></Link>
+              <Link href="/jobs" className="inline-flex items-center gap-1.5 text-sm font-semibold text-emerald-700 hover:text-emerald-900">Looking for work? Find jobs <Arrow /></Link>
+            </>}
+        </div>
+      </div>
+    </section>
+  );
+}
+
+// The two closing cards. Visitors pick a side and sign up with that role; signed-in people get their own
+// next steps instead of a sign-up form they can't use.
+function NextSteps() {
+  const { user } = useAuth();
+  const [dark, light] = user?.role === 'worker'
+    ? [['Your next job is waiting', 'New remote jobs are posted every day. Search by role or skill and apply with your Credits.', '/jobs?sort=new', 'Browse jobs'],
+       ['Stand out to employers', 'A complete profile with your skills, rate and resume gets more messages and higher AI Fit Scores.', '/profile', 'Edit your profile']]
+    : user?.role === 'employer'
+      ? [['Post your next job', 'Describe the role and budget, and Filipino professionals start applying.', '/jobs/new', 'Post a job'],
+         ['Reach out first', 'Browse talent by skill, rate and availability, and message the people you like.', '/workers', 'Browse talent']]
+      : [['For employers', 'Post your first job and start receiving applications from qualified Filipino professionals.', '/register?role=employer', 'Start hiring'],
+         ['For job seekers', 'Create a free profile, showcase your skills and apply to remote jobs from around the world.', '/register?role=worker', 'Create your profile']];
+  return (
+    <section className="mx-auto grid max-w-6xl gap-6 px-4 md:grid-cols-2">
+      <div className="rounded-2xl bg-emerald-950 p-8 text-white">
+        <h2 className="text-2xl font-bold">{dark[0]}</h2>
+        <p className="mt-2 text-emerald-50/90">{dark[1]}</p>
+        <Link href={dark[2]} className={`${buttonGold} mt-6 gap-2`}>{dark[3]} <Arrow /></Link>
+      </div>
+      <div className="rounded-2xl border border-slate-200 bg-white p-8">
+        <h2 className="text-2xl font-bold">{light[0]}</h2>
+        <p className="mt-2 text-slate-600">{light[1]}</p>
+        <Link href={light[2]} className={`${buttonGhost} mt-6 gap-2`}>{light[3]} <Arrow /></Link>
+      </div>
+    </section>
+  );
+}
 
 function Stats() {
   const { data } = useApi<{ jobs: number; workers: number; employers: number }>('/stats');
@@ -163,21 +234,7 @@ export default function Home() {
         </ol>
       </section>
 
-      <section className="bg-white py-20">
-        <div className="mx-auto max-w-6xl px-4">
-          <h2 className="text-3xl font-bold tracking-tight">Find talent for any role</h2>
-          <p className="mt-2 max-w-2xl text-slate-600">From admin support to software engineering. Create a free employer account to browse professionals by skill.</p>
-          <div className="mt-8 flex flex-wrap gap-2.5">
-            {CATEGORIES.map((c) => (
-              <Link key={c} href={`/workers?q=${encodeURIComponent(c)}`}
-                className="rounded-full border border-slate-200 bg-slate-50 px-4 py-2 text-sm font-medium text-slate-700 transition hover:border-emerald-600 hover:bg-emerald-50 hover:text-emerald-800">
-                {c}
-              </Link>
-            ))}
-          </div>
-          <Link href="/register" className={`${button} mt-8`}>Sign up to browse talent →</Link>
-        </div>
-      </section>
+      <Roles />
 
       <section className="mx-auto max-w-6xl px-4 py-20">
         <div className="grid items-start gap-12 lg:grid-cols-[1fr_1.4fr]">
@@ -198,18 +255,7 @@ export default function Home() {
         </div>
       </section>
 
-      <section className="mx-auto grid max-w-6xl gap-6 px-4 md:grid-cols-2">
-        <div className="rounded-2xl bg-emerald-950 p-8 text-white">
-          <h2 className="text-2xl font-bold">For employers</h2>
-          <p className="mt-2 text-emerald-50/90">Post your first job and start receiving applications from qualified Filipino professionals.</p>
-          <Link href="/register" className={`${buttonGold} mt-6`}>Start hiring</Link>
-        </div>
-        <div className="rounded-2xl border border-slate-200 bg-white p-8">
-          <h2 className="text-2xl font-bold">For job seekers</h2>
-          <p className="mt-2 text-slate-600">Create a free profile, showcase your skills and apply to remote jobs from around the world.</p>
-          <Link href="/register" className={`${buttonGhost} mt-6`}>Create your profile</Link>
-        </div>
-      </section>
+      <NextSteps />
     </>
   );
 }

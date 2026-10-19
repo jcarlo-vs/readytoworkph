@@ -1,13 +1,48 @@
 'use client';
 import { FeedbackDialog, openFeedback } from '@/components/Feedback';
 import Link from 'next/link';
-import { button, buttonGold, buttonGhost, card } from './styles';
+import { band, button, buttonGold, buttonGhost, card } from './styles';
 import { StatusPage } from './StatusPage';
-export { button, buttonGold, buttonGhost, card };
+export { band, button, buttonGold, buttonGhost, card };
+
+// The dark-green band that opens a page: names where you are, with the page's main actions and key
+// numbers (BandStat) inside. One per page.
+export function PageBand({ eyebrow, title, sub, actions, children }: {
+  eyebrow?: React.ReactNode; title: React.ReactNode; sub?: React.ReactNode; actions?: React.ReactNode; children?: React.ReactNode;
+}) {
+  return (
+    <section className={`${band} space-y-6 px-6 py-7 sm:px-8`}>
+      <div className="flex flex-wrap items-end justify-between gap-4">
+        <div className="min-w-0">
+          {eyebrow && <p className="text-sm font-medium text-emerald-300">{eyebrow}</p>}
+          <h1 className="font-display text-3xl font-bold tracking-tight text-white">{title}</h1>
+          {sub && <p className="mt-1 text-emerald-100/80">{sub}</p>}
+        </div>
+        {actions && <div className="flex flex-wrap items-center gap-2">{actions}</div>}
+      </div>
+      {children}
+    </section>
+  );
+}
+
+// A number tile inside the band. Gold for the one number that matters most on the page.
+export function BandStat({ label, value, hint, href, gold = false }: { label: string; value: React.ReactNode; hint?: string; href?: string; gold?: boolean }) {
+  const body = (
+    <>
+      <p className="text-[11px] font-semibold uppercase tracking-wide text-emerald-200/80">{label}</p>
+      <p className={`mt-1 font-display text-3xl font-bold tabular-nums ${gold ? 'text-amber-400' : 'text-white'}`}>{value}</p>
+      {hint && <p className="mt-0.5 text-xs text-emerald-100/70">{hint}</p>}
+    </>
+  );
+  const cls = 'block rounded-2xl bg-white/[0.07] p-4 ring-1 ring-white/10';
+  return href
+    ? <Link href={href} className={`${cls} transition hover:bg-white/[0.12]`}>{body}</Link>
+    : <div className={cls}>{body}</div>;
+}
 import { useEffect, useRef, useState, useSyncExternalStore } from 'react';
 import { usePathname, useRouter } from 'next/navigation';
 import { useAuth } from '@/lib/auth';
-import { API, photoStore, useApi, type User } from '@/lib/api';
+import { API, api, photoStore, useApi, type User } from '@/lib/api';
 import { timeAgo, fullDate } from '@/lib/time';
 
 // Relative time that re-renders every minute so "5m ago" stays accurate; hover shows the exact time.
@@ -20,7 +55,7 @@ export function TimeAgo({ date }: { date: string }) {
   return <time dateTime={date} title={fullDate(date)}>{timeAgo(date, now)}</time>;
 }
 
-export const input = 'w-full rounded-lg border border-slate-300 bg-white px-3.5 py-2.5 text-sm shadow-sm focus:border-emerald-600 focus:outline-none focus:ring-2 focus:ring-emerald-600/20';
+export const input = 'w-full rounded-xl border border-emerald-950/10 bg-emerald-50/40 px-3.5 py-2.5 text-sm transition focus:border-emerald-600 focus:bg-white focus:outline-none focus:ring-2 focus:ring-emerald-600/20';
 
 export function Field({ label, children }: { label: string; children: React.ReactNode }) {
   return (
@@ -217,6 +252,30 @@ function ProfileMenu({ user, onSignOut }: { user: User; onSignOut: () => void })
   );
 }
 
+// Shown to signed-in people who haven't confirmed their email yet, with a way to get a new link.
+export function ConfirmEmailBanner({ email }: { email: string }) {
+  const [state, setState] = useState<'idle' | 'busy' | 'sent' | string>('idle');
+  async function resend() {
+    setState('busy');
+    try {
+      await api('/auth/verify/resend', { method: 'POST', quiet: true });
+      setState('sent');
+    } catch (err) {
+      setState((err as Error).message);
+    }
+  }
+  return (
+    <div className="border-t border-amber-200 bg-amber-50 text-sm text-amber-950">
+      <div className="mx-auto flex max-w-6xl flex-wrap items-center gap-x-3 gap-y-1 px-4 py-2">
+        <span>📩 Please confirm your email. We sent a link to <b>{email}</b> (check Spam too).</span>
+        {state === 'sent' ? <span className="font-semibold text-emerald-800">New link sent ✓</span>
+          : <button type="button" onClick={resend} disabled={state === 'busy'} className="font-semibold text-emerald-800 underline-offset-2 hover:underline disabled:opacity-50">{state === 'busy' ? 'Sending…' : 'Send a new link'}</button>}
+        {!['idle', 'busy', 'sent'].includes(state) && <span className="text-red-700">{state}</span>}
+      </div>
+    </div>
+  );
+}
+
 export function Nav() {
   const { user, signOut } = useAuth();
   const { data: unread, reload: reloadUnread } = useApi<{ count: number }>(user ? '/messages/unread-count' : null, 30000);
@@ -235,7 +294,7 @@ export function Nav() {
   const icon = { viewBox: '0 0 24 24', className: 'h-4 w-4', fill: 'none', stroke: 'currentColor', strokeWidth: 2, strokeLinecap: 'round', strokeLinejoin: 'round', 'aria-hidden': true } as const;
   if (path.startsWith('/admin')) return null; // the admin has its own menu and login
   return (
-    <header className="sticky top-0 z-20 border-b border-slate-200 bg-white/90 backdrop-blur">
+    <header className="sticky top-0 z-20 border-b border-emerald-950/5 bg-[#f3f7f4]/90 backdrop-blur">
       <nav className="mx-auto flex max-w-6xl flex-wrap items-center gap-x-2.5 gap-y-2 px-4 py-3 text-sm">
         <div className="mr-auto"><Logo /></div>
         {/* Workers and visitors see Find Jobs; Hire Talent and My Jobs are for signed-in employers (talent isn't public). */}
@@ -281,11 +340,13 @@ export function Nav() {
           </>
         )}
       </nav>
+      {user?.email_verified === false && <ConfirmEmailBanner email={user.email} />}
     </header>
   );
 }
 
 export function Footer() {
+  const { user } = useAuth();
   const path = usePathname();
   if (path.startsWith('/admin')) return null;
   const col = (title: string, links: [string, string][]) => (
@@ -297,22 +358,29 @@ export function Footer() {
     </div>
   );
   return (
-    <footer className="mt-20 bg-slate-900 text-slate-400">
+    <footer className="mt-20 bg-emerald-950 text-emerald-100/70">
       <FeedbackDialog />
       <div className="mx-auto grid max-w-6xl gap-10 px-4 py-14 sm:grid-cols-2 lg:grid-cols-4">
         <div className="space-y-3">
           <Logo light />
           <p className="text-sm leading-relaxed">Remote jobs for Filipino professionals. Employers hire direct, with no agency markups, and workers always join free.</p>
-          <a href="mailto:support@readytowork.ph" className="inline-block text-sm font-medium text-slate-300 hover:text-white">support@readytowork.ph</a>
+          <a href="mailto:support@readytowork.ph" className="inline-block text-sm font-medium text-emerald-100 hover:text-white">support@readytowork.ph</a>
         </div>
-        {col('Find work', [['Browse remote jobs', '/jobs'], ['Full-time jobs', '/jobs?type=full-time'], ['Part-time jobs', '/jobs?type=part-time'], ['Gigs and projects', '/jobs?type=gig'], ['Create a free profile', '/register']])}
-        {col('Hire talent', [['Post a job', '/jobs/new'], ['Pricing', '/pricing'], ['Sign up as an employer', '/register?role=employer']])}
+        {/* Visitors get sign-up links; signed-in people get their own pages in the same spots. */}
+        {col('Find work', [['Browse remote jobs', '/jobs'], ['Full-time jobs', '/jobs?type=full-time'], ['Part-time jobs', '/jobs?type=part-time'], ['Gigs and projects', '/jobs?type=gig'],
+          ...(user?.role === 'worker' ? [['My profile', '/profile'], ['My applications', '/dashboard']] as [string, string][]
+            : user ? [] : [['Create a free profile', '/register?role=worker']] as [string, string][])])}
+        {col('Hire talent', user?.role === 'worker'
+          ? [['Pricing for employers', '/pricing']]
+          : user?.role === 'employer'
+            ? [['Post a job', '/jobs/new'], ['Browse talent', '/workers'], ['My jobs', '/dashboard'], ['Plan & billing', '/pricing']]
+            : [['Post a job', '/jobs/new'], ['Pricing', '/pricing'], ['Sign up as an employer', '/register?role=employer']])}
         <div>
           {col('Help', [['Frequently asked questions', '/pricing#faq'], ['Contact us', '/contact']])}
           <button type="button" onClick={openFeedback} className="mt-2 text-sm hover:text-white">Send feedback</button>
         </div>
       </div>
-      <div className="mx-auto flex max-w-6xl flex-wrap items-center justify-between gap-2 border-t border-slate-800 px-4 py-6 text-xs">
+      <div className="mx-auto flex max-w-6xl flex-wrap items-center justify-between gap-2 border-t border-white/10 px-4 py-6 text-xs">
         <span>© 2026 ReadyToWork.ph. All rights reserved.</span>
         <nav className="flex flex-wrap gap-4">
           <Link href="/terms" className="hover:text-white">Terms</Link>

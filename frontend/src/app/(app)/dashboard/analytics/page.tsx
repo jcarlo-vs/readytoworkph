@@ -3,7 +3,7 @@ import Link from 'next/link';
 import { useState } from 'react';
 import { useApi } from '@/lib/api';
 import { useAuth } from '@/lib/auth';
-import { BackButton, ErrorText, Initials, buttonGold, buttonGhost, card } from '@/components/ui';
+import { BackButton, ErrorText, Initials, PageBand, buttonGold, buttonGhost, card } from '@/components/ui';
 import { Select } from '@/components/Select';
 
 type Range = 7 | 30 | 90;
@@ -40,7 +40,14 @@ const scoreTone = (s: number) => (s >= 85 ? 'bg-emerald-100 text-emerald-800' : 
 export default function AnalyticsPage() {
   const { user, ready } = useAuth();
   if (!ready) return null;
-  if (user?.role !== 'employer') return <p><Link href="/login" className="text-emerald-700 underline">Log in as an employer</Link> to see hiring analytics.</p>;
+  if (!user) return <p><Link href="/login?next=/dashboard/analytics" className="text-emerald-700 underline">Log in as an employer</Link> to see hiring analytics.</p>;
+  if (user.role !== 'employer') return (
+    <div className={`${card} mx-auto max-w-xl space-y-4 p-10 text-center`}>
+      <h1 className="font-display text-2xl font-bold text-slate-900">Hiring analytics is for employers</h1>
+      <p className="text-slate-600">You&apos;re signed in with a worker account. Your job search lives on your dashboard.</p>
+      <div className="flex flex-wrap justify-center gap-3"><Link href="/dashboard" className={buttonGhost}>Go to my dashboard</Link><Link href="/jobs?sort=new" className={buttonGold}>Browse jobs</Link></div>
+    </div>
+  );
   return user.plan === 'premium' ? <Dashboard /> : <Teaser />;
 }
 
@@ -178,17 +185,12 @@ function Dashboard() {
   return (
     <div className="space-y-6">
       <BackButton href="/dashboard">My Jobs</BackButton>
-      <div className="flex flex-wrap items-end justify-between gap-4">
-        <div>
-          <p className="text-sm font-medium text-emerald-800">Premium</p>
-          <h1 className="text-3xl font-bold tracking-tight">Hiring analytics</h1>
-          <p className="text-sm text-slate-500">{selected ? selected.title : 'All jobs'} · last {period}{loading && ' · updating…'}</p>
-        </div>
-        <div className="flex flex-wrap items-center gap-2">
-          <div className="inline-flex rounded-lg bg-slate-100 p-1 text-sm" role="group" aria-label="Time period">
+      <PageBand eyebrow="Premium" title="Hiring analytics" sub={<>{selected ? selected.title : 'All jobs'} · last {period}{loading && ' · updating…'}</>}
+        actions={<>
+          <div className="inline-flex rounded-full bg-white/10 p-1 text-sm ring-1 ring-white/10" role="group" aria-label="Time period">
             {([7, 30, 90] as const).map((d) => (
               <button key={d} type="button" onClick={() => setDays(d)} aria-pressed={days === d}
-                className={`rounded-md px-3 py-1.5 font-medium transition ${days === d ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-500 hover:text-slate-800'}`}>{d} days</button>
+                className={`rounded-full px-3.5 py-1.5 font-medium transition ${days === d ? 'bg-white text-slate-900 shadow-sm' : 'text-emerald-100 hover:text-white'}`}>{d} days</button>
             ))}
           </div>
           <Select label="Job" searchable noun="jobs" className="w-64" value={job ? String(job) : ''} onChange={(v) => setJob(v ? Number(v) : null)}
@@ -199,8 +201,7 @@ function Dashboard() {
                 hint: `${j.closed_at ? 'Closed' : 'Open'} · ${j.applicants} applicant${j.applicants === 1 ? '' : 's'} in ${period}`,
               })),
             ]} />
-        </div>
-      </div>
+        </>} />
 
       {a.jobs.length === 0 ? (
         <div className={`${card} space-y-3 p-10 text-center`}>

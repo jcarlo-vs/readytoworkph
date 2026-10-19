@@ -1,6 +1,6 @@
 'use client';
 import Link from 'next/link';
-import { useParams } from 'next/navigation';
+import { useParams, useSearchParams } from 'next/navigation';
 import { useApi, salary, interest, type Job } from '@/lib/api';
 import { useAuth } from '@/lib/auth';
 import { Skills, ErrorText, LoadError, Initials, BackButton, TimeAgo, button, card } from '@/components/ui';
@@ -82,6 +82,9 @@ export function JobView({ initial }: { initial: Job }) {
   const { user } = useAuth();
   const { data: job, error, status, reload } = useApi<Job>(`/jobs/${id}`, undefined, initial);
 
+  // Opened from search results: go back to that same search (re-encoded, so it can only ever be a /jobs search).
+  const fromSearch = useSearchParams().get('back');
+  const back = fromSearch ? new URLSearchParams(fromSearch).toString() : '';
   if (error && !job) return <LoadError msg={error} status={status} onRetry={reload} />;
   if (!job) return <p className="text-slate-500">Loading…</p>;
 
@@ -90,7 +93,7 @@ export function JobView({ initial }: { initial: Job }) {
       <div className="flex flex-wrap items-center justify-between gap-3">
         {user?.id === job.employer_id
           ? <BackButton href="/dashboard">My Jobs</BackButton>
-          : <BackButton href="/jobs">All jobs</BackButton>}
+          : back ? <BackButton href={`/jobs?${back}`}>Back to results</BackButton> : <BackButton href="/jobs">All jobs</BackButton>}
         {user?.id === job.employer_id && <JobOwnerActions job={job} onChange={reload} />}
       </div>
 
@@ -155,8 +158,8 @@ export function JobView({ initial }: { initial: Job }) {
             <>
               <h2 className="text-lg font-semibold">Interested in this job?</h2>
               <p className="text-sm text-slate-500">Log in or create a free profile to apply.</p>
-              <Link href="/login" className={`${button} w-full py-3`}>Log in to apply</Link>
-              <Link href="/register" className="block text-center text-sm font-medium text-emerald-800 hover:underline">Create a free profile</Link>
+              <Link href={`/login?next=/jobs/${job.id}`} className={`${button} w-full py-3`}>Log in to apply</Link>
+              <Link href={`/register?role=worker&next=/jobs/${job.id}`} className="block text-center text-sm font-medium text-emerald-800 hover:underline">Create a free profile</Link>
             </>
           )}
           {user?.role === 'worker' && <ApplyPanel jobId={job.id} closed={!!job.closed_at} />}

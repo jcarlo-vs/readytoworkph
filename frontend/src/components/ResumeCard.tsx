@@ -58,7 +58,7 @@ export function ResumeCard() {
         <h2 className="text-lg font-semibold">Resume <span className="text-sm font-normal text-slate-400">(optional)</span></h2>
         <span className="text-xs text-slate-500">PDF · max {MAX_MB} MB</span>
       </div>
-      <p className="text-sm text-slate-500">Attach it to your applications so employers can see your full experience. Only employers you apply to can open it, and replacing it updates every application you attached it to.</p>
+      <p className="text-sm text-slate-500">Attach it to your applications so employers can see your full experience. Employers you apply to can open it, plus employers who can message you if you show it on your profile. Replacing it updates everywhere.</p>
 
       {data === null ? null : current ? (
         <div className="flex flex-wrap items-center gap-3 rounded-xl border border-slate-200 bg-slate-50 p-4">

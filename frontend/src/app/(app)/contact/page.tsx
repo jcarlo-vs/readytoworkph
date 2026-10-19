@@ -3,7 +3,7 @@ import Link from 'next/link';
 import { useState } from 'react';
 import { api } from '@/lib/api';
 import { useAuth } from '@/lib/auth';
-import { ErrorText, Field, FormAlert, button, card, input } from '@/components/ui';
+import { ErrorText, Field, FormAlert, PageBand, button, card, input } from '@/components/ui';
 import { Turnstile, robotCheckOn } from '@/components/Turnstile';
 
 const MAX = 5000;
@@ -34,12 +34,10 @@ export default function ContactPage() {
   }
 
   return (
-    <div className="mx-auto grid max-w-5xl gap-8 lg:grid-cols-[minmax(0,1fr)_18rem]">
+    <div className="mx-auto max-w-5xl space-y-8">
+    <PageBand title="Contact us" sub="A question about your account, a plan, a payment or a job post? Send us a message and we’ll reply by email." />
+    <div className="grid gap-8 lg:grid-cols-[minmax(0,1fr)_18rem]">
       <section className={`${card} space-y-5 p-8`}>
-        <div>
-          <h1 className="font-display text-3xl font-bold tracking-tight">Contact us</h1>
-          <p className="mt-1 text-slate-600">A question about your account, a plan, a payment or a job post? Send us a message and we&apos;ll reply by email.</p>
-        </div>
         {status.sent ? (
           <FormAlert tone="success" title="Message sent. Thank you!">
             <p>We&apos;ll reply to <strong>{form.email}</strong>, usually within one working day. Check your Spam folder if you don&apos;t see it.</p>
@@ -82,6 +80,7 @@ export default function ContactPage() {
           </ul>
         </div>
       </aside>
+    </div>
     </div>
   );
 }

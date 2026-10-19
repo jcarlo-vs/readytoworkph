@@ -191,3 +191,30 @@ CREATE TABLE IF NOT EXISTS hires (
 ALTER TABLE users ADD COLUMN IF NOT EXISTS failed_logins int NOT NULL DEFAULT 0;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS failed_login_at timestamptz;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS login_locked_until timestamptz;
+
+-- Bento profile (2026-10): what employers check before messaging. All optional; skills stay a text[] for
+-- search, with years per skill kept alongside ({"QuickBooks": 5}).
+ALTER TABLE worker_profiles ADD COLUMN IF NOT EXISTS skill_years jsonb NOT NULL DEFAULT '{}';
+ALTER TABLE worker_profiles ADD COLUMN IF NOT EXISTS location text NOT NULL DEFAULT '';
+ALTER TABLE worker_profiles ADD COLUMN IF NOT EXISTS work_hours text CHECK (work_hours IN ('ph', 'us', 'uk', 'au', 'flexible'));
+ALTER TABLE worker_profiles ADD COLUMN IF NOT EXISTS hours_per_week int CHECK (hours_per_week BETWEEN 1 AND 80);
+ALTER TABLE worker_profiles ADD COLUMN IF NOT EXISTS start_when text CHECK (start_when IN ('now', '1w', '2w', '1m'));
+ALTER TABLE worker_profiles ADD COLUMN IF NOT EXISTS english text CHECK (english IN ('basic', 'conversational', 'fluent', 'native'));
+ALTER TABLE worker_profiles ADD COLUMN IF NOT EXISTS languages text NOT NULL DEFAULT '';
+ALTER TABLE worker_profiles ADD COLUMN IF NOT EXISTS internet_mbps int CHECK (internet_mbps BETWEEN 1 AND 10000);
+ALTER TABLE worker_profiles ADD COLUMN IF NOT EXISTS setup text[] NOT NULL DEFAULT '{}';
+ALTER TABLE worker_profiles ADD COLUMN IF NOT EXISTS show_resume boolean NOT NULL DEFAULT true;
+
+-- Logins issued before this moment no longer work: set when the account signs everyone out (a password
+-- reset, or Google taking over an account that had a password). 'epoch' = nothing signed out yet.
+ALTER TABLE users ADD COLUMN IF NOT EXISTS sessions_valid_from timestamptz NOT NULL DEFAULT 'epoch';
+
+-- Email confirmation. Google sign-ups count as confirmed (Google checked the address); email sign-ups get a
+-- one-time link. Links are stored hashed, like password reset links.
+ALTER TABLE users ADD COLUMN IF NOT EXISTS email_verified_at timestamptz;
+UPDATE users SET email_verified_at = created_at WHERE google_sub IS NOT NULL AND email_verified_at IS NULL;
+CREATE TABLE IF NOT EXISTS email_verifications (
+  token_hash text PRIMARY KEY,
+  user_id    int NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  expires_at timestamptz NOT NULL
+);

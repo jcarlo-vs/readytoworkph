@@ -38,7 +38,7 @@ export default function RootLayout({ children }: LayoutProps<"/">) {
   return (
     <html lang="en" className={`${geistSans.variable} ${jakarta.variable} h-full antialiased`}>
       {/* wrap-anywhere: a word too long for its box (a pasted link, "asdasd..." with no spaces) breaks instead of running off the card */}
-      <body className="flex min-h-full flex-col bg-slate-50 font-sans text-slate-900 wrap-anywhere">
+      <body className="flex min-h-full flex-col bg-[#f3f7f4] font-sans text-slate-900 wrap-anywhere">
         <Suspense>
           <TopLoader />
         </Suspense>

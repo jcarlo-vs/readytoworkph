@@ -4,7 +4,8 @@ import Link from 'next/link';
 import { useState } from 'react';
 import { api, useApi, type Worker } from '@/lib/api';
 import { useAuth } from '@/lib/auth';
-import { Skills, LoadError, Initials, BackButton, ErrorText, button, card } from '@/components/ui';
+import { LoadError, Initials, BackButton, ErrorText, band, buttonGhost, buttonGold, card } from '@/components/ui';
+import { ENGLISH, SETUP, START_WHEN, WORK_HOURS, labelOf } from '@/lib/profile';
 import { EmployerGate } from '@/components/EmployerGate';
 import { JOB_TYPES } from '@/components/Select';
 import { MaskedText, SaveButton, lastActive, rateLine } from '@/components/Talent';
@@ -46,6 +47,39 @@ function HireButton({ worker, onChange }: { worker: Worker; onChange: (hiredAt: 
   );
 }
 
+function Tile({ label, wide = false, children }: { label: string; wide?: boolean; children: React.ReactNode }) {
+  return (
+    <section className={`${card} space-y-2 p-5 ${wide ? 'md:col-span-2' : ''}`}>
+      <h2 className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">{label}</h2>
+      {children}
+    </section>
+  );
+}
+
+// The worker's CV. The server decides: employers who can message the worker get the file, others are
+// asked to upgrade (CVs usually carry contact details).
+function ResumeButton({ workerId, limited }: { workerId: number; limited: boolean }) {
+  const [error, setError] = useState('');
+  if (limited) return <Link href="/pricing" className={`${buttonGhost} w-full gap-2`}>📄 Upgrade to see the CV</Link>;
+  async function open() {
+    setError('');
+    const tab = window.open('', '_blank'); // opened on the click, so popup blockers allow it
+    try {
+      const { url } = await api<{ url: string }>(`/workers/${workerId}/resume`, { quiet: true });
+      if (tab) tab.location.href = url; else window.location.href = url;
+    } catch (err) {
+      tab?.close();
+      setError((err as Error).message);
+    }
+  }
+  return (
+    <div className="space-y-1">
+      <button type="button" onClick={open} className={`${buttonGhost} w-full gap-2`}>📄 Download CV</button>
+      <ErrorText msg={error} />
+    </div>
+  );
+}
+
 export default function WorkerPage() {
   const { id } = useParams<{ id: string }>();
   const { user, ready } = useAuth();
@@ -59,82 +93,115 @@ export default function WorkerPage() {
   if (!data) return <p className="text-slate-500">Loading…</p>;
   const w = { ...data, hired_at: hiredAt === undefined ? data.hired_at : hiredAt };
   const first = w.name.split(' ')[0];
-  const rate = rateLine(w.hourly_rate, w.availability);
+  const rate = rateLine(w.hourly_rate);
 
   return (
     <div className="space-y-6">
-      <BackButton href="/workers">All talent</BackButton>
-      <div className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_19rem]">
-        <div className="space-y-6">
-          <div className={`${card} flex flex-wrap items-center gap-5`}>
-            <Initials name={w.name} id={w.id} size="h-20 w-20 text-2xl" />
-            <div className="min-w-0 flex-1">
-              <h1 className="text-2xl font-bold">{w.name}</h1>
-              <p className="text-lg text-slate-600">{w.title ? <MaskedText text={w.title} /> : 'No title yet'}</p>
-              <p className="mt-1 text-sm text-slate-500">{lastActive(w.last_seen_at)} · Member since {longDate(w.member_since)}</p>
-            </div>
+      {user?.role === 'employer'
+        ? <BackButton href="/workers">All talent</BackButton>
+        : (
+          // A worker previewing their own profile: back to editing, and a note on who sees this page.
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <BackButton href="/profile">Edit profile</BackButton>
+            <p className="rounded-full bg-emerald-50 px-4 py-2 text-sm text-emerald-900 ring-1 ring-emerald-600/15">👀 This is how employers see your profile</p>
           </div>
-          <section className={card}>
-            <h2 className="mb-3 font-semibold">About</h2>
-            <p className="whitespace-pre-line text-slate-700">{w.bio ? <MaskedText text={w.bio} /> : 'This professional hasn’t written a bio yet.'}</p>
-          </section>
+        )}
+      <section className={`${band} space-y-5 px-6 py-7 sm:px-8`}>
+        <div className="flex flex-wrap items-center gap-5">
+          <Initials name={w.name} id={w.id} size="h-20 w-20 text-2xl ring-4 ring-white/15" />
+          <div className="min-w-0 flex-1">
+            <h1 className="font-display text-3xl font-bold tracking-tight">{w.name}</h1>
+            <p className="text-lg text-emerald-100">{w.title ? <MaskedText text={w.title} /> : 'No title yet'}</p>
+            <p className="mt-1 text-sm text-emerald-200/80">
+              {w.location && <>📍 <MaskedText text={w.location} /> · </>}{lastActive(w.last_seen_at)} · Member since {longDate(w.member_since)}
+            </p>
+          </div>
         </div>
-
-        <aside className={`${card} h-fit space-y-5`}>
-          {employer && (
-            <div className="space-y-2">
-              {/* "limited": a Free employer this worker hasn't applied to or talked with. They can't message
-                  first, and see "Maria S." without links, so say how to change that instead of a dead-end chat. */}
-              {w.limited ? (
-                <div className="space-y-3 rounded-xl bg-amber-50 p-4 text-sm text-amber-950">
-                  <p>On the Free plan you can message workers who applied to your jobs. You&apos;ll also see {first}&apos;s full name and links once you can message them.</p>
-                  <Link href="/pricing" className="block rounded-lg bg-amber-400 px-4 py-2 text-center font-semibold text-slate-900 hover:bg-amber-300">Upgrade to message {first}</Link>
-                  <Link href="/jobs/new" className="block text-center font-medium text-amber-900 hover:underline">Or post a job and invite them to apply</Link>
-                </div>
-              ) : (
-                <Link href={`/messages?with=${w.id}`} className={`${button} w-full`}>Message {first}</Link>
-              )}
-              <div className="flex gap-2 [&>*]:flex-1">
-                <SaveButton workerId={w.id} saved={w.saved} />
-              </div>
-              {!w.limited && <HireButton worker={w} onChange={setHiredAt} />}
-            </div>
-          )}
-          <div>
-            <h2 className="text-xs font-semibold uppercase tracking-wide text-slate-500">Looking for</h2>
-            <p className="mt-1 font-medium">{JOB_TYPES.find((t) => t.value === w.availability)?.label ?? w.availability} work</p>
+        {employer && (w.limited ? (
+          // A Free employer this worker hasn't applied to or talked with: say how to reach them, not a dead-end chat.
+          <div className="flex flex-wrap items-center gap-3">
+            <Link href="/pricing" className={buttonGold}>Upgrade to message {first}</Link>
+            <Link href="/jobs/new" className="text-sm font-medium text-emerald-100 hover:text-white hover:underline">Or post a job and invite them to apply</Link>
+            <div className="ml-auto w-36"><SaveButton workerId={w.id} saved={w.saved} /></div>
           </div>
-          {rate && (
-            <div>
-              <h2 className="text-xs font-semibold uppercase tracking-wide text-slate-500">Rate</h2>
-              <p className="mt-1 text-xl font-bold text-emerald-700">{rate.hourly}</p>
-              {rate.monthly && <p className="text-sm text-slate-500">{rate.monthly}</p>}
-            </div>
-          )}
-          {w.skills.length > 0 && (
-            <div>
-              <h2 className="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-500">Skills</h2>
-              <Skills skills={w.skills} />
-            </div>
-          )}
-          {(w.portfolio_url || w.linkedin_url) && (
-            <div className="space-y-2">
-              <h2 className="text-xs font-semibold uppercase tracking-wide text-slate-500">Links</h2>
-              {/* Worker-supplied links: open in a new tab, no referrer, no SEO credit. */}
-              {[[w.portfolio_url, 'Sample work / portfolio'], [w.linkedin_url, 'LinkedIn profile']].map(([href, label]) => href && (
-                <a key={label} href={href} target="_blank" rel="noopener noreferrer nofollow"
-                  className="flex items-center gap-2 rounded-lg border border-slate-200 px-3 py-2 text-sm font-medium text-slate-700 transition hover:border-emerald-600 hover:text-emerald-800">
-                  <svg viewBox="0 0 24 24" className="h-4 w-4 shrink-0 text-emerald-700" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" aria-hidden="true"><path d="M10 14a5 5 0 0 0 7 0l3-3a5 5 0 0 0-7-7l-1 1M14 10a5 5 0 0 0-7 0l-3 3a5 5 0 0 0 7 7l1-1" /></svg>
-                  <span className="min-w-0 flex-1 truncate">{label}</span>
-                  <span className="text-xs text-slate-400" aria-hidden="true">↗</span>
-                </a>
-              ))}
-            </div>
-          )}
-          {w.limited && (
-            <p className="rounded-lg bg-slate-50 px-3 py-2 text-xs text-slate-500">Links and contact details are hidden until you can message {first}.</p>
-          )}
-        </aside>
+        ) : (
+          <div className="flex flex-wrap items-center gap-3 [&>*]:min-w-36">
+            <Link href={`/messages?with=${w.id}`} className={buttonGold}>Message {first}</Link>
+            <SaveButton workerId={w.id} saved={w.saved} />
+            <HireButton worker={w} onChange={setHiredAt} />
+          </div>
+        ))}
+      </section>
+
+      {w.limited && (
+        <p className="rounded-2xl bg-amber-50 px-4 py-3 text-sm text-amber-950">On the Free plan you can message workers who applied to your jobs. You&apos;ll see {first}&apos;s full name, links and resume once you can message them.</p>
+      )}
+
+      {/* Bento: one tile per topic, the facts employers check first at the top. Empty tiles are left out. */}
+      <div className="grid grid-flow-dense gap-4 md:grid-cols-3">
+        {rate && (
+          <Tile label="Rate">
+            <p className="font-display text-3xl font-bold text-emerald-700">{rate.hourly}</p>
+            <p className="text-sm text-slate-500">{[JOB_TYPES.find((t) => t.value === w.availability)?.label, w.hours_per_week && `${w.hours_per_week} hrs/week`].filter(Boolean).join(' · ')}</p>
+          </Tile>
+        )}
+        {(w.location || w.work_hours) && (
+          <Tile label="Location & hours">
+            {w.location && <p className="font-semibold">📍 <MaskedText text={w.location} /></p>}
+            {w.work_hours && <p className="text-sm text-slate-500">Works {labelOf(WORK_HOURS, w.work_hours)?.toLowerCase()}</p>}
+          </Tile>
+        )}
+        {(w.english || w.languages) && (
+          <Tile label="Languages">
+            {w.english && <p className="font-semibold">English: {labelOf(ENGLISH, w.english)}</p>}
+            {w.languages && <p className="text-sm text-slate-500">Also speaks <MaskedText text={w.languages} /></p>}
+          </Tile>
+        )}
+        {w.skills.length > 0 && (
+          <Tile label="Skills" wide>
+            <ul className="grid gap-2">
+              {w.skills.map((s) => {
+                const years = w.skill_years?.[s];
+                return (
+                  <li key={s} className="grid grid-cols-[minmax(0,1fr)_7rem_3.5rem] items-center gap-3 text-sm">
+                    <span className="truncate font-medium capitalize">{s}</span>
+                    <span className="h-1.5 overflow-hidden rounded-full bg-emerald-50" aria-hidden="true">
+                      {years != null && <span className="block h-full rounded-full bg-emerald-600" style={{ width: `${Math.min(100, (years / 8) * 100)}%` }} />}
+                    </span>
+                    <span className="text-right tabular-nums text-slate-500">{years != null ? `${years} yr${years === 1 ? '' : 's'}` : ''}</span>
+                  </li>
+                );
+              })}
+            </ul>
+          </Tile>
+        )}
+        {(w.internet_mbps || w.setup?.length > 0) && (
+          <Tile label="Work setup">
+            <ul className="space-y-1 text-sm">
+              {w.internet_mbps && <li>🌐 {w.internet_mbps} Mbps internet</li>}
+              {w.setup.map((x) => <li key={x}>✓ {labelOf(SETUP, x)}</li>)}
+            </ul>
+          </Tile>
+        )}
+        <Tile label="About" wide>
+          <p className="whitespace-pre-line text-slate-700">{w.bio ? <MaskedText text={w.bio} /> : 'This professional hasn’t written a bio yet.'}</p>
+        </Tile>
+        {w.start_when && (
+          <Tile label="Can start">
+            <p className="font-semibold">{labelOf(START_WHEN, w.start_when)}</p>
+            <p className="text-sm text-slate-500">{lastActive(w.last_seen_at)}</p>
+          </Tile>
+        )}
+        {(w.has_resume || w.portfolio_url || w.linkedin_url || w.limited) && (
+          <Tile label="Resume & links">
+            {w.has_resume && <ResumeButton workerId={w.id} limited={!!w.limited} />}
+            {/* Worker-supplied links: open in a new tab, no referrer, no SEO credit. */}
+            {[[w.portfolio_url, 'Sample work / portfolio'], [w.linkedin_url, 'LinkedIn profile']].map(([href, label]) => href && (
+              <a key={label} href={href} target="_blank" rel="noopener noreferrer nofollow" className="block text-sm font-medium text-emerald-700 hover:underline">🔗 {label} ↗</a>
+            ))}
+            {w.limited && <p className="text-xs text-slate-500">Links are hidden until you can message {first}.</p>}
+          </Tile>
+        )}
       </div>
     </div>
   );

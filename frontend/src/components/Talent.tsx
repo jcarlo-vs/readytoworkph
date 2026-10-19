@@ -59,14 +59,11 @@ export function SaveButton({ workerId, saved: initial, compact = false }: { work
   );
 }
 
-// "$6.50/hr", plus what that comes to a month for full- and part-time work (8 or 4 hours a day, 22 days),
-// so employers can compare with a monthly salary.
-export function rateLine(rate: string | null, availability: string) {
+// "$6.50/hr". No monthly estimate: we don't know a worker's hours, and a guess reads like their asking pay.
+export function rateLine(rate: string | null) {
   if (!rate) return null;
   const hourly = Number(rate);
-  const hours = availability === 'full-time' ? 176 : availability === 'part-time' ? 88 : 0;
-  const fmt = (n: number) => `$${n.toLocaleString('en-US', { maximumFractionDigits: n < 100 ? 2 : 0 })}`;
-  return { hourly: `${fmt(hourly)}/hr`, monthly: hours ? `about ${fmt(hourly * hours)}/month ${availability === 'full-time' ? 'full-time' : 'part-time'}` : null };
+  return { hourly: `$${hourly.toLocaleString('en-US', { maximumFractionDigits: 2 })}/hr` };
 }
 
 // "Active now" for the last 10 minutes, then calendar days in Philippine time (where the workers are):

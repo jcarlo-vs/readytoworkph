@@ -7,10 +7,12 @@ delete process.env.TURNSTILE_SECRET; // tests that need the robot check switch i
 const { pool } = await import('../src/db.js');
 const { app } = await import('../src/app.js');
 
-await pool.query('DROP TABLE IF EXISTS hires, saved_workers, feedback, ai_analyses, password_resets, settings, messages, applications, jobs, worker_profiles, users');
+await pool.query('DROP TABLE IF EXISTS email_verifications, hires, saved_workers, feedback, ai_analyses, password_resets, settings, messages, applications, jobs, worker_profiles, users');
 // Never send real email from tests, even if .env has a Resend key; tests read `sent` instead.
 const sent = [];
-app.locals.sendEmail = async (e) => { sent.push(e); };
+// Email-confirmation messages go to every new email sign-up; most tests don't care, so they're left out.
+const capture = async (e) => { if (!/^Confirm your email/.test(e.subject)) sent.push(e); };
+app.locals.sendEmail = capture;
 // In-memory stand-in for R2 so tests never touch real storage.
 const files = new Map();
 app.locals.storage = {
@@ -39,6 +41,11 @@ async function call(path, { token, ...body } = {}, method = Object.keys(body).le
     body: method === 'GET' ? undefined : JSON.stringify(body),
   });
   const json = res.status === 204 ? null : await res.json();
+  // Test accounts confirm their email straight away (posting jobs needs it), unless a test asks not to.
+  if (path === '/auth/register' && res.status === 201 && !body.unconfirmed) {
+    await pool.query('UPDATE users SET email_verified_at = now() WHERE id = $1', [json.user.id]);
+    json.user.email_verified = true;
+  }
   const session = sessionFrom(res);
   return { status: res.status, body: session && json ? { ...json, token: session } : json };
 }
@@ -135,7 +142,7 @@ test('credits: daily budget, bidding order, validation', async () => {
 
 test('messages: who can write, read tracking, one email per unread batch', async () => {
   const emails = [];
-  app.locals.sendEmail = async (e) => { if (!/^Welcome/.test(e.subject)) emails.push(e); };
+  app.locals.sendEmail = async (e) => { if (!/^(Welcome|Confirm your email)/.test(e.subject)) emails.push(e); };
   const reg = async (email, role, name) => (await call('/auth/register', { email, password: 'password1', name, role })).body;
   const boss = await reg('hr@acme.ph', 'employer', 'Acme HR');
   const rival = await reg('hr@rival.ph', 'employer', 'Rival');
@@ -183,7 +190,7 @@ test('messages: who can write, read tracking, one email per unread batch', async
 
 test('welcome email on sign-up, tailored by role', async () => {
   sent.length = 0;
-  app.locals.sendEmail = async (e) => { sent.push(e); };
+  app.locals.sendEmail = capture;
   await call('/auth/register', { email: 'new.worker@x.ph', password: 'password1', name: 'Rosa', role: 'worker' });
   await call('/auth/register', { email: 'new.boss@co.com', password: 'password1', name: 'Bright Co', role: 'employer' });
   await call('/auth/register', { email: 'new.boss@co.com', password: 'password1', name: 'Dup', role: 'employer' }); // 409: no email
@@ -467,7 +474,7 @@ test('google sign-in: signup needs a role, links existing email, rejects bad tok
   assert.equal(noRole.body.needsRole, true);
 
   sent.length = 0;
-  app.locals.sendEmail = async (e) => { sent.push(e); };
+  app.locals.sendEmail = capture;
   const ana = await google('good-new', 'worker');
   assert.deepEqual(sent.map((e) => e.to), ['ana@gmail.com']); // Google sign-up gets a welcome email too
   assert.equal(ana.status, 201);
@@ -480,11 +487,20 @@ test('google sign-in: signup needs a role, links existing email, rejects bad tok
   assert.equal((await google('good-new', 'worker')).body.user.id, ana.body.user.id); // same role just logs in
   assert.equal((await call('/auth/login', { email: 'ana@gmail.com', password: 'anything1' })).body.code, 'google_account');
 
-  const juan = await google('good-existing'); // password account with same email gets linked
-  assert.equal(sent.length, 1); // returning/linked users: no welcome email
+  // An account made with this email and a password (anyone could have, emails aren't verified): Google links
+  // to it, removes the password, signs out the other logins, and tells the owner.
+  await pool.query("UPDATE users SET email_verified_at = NULL WHERE email = 'juan@x.ph'"); // never confirmed
+  const before = await call('/auth/login', { email: 'juan@x.ph', password: 'password1' });
+  assert.equal(before.status, 200);
+  assert.equal((await call('/me', { token: before.body.token }, 'GET')).status, 200);
+  await new Promise((r) => setTimeout(r, 1100)); // logins are stamped to the second
+  const juan = await google('good-existing');
   assert.equal(juan.status, 200);
   assert.equal(juan.body.user.role, 'worker');
-  assert.equal((await call('/auth/login', { email: 'juan@x.ph', password: 'password1' })).status, 200);
+  assert.deepEqual(sent.slice(1).map((e) => e.subject), ['Your ReadyToWork.ph account now signs in with Google']); // no welcome email
+  assert.equal((await call('/auth/login', { email: 'juan@x.ph', password: 'password1' })).body.code, 'google_account'); // the old password is gone
+  assert.equal((await call('/me', { token: before.body.token }, 'GET')).status, 401); // the earlier login was signed out
+  assert.equal((await call('/me', { token: juan.body.token }, 'GET')).status, 200);
 });
 
 test('security: only Cloudflare may call the API, per-visitor and per-user limits, bad JSON is a 400', async () => {
@@ -533,13 +549,13 @@ test('admin dashboard stats: counts, activity and country (no IPs)', async () =>
 });
 
 test('login says what went wrong; forgot password sends a one-time, expiring link', async () => {
-  await call('/auth/register', { email: 'forgot@x.ph', password: 'password1', name: 'Forgetful', role: 'worker' });
+  const signup = await call('/auth/register', { email: 'forgot@x.ph', password: 'password1', name: 'Forgetful', role: 'worker' });
   const wrong = await call('/auth/login', { email: 'forgot@x.ph', password: 'nope-nope' });
   assert.deepEqual([wrong.status, wrong.body.code, typeof wrong.body.attemptsLeft], [401, 'wrong_password', 'number']);
   assert.equal((await call('/auth/login', { email: 'nobody@x.ph', password: 'whatever1' })).body.code, 'no_account');
 
   sent.length = 0;
-  app.locals.sendEmail = async (e) => { sent.push(e); };
+  app.locals.sendEmail = capture;
   assert.equal((await call('/auth/forgot', { email: 'nobody@x.ph' })).status, 200); // same answer, no email
   assert.equal(sent.length, 0);
   assert.equal((await call('/auth/forgot', { email: 'Forgot@X.ph' })).status, 200);
@@ -554,7 +570,9 @@ test('login says what went wrong; forgot password sends a one-time, expiring lin
   assert.ok(rows.every((r) => r.token_hash !== token)); // only a hash is stored
 
   assert.equal((await reset(token, 'short')).status, 400);
+  await new Promise((r) => setTimeout(r, 1100)); // logins are stamped to the second
   const done = await reset(token, 'brand-new-pass');
+  assert.equal((await call('/me', { token: signup.body.token }, 'GET')).status, 401); // a reset signs out every other device
   assert.equal(done.status, 200);
   assert.equal(done.body.user.email, 'forgot@x.ph');
   assert.equal((await reset(token, 'another-pass')).body.code, 'invalid_link'); // one use only
@@ -774,7 +792,7 @@ test('re-analyze: a fresh AI look on demand, and each run uses one from the allo
 });
 
 test('feedback: anyone can send it, support gets an email, the admin reads it and marks it done', async () => {
-  app.locals.sendEmail = async (e) => { sent.push(e); };
+  app.locals.sendEmail = capture;
   const user = await call('/auth/register', { email: 'fb.user@co.com', password: 'password1', name: 'Fiona', role: 'employer' });
   await new Promise((r) => setImmediate(r));
   sent.length = 0; // drop the welcome email
@@ -857,7 +875,7 @@ test('worker privacy: free employers see "Maria S." and no links until they may 
 });
 
 test('contact form and robot check: support requests reach the inbox; bots are turned away', async () => {
-  app.locals.sendEmail = async (e) => { sent.push(e); };
+  app.locals.sendEmail = capture;
   sent.length = 0;
   const msg = { name: 'Ana', email: 'ana@shop.ph', subject: 'Refund question', message: 'How do refunds work?' };
   assert.equal((await call('/contact', { ...msg, email: 'nope' })).status, 400);
@@ -913,15 +931,20 @@ test('Hire Talent: filters, sort, pages; save workers; mark as hired', async () 
   assert.equal((await call(`/hires/${a.user.id}`, { token: boss.token }, 'PUT')).status, 403); // no relationship yet
   const job = (await call('/jobs', { token: boss.token, title: 'Books', description: 'x', job_type: 'gig' })).body;
   await call(`/jobs/${job.id}/apply`, { token: a.token, cover_letter: 'hi' });
+  const myApp = async () => (await call('/my/applications', { token: a.token }, 'GET')).body[0];
+  assert.deepEqual([(await myApp()).hired, (await myApp()).messaged], [false, false]); // the worker's dashboard status
+  await call(`/messages/${a.user.id}`, { token: boss.token, body: 'Hi!', job_id: job.id }); // an applicant can always be messaged
+  assert.equal((await myApp()).messaged, true);
   assert.equal((await call(`/hires/${a.user.id}`, { token: boss.token, job_id: job.id }, 'PUT')).status, 204);
   const hires = (await call('/my/hires', { token: boss.token }, 'GET')).body;
   assert.deepEqual(hires.map((h) => [h.name, h.job_title]), [['Worker1 Cruz', 'Books']]);
   assert.ok((await call(`/workers/${a.user.id}`, { token: boss.token }, 'GET')).body.hired_at);
+  assert.equal((await myApp()).hired, true);
 });
 
 test('login protection: 5 wrong passwords pause the account for 15 minutes, email the owner; reset lifts it', async () => {
   app.locals.relaxedLimits = true; // the per-visitor limit is tested elsewhere; this is the per-account one
-  app.locals.sendEmail = async (e) => { sent.push(e); };
+  app.locals.sendEmail = capture;
   await call('/auth/register', { email: 'lock.me@x.ph', password: 'password1', name: 'Lock Me', role: 'worker' });
   sent.length = 0;
   const login = (password) => call('/auth/login', { email: 'lock.me@x.ph', password });
@@ -952,4 +975,81 @@ test('login protection: 5 wrong passwords pause the account for 15 minutes, emai
   const reset = await fetch(`${base}/auth/reset`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ token, password: 'password2' }) });
   assert.equal(reset.status, 200);
   assert.equal((await login('password2')).status, 200); // a new password ends the pause
+});
+
+test('bento profile: optional fields saved and validated, hidden contacts, CV only for employers who may contact', async () => {
+  const { HIDDEN } = await import('../src/app.js');
+  const reg = async (email, role, name) => (await call('/auth/register', { email, password: 'password1', name, role })).body;
+  const w = await reg('bento.w@x.ph', 'worker', 'Bento Santos');
+  const free = await reg('bento.free@co.com', 'employer', 'Free Co');
+  const pro = await reg('bento.pro@co.com', 'employer', 'Pro Co');
+  await pool.query("UPDATE users SET plan = 'pro' WHERE id = $1", [pro.user.id]);
+  const base = { title: 'Bookkeeper', bio: 'Books', skills: 'QuickBooks, Excel', availability: 'full-time', hourly_rate: '8' };
+  const save = (extra) => call('/profile', { token: w.token, ...base, ...extra }, 'PUT');
+
+  const ok = await save({ skill_years: { QuickBooks: 5, Excel: 2, Gone: 3 }, location: 'Cebu City, call 0917 123 4567', work_hours: 'us', hours_per_week: 40,
+    start_when: '1w', english: 'fluent', languages: 'Filipino', internet_mbps: 50, setup: ['backup_power', 'jetpack', 'headset'], show_resume: true });
+  assert.equal(ok.status, 200);
+  assert.deepEqual([ok.body.skill_years, ok.body.setup], [{ quickbooks: 5, excel: 2 }, ['backup_power', 'headset']]); // unknown skills and setup items dropped
+  for (const bad of [{ work_hours: 'mars' }, { hours_per_week: 81 }, { english: 'klingon' }, { internet_mbps: 1.5 }])
+    assert.equal((await save(bad)).status, 400, JSON.stringify(bad));
+  assert.equal((await save({})).body.work_hours, 'us'); // fields left out are kept
+
+  const asFree = (await call(`/workers/${w.user.id}`, { token: free.token }, 'GET')).body;
+  assert.equal(asFree.location, `Cebu City, call ${HIDDEN}`); // contact details hidden from a Free employer
+  assert.equal((await call(`/workers/${w.user.id}`, { token: pro.token }, 'GET')).body.location, 'Cebu City, call 0917 123 4567');
+
+  // CV: none yet, then shared; Free employers are asked to upgrade, Pro gets the file, and the worker can hide it.
+  const cv = (who) => call(`/workers/${w.user.id}/resume`, { token: who.token }, 'GET');
+  assert.equal((await cv(pro)).status, 404);
+  await pool.query("UPDATE worker_profiles SET resume_key = 'resumes/b.pdf', resume_name = 'b.pdf' WHERE user_id = $1", [w.user.id]);
+  assert.equal((await call(`/workers/${w.user.id}`, { token: free.token }, 'GET')).body.has_resume, true);
+  assert.equal((await cv(free)).body.code, 'upgrade');
+  assert.match((await cv(pro)).body.url, /resumes\/b\.pdf/);
+  await save({ show_resume: false });
+  assert.equal((await cv(pro)).status, 404);
+  assert.equal((await call(`/workers/${w.user.id}`, { token: pro.token }, 'GET')).body.has_resume, false);
+});
+
+test('email confirmation: link on sign-up, needed to post jobs, resend, Google and reset confirm, confirmed accounts keep their password on Google link', async () => {
+  const mails = [];
+  app.locals.sendEmail = async (e) => { if (/^Confirm your email/.test(e.subject)) mails.push(e); };
+  const reg = (email, role) => call('/auth/register', { email, password: 'password1', name: 'Conf', role, unconfirmed: true });
+  const linkOf = (m) => m.text.match(/verify-email\?token=([\w-]+)/)[1];
+  const verify = (token) => fetch(`${base}/auth/verify`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ token }) });
+
+  const boss = await reg('conf.boss@co.com', 'employer');
+  assert.equal(boss.body.user.email_verified, false);
+  assert.deepEqual(mails.map((m) => m.to), ['conf.boss@co.com']);
+  const job = { token: boss.body.token, title: 'VA', description: 'x', job_type: 'gig' };
+  assert.equal((await call('/jobs', job)).body.code, 'verify_email'); // unconfirmed employers can't post yet
+
+  const resend = await call('/auth/verify/resend', { token: boss.body.token }, 'POST');
+  assert.equal(resend.body.verified, false);
+  assert.equal(mails.length, 2);
+  assert.equal((await verify(linkOf(mails[0]))).status, 400); // asking again replaced the first link
+  assert.equal((await verify(linkOf(mails[1]))).status, 200);
+  assert.equal((await verify(linkOf(mails[1]))).status, 400); // one use only
+  assert.equal((await call('/me', { token: boss.body.token }, 'GET')).body.email_verified, true);
+  assert.equal((await call('/jobs', job)).status, 201);
+  assert.equal((await call('/auth/verify/resend', { token: boss.body.token }, 'POST')).body.verified, true);
+  assert.equal(mails.length, 2); // nothing to resend once confirmed
+
+  // Google: confirmed on sign-up, and a confirmed account keeps its password when Google links to it.
+  process.env.GOOGLE_CLIENT_ID = 'test-client';
+  app.locals.verifyGoogle = async (t) => ({ 'conf-boss': { sub: 'g-conf', email: 'conf.boss@co.com', email_verified: true, name: 'Conf' },
+    'conf-new': { sub: 'g-new', email: 'conf.new@gmail.com', email_verified: true, name: 'New' } })[t];
+  assert.equal((await call('/auth/google', { credential: 'conf-new', role: 'worker' })).body.user.email_verified, true);
+  assert.equal((await call('/auth/google', { credential: 'conf-boss' })).status, 200);
+  assert.equal((await call('/auth/login', { email: 'conf.boss@co.com', password: 'password1' })).status, 200);
+
+  // A password reset confirms the email too (the link went to that inbox).
+  const w = await reg('conf.w@x.ph', 'worker');
+  app.locals.sendEmail = capture;
+  sent.length = 0;
+  await fetch(`${base}/auth/forgot`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ email: 'conf.w@x.ph' }) });
+  const token = sent[0].text.match(/reset-password\?token=([\w-]+)/)[1];
+  const done = await (await fetch(`${base}/auth/reset`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ token, password: 'password9' }) })).json();
+  assert.equal(done.user.email_verified, true);
+  assert.equal(w.body.user.email_verified, false);
 });
