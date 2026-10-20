@@ -1,7 +1,7 @@
 'use client';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
-import { useState, useTransition } from 'react';
+import { useEffect, useState, useTransition } from 'react';
 import { useApi } from '@/lib/api';
 import { useAuth } from '@/lib/auth';
 import { buttonGold, buttonGhost, SearchLabel } from '@/components/ui';
@@ -200,9 +200,33 @@ function PhilippinesPin() {
   );
 }
 
+// After "Delete my account" sends people here (?deleted=1): a short goodbye they can close.
+function DeletedNotice() {
+  const [show, setShow] = useState<'' | 'deleted' | 'paused'>('');
+  useEffect(() => {
+    const q = new URLSearchParams(location.search);
+    const which = q.get('deleted') === '1' ? 'deleted' : q.get('paused') === '1' ? 'paused' : '';
+    if (!which) return;
+    setShow(which); // eslint-disable-line react-hooks/set-state-in-effect -- read once from the address after load
+    history.replaceState(null, '', '/');
+  }, []);
+  if (!show) return null;
+  return (
+    <div className="bg-emerald-50 text-sm text-emerald-950" role="status">
+      <div className="mx-auto flex max-w-6xl items-center gap-3 px-4 py-3">
+        <span className="flex-1">{show === 'deleted'
+          ? <>Your account has been deleted. Thanks for being part of ReadyToWork.ph; you&apos;re welcome back anytime.</>
+          : <>Your account is paused. Log in anytime to make it active again.</>}</span>
+        <button type="button" onClick={() => setShow('')} className="font-semibold text-emerald-800 hover:underline">Close</button>
+      </div>
+    </div>
+  );
+}
+
 export default function Home() {
   return (
     <>
+      <DeletedNotice />
       <section className="relative overflow-hidden bg-emerald-950">
         <div className="relative mx-auto max-w-6xl space-y-8 px-4 py-20 sm:py-28">
           <PhilippinesPin />

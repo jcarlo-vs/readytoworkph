@@ -1,5 +1,6 @@
 'use client';
 import Link from 'next/link';
+import { useSearchParams } from 'next/navigation';
 import { useState } from 'react';
 import { api } from '@/lib/api';
 import { useAuth } from '@/lib/auth';
@@ -12,7 +13,7 @@ const MAX = 5000;
 // straight back to the sender. Visitors pass the robot check; signed-in people skip it.
 export default function ContactPage() {
   const { user } = useAuth();
-  const [form, setForm] = useState({ name: '', email: '', subject: '', message: '' });
+  const [form, setForm] = useState({ name: '', email: '', subject: useSearchParams().get('subject')?.slice(0, 150) ?? '', message: '' });
   const [prefilled, setPrefilled] = useState(false);
   if (user && !prefilled) { setPrefilled(true); setForm((f) => ({ ...f, name: f.name || user.name, email: f.email || user.email })); }
   const [status, setStatus] = useState({ busy: false, error: '', sent: false });

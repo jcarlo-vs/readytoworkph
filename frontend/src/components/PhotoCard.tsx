@@ -50,8 +50,8 @@ export function PhotoCard() {
   }
 
   return (
-    <section className={`${card} space-y-4`}>
-      <h2 className="text-lg font-semibold">Profile photo <span className="text-sm font-normal text-slate-400">(optional)</span></h2>
+    <section className={`${card} space-y-3 p-5`}>
+      <h2 className="font-display text-base font-bold">Profile photo <span className="text-sm font-normal text-slate-400">(optional)</span></h2>
       <div className="flex items-center gap-4">
         <Initials name={user.name} id={user.id} size="h-20 w-20 text-2xl" />
         <div className="space-y-2 text-sm">

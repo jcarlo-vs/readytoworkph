@@ -236,6 +236,9 @@ function ProfileMenu({ user, onSignOut }: { user: User; onSignOut: () => void })
               </Link>
             </>
           )}
+          <Link href="/account" onClick={close} className={item}>
+            <svg {...icon}><circle cx="12" cy="12" r="3" /><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1Z" /></svg>Account settings
+          </Link>
           <Link href="/contact" onClick={close} className={item}>
             <svg {...icon}><circle cx="12" cy="12" r="9" /><path d="M9.5 9.5a2.5 2.5 0 1 1 3.5 2.3c-.6.3-1 .9-1 1.5v.5M12 17h.01" /></svg>Help &amp; support
           </Link>
@@ -271,6 +274,26 @@ export function ConfirmEmailBanner({ email }: { email: string }) {
         {state === 'sent' ? <span className="font-semibold text-emerald-800">New link sent ✓</span>
           : <button type="button" onClick={resend} disabled={state === 'busy'} className="font-semibold text-emerald-800 underline-offset-2 hover:underline disabled:opacity-50">{state === 'busy' ? 'Sending…' : 'Send a new link'}</button>}
         {!['idle', 'busy', 'sent'].includes(state) && <span className="text-red-700">{state}</span>}
+      </div>
+    </div>
+  );
+}
+
+// A one-time green notice carried across a redirect in sessionStorage (e.g. "Welcome back!").
+function Flash() {
+  const [text, setText] = useState('');
+  useEffect(() => {
+    try {
+      const t = sessionStorage.getItem('flash');
+      if (t) { sessionStorage.removeItem('flash'); setText(t); } // eslint-disable-line react-hooks/set-state-in-effect -- read once after load
+    } catch { /* storage off */ }
+  }, []);
+  if (!text) return null;
+  return (
+    <div className="border-t border-emerald-200 bg-emerald-50 text-sm text-emerald-950" role="status">
+      <div className="mx-auto flex max-w-6xl items-center gap-3 px-4 py-2">
+        <span className="flex-1">✅ {text}</span>
+        <button type="button" onClick={() => setText('')} className="font-semibold text-emerald-800 hover:underline">Close</button>
       </div>
     </div>
   );
@@ -341,6 +364,7 @@ export function Nav() {
         )}
       </nav>
       {user?.email_verified === false && <ConfirmEmailBanner email={user.email} />}
+      <Flash />
     </header>
   );
 }
@@ -364,7 +388,7 @@ export function Footer() {
         <div className="space-y-3">
           <Logo light />
           <p className="text-sm leading-relaxed">Remote jobs for Filipino professionals. Employers hire direct, with no agency markups, and workers always join free.</p>
-          <a href="mailto:support@readytowork.ph" className="inline-block text-sm font-medium text-emerald-100 hover:text-white">support@readytowork.ph</a>
+          <Link href="/contact" className="inline-block text-sm font-medium text-emerald-100 hover:text-white">support@readytowork.ph</Link>
         </div>
         {/* Visitors get sign-up links; signed-in people get their own pages in the same spots. */}
         {col('Find work', [['Browse remote jobs', '/jobs'], ['Full-time jobs', '/jobs?type=full-time'], ['Part-time jobs', '/jobs?type=part-time'], ['Gigs and projects', '/jobs?type=gig'],

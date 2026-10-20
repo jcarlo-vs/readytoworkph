@@ -53,21 +53,18 @@ export function ResumeCard() {
   );
 
   return (
-    <section className={`${card} space-y-4`}>
-      <div className="flex items-baseline justify-between gap-2">
-        <h2 className="text-lg font-semibold">Resume <span className="text-sm font-normal text-slate-400">(optional)</span></h2>
-        <span className="text-xs text-slate-500">PDF · max {MAX_MB} MB</span>
-      </div>
-      <p className="text-sm text-slate-500">Attach it to your applications so employers can see your full experience. Employers you apply to can open it, plus employers who can message you if you show it on your profile. Replacing it updates everywhere.</p>
+    <section className={`${card} space-y-3 p-5`}>
+      <h2 className="font-display text-base font-bold">Resume <span className="text-sm font-normal text-slate-400">(optional)</span></h2>
+      <p className="text-xs text-slate-500">PDF, up to {MAX_MB} MB. Employers you apply to can open it; replacing it updates everywhere.</p>
 
       {data === null ? null : current ? (
-        <div className="flex flex-wrap items-center gap-3 rounded-xl border border-slate-200 bg-slate-50 p-4">
+        <div className="flex flex-wrap items-center gap-3 rounded-xl bg-emerald-50/50 p-3">
           <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-lg bg-red-50 text-xs font-bold text-red-600" aria-hidden="true">PDF</span>
           <div className="min-w-0 flex-1">
             <p className="truncate font-medium text-slate-900">{current.name}</p>
             <p className="text-xs text-slate-500">Uploaded <TimeAgo date={current.uploaded_at} /></p>
           </div>
-          <div className="flex gap-2 text-sm">
+          <div className="flex w-full flex-wrap gap-1.5 whitespace-nowrap text-xs">
             <button type="button" onClick={async () => { const r = await api<{ resume: Resume | null }>('/profile/resume'); if (r.resume) setViewing(r.resume); }}
               className="rounded-lg border border-slate-300 bg-white px-3 py-1.5 font-medium text-slate-700 hover:border-emerald-600">View</button>
             <label className="cursor-pointer rounded-lg border border-slate-300 bg-white px-3 py-1.5 font-medium text-slate-700 hover:border-emerald-600 has-[:focus-visible]:ring-2 has-[:focus-visible]:ring-emerald-600/30">

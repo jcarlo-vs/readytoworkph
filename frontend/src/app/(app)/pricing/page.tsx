@@ -20,12 +20,12 @@ const PLANS: Plan[] = [
   {
     name: 'Pro', monthly: 19, blurb: 'For growing teams hiring every month.',
     features: ['Up to 5 job posts per month', 'See your top 150 applicants per job', 'View job applications', 'Reach out to any worker first', '500 AI fit scores per month', 'AI reads resumes, cover letters and profiles'],
-    cta: ['Get Pro', 'mailto:support@readytowork.ph?subject=Upgrade%20to%20Pro'],
+    cta: ['Get Pro', '/contact?subject=Upgrade%20to%20Pro'],
   },
   {
     name: 'Premium', monthly: 49, blurb: 'For agencies and high-volume hiring.', popular: true,
     features: ['Up to 10 job posts per month', 'See every applicant, no limit', 'View job applications', 'Reach out to any worker first', 'Unlimited AI fit scores', 'Score all applicants in one click, not one by one', 'Your own hiring analytics dashboard', 'Priority support'],
-    cta: ['Get Premium', 'mailto:support@readytowork.ph?subject=Upgrade%20to%20Premium'],
+    cta: ['Get Premium', '/contact?subject=Upgrade%20to%20Premium'],
   },
 ];
 const YEARLY_MONTHS = 10; // yearly = 2 months free
@@ -417,7 +417,7 @@ export default function PricingPage() {
         <p className="text-emerald-100">Post your first job free. No credit card needed.</p>
         <div className="flex flex-wrap justify-center gap-3">
           <Link href="/jobs/new" className={`${buttonGold} px-6 py-3`}>Post a job free</Link>
-          <Link href="mailto:support@readytowork.ph" className="inline-flex items-center rounded-lg border border-emerald-700 px-6 py-3 text-sm font-semibold text-white hover:border-amber-400">Still have questions? Email us</Link>
+          <Link href="/contact?subject=Question%20about%20plans" className="inline-flex items-center rounded-full border border-emerald-600 px-6 py-3 text-sm font-semibold text-white hover:border-amber-400">Still have questions? Contact us</Link>
         </div>
       </section>
     </div>

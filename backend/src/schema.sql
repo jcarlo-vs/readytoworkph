@@ -218,3 +218,27 @@ CREATE TABLE IF NOT EXISTS email_verifications (
   user_id    int NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   expires_at timestamptz NOT NULL
 );
+
+-- Deleted accounts (Data Privacy Act: right to erasure). The row stays as a blank placeholder so the other
+-- person keeps their side of a conversation ("Deleted user"); email, password, Google link, name, files,
+-- profile, applications, jobs, saved and hired lists are removed.
+ALTER TABLE users ADD COLUMN IF NOT EXISTS deleted_at timestamptz;
+
+-- First and last name kept separately (sign-up asks for both; Google sends both). `name` stays the display
+-- name: "First Last" for people, or an employer's company name.
+ALTER TABLE users ADD COLUMN IF NOT EXISTS first_name text NOT NULL DEFAULT '';
+ALTER TABLE users ADD COLUMN IF NOT EXISTS last_name text NOT NULL DEFAULT '';
+UPDATE users SET first_name = split_part(name, ' ', 1), last_name = trim(substr(name, length(split_part(name, ' ', 1)) + 1))
+  WHERE first_name = '' AND last_name = '' AND deleted_at IS NULL;
+
+-- Deactivated (paused) accounts: hidden from search, can't be messaged, their jobs are hidden; everything is
+-- kept and logging in again reactivates the account.
+ALTER TABLE users ADD COLUMN IF NOT EXISTS deactivated_at timestamptz;
+
+-- Suspended accounts (admin): signed out everywhere, can't log in, hidden like a paused account. Their email
+-- is kept only as a one-way hash so it can't be used to sign up again (also after the account is deleted).
+ALTER TABLE users ADD COLUMN IF NOT EXISTS suspended_at timestamptz;
+CREATE TABLE IF NOT EXISTS blocked_emails (
+  email_hash text PRIMARY KEY,
+  created_at timestamptz NOT NULL DEFAULT now()
+);

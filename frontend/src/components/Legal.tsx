@@ -3,7 +3,7 @@ import Link from 'next/link';
 // Who runs the site, as named in the Terms. Paddle asks for the legal name of a sole proprietor.
 export const OPERATOR = 'Juan Carlo Senin';
 export const CONTACT = 'support@readytowork.ph';
-export const UPDATED = 'October 17, 2026';
+export const UPDATED = 'October 20, 2026';
 
 // Shared layout for the Terms, Privacy and Refund pages: plain server-rendered text, readable without JavaScript.
 export function LegalPage({ title, intro, children }: { title: string; intro: string; children: React.ReactNode }) {

@@ -24,6 +24,7 @@ Features we decided to build, many inspired by looking through OnlineJobs.ph (em
   - [x] Follow-up: Google sign-in: `https://readytowork.ph` + `www` added to the OAuth client's JavaScript origins; consent screen links and authorized domain updated
   - [x] Follow-up: after go-live, verify readytowork.ph in Google Search Console, then click **Verify branding** on the OAuth consent screen (shows the app name in the Google popup)
   - [x] Follow-up: after go-live, remove `remotepinas.com` and `remoteworks.ph` from the OAuth authorized domains and client origins (they only redirect)
+  - [ ] Follow-up: Paddle sandbox API key expires **Jan 16, 2027**: make a new one, update `backend/.env` and Secret Manager `paddle-api-key` (live keys expire too; check their date)
   - [ ] Follow-up: Paddle (sandbox now, live later): rename products to "ReadyToWork.ph Pro / Premium", statement text `READYTOWRK`, default payment link `https://readytowork.ph/pricing`, webhook URL `https://readytowork.ph/api/billing/webhook`, website approval for readytowork.ph
   - [x] Follow-up: Cloudflare Turnstile widget for readytowork.ph (see 3.)
   - [x] Follow-up: Google Search Console: readytowork.ph verified + sitemap submitted (no "Change of address": remoteworks.ph was never in Search Console; the 301 redirects cover it)
@@ -43,7 +44,7 @@ Features we decided to build, many inspired by looking through OnlineJobs.ph (em
 - [x] Admin panel: grouped dark sidebar; Overview, Users, Jobs, Subscriptions, Feedback & support, Settings
 - [x] Job title (120) and description (10,000) limits with live counters
 - [x] UI refresh "band + soft": green page band (PageBand) on dashboards, contact, profile, Hire talent, analytics, applicants; soft borderless cards, pill buttons, mint page, green footer
-  - [ ] Follow-up: deploy the website (also carries the worker dashboard, Credits wording and "Browse jobs" fixes)
+  - [x] Follow-up: deploy the website (also carries the worker dashboard, Credits wording and "Browse jobs" fixes) (first CI/CD release, 2026-10-19)
 - [x] Follow-up (everything above): run `npm run db:init` on the **production** database before deploying (done 2026-10-19)
 - [x] Follow-up: reset the Neon `neondb_owner` password (it was shared in chat) and put the new **pooled** URL in Cloud Run `DATABASE_URL`, at the same time as the backend deploy
 - [x] Follow-up (everything above): commit and deploy (2026-10-19)
@@ -53,8 +54,8 @@ Features we decided to build, many inspired by looking through OnlineJobs.ph (em
 - [x] GitHub Actions (`.github/workflows/ci.yml`): every push and PR runs backend tests (throwaway Postgres) + website typecheck and lint; a push to `main` migrates the production database, deploys the backend, then the website
 - [x] Public build settings committed in `frontend/.env.production` (secrets stay in Cloud Run, Cloudflare and GitHub)
   - [x] Follow-up: run `~/cicd-setup.sh` once (Google Cloud sign-in for GitHub, no key files)
-  - [ ] Follow-up: GitHub secrets `DATABASE_URL_DIRECT` (Neon, without -pooler) and `CLOUDFLARE_API_TOKEN` ("Edit Cloudflare Workers" token)
-  - [ ] Follow-up: create the `dev` branch; work on `dev`, release by merging a pull request into `main`
+  - [x] Follow-up: GitHub secrets `DATABASE_URL_DIRECT` (Neon, without -pooler) and `CLOUDFLARE_API_TOKEN` ("Edit Cloudflare Workers" token) (first CI/CD release, 2026-10-19)
+  - [x] Follow-up: create the `dev` branch; work on `dev`, release by merging a pull request into `main` (first CI/CD release, 2026-10-19)
   - [ ] Follow-up: protect `main` (changes only through pull requests with passing checks)
 - [ ] Staging site (staging.readytowork.ph from `dev`): when there are paying users
 
@@ -68,7 +69,7 @@ Features we decided to build, many inspired by looking through OnlineJobs.ph (em
 - [x] Rate shown per hour only (monthly estimate removed 2026-10-19: it looked like the asking salary; see "Hours per day / week" in 4.)
 - [x] Worker privacy: Free employers see "Maria S.", no links, until they can contact the worker
 - [x] Contact details in worker bios/headlines hidden (blurred "upgrade to see", clickable)
-- [ ] Hide contact details for the employer side too (company name / job post text), see 3.
+- [x] Hide contact details for the employer side too (job post text), see 3.
 
 ## 2. Keep employers coming back
 
@@ -86,14 +87,22 @@ Features we decided to build, many inspired by looking through OnlineJobs.ph (em
   - [x] Follow-up: set `NEXT_PUBLIC_TURNSTILE_SITE_KEY` (frontend `.env.production.local`) and `TURNSTILE_SECRET` (Secret Manager `turnstile-secret`); local `.env` files keep the **test** keys
 - [x] Login protection: 5 wrong passwords per account → 15-minute pause + email to the owner; reset ends it; per-visitor limit kept
 - [x] Login edge cases: a password reset signs out every other device; Google sign-in takes over an account made with the same email (removes its password, signs out other devices, emails the owner); Google on the log-in page without an account offers "looking for work / hiring"
-  - [ ] Follow-up: run `npm run db:init` on production before deploying (new `sessions_valid_from` column)
+  - [x] Follow-up: run `npm run db:init` on production before deploying (new `sessions_valid_from` column) (first CI/CD release, 2026-10-19)
 - [x] Email confirmation: a link on email sign-up (3 days, one use), yellow reminder bar with "Send a new link", employers confirm before posting jobs; Google sign-ups and password resets count as confirmed; Google linking keeps the password of a confirmed account
-  - [ ] Follow-up: production `npm run db:init` (adds the columns; existing Google accounts are marked confirmed, existing email accounts see the reminder bar)
-- [ ] Admin: suspend an account (it signs them out everywhere)
-- [ ] Delete my account (Data Privacy Act: right to erasure)
+  - [x] Follow-up: production `npm run db:init` (adds the columns; existing Google accounts are marked confirmed, existing email accounts see the reminder bar) (first CI/CD release, 2026-10-19)
+- [x] Admin: suspend an account (Users page): signed out everywhere, can't log in, hidden like a paused account, email blocked from signing up again (hashed); lift suspension undoes it
+- [x] Delete my account (Data Privacy Act: right to erasure): Account settings page, type DELETE; profile, files, applications, jobs, saved/hired lists removed; chats kept for the other person as "Deleted user"; paid plan cancelled at Paddle first; email free to sign up again
+  - [x] Follow-up (with "Admin: suspend an account"): keep a hashed email of suspended accounts so they can't sign up again
+- [x] Deactivate (pause) my account: hidden from search, jobs hidden, no new messages, everything kept; logging in reactivates ("Welcome back"); employers see a "Deactivated" badge
+- [x] Delete leaves anonymous traces: "An applicant deleted their account" rows keep counts and rankings; hires stay as "Deleted user"; old chats still open (read-only)
+- [x] Privacy policy: deactivate vs delete explained; backups erased within 30 days (R2 rule `delete-old-backups` already in place)
+- [x] First and last name stored separately (sign-up asks for both; Google sends both); employers can still give a company name
+- [x] Change your name in Account settings (workers: first/last; employers: company or own name); employers upload a profile photo or logo there too
+- [x] Email buttons ("Email us", footer, error pages, plan buttons without checkout) open the Contact us form instead of a mail app
 - [x] Contact us page (+ footer and menu links); support requests in the admin inbox with Reply-To the sender
   - [x] Follow-up: make sure support@readytowork.ph is a real inbox (forwards to readytoworksupport@gmail.com)
-- [ ] Block contact info (emails, phone numbers, Telegram/WhatsApp/Viber links) in **job posts**, with a clear message
+- [x] Contact details in job posts (emails, links, phones, @handles) hidden from visitors on the server (HTML and API); blurred "Sign up or log in to see" chips; tip for employers when posting
+  - [ ] Later, if scams or plan-skipping show up: block contact details in job posts entirely
 - [ ] Outreach caps: Pro 100 / Premium 500 workers a month an employer can message first (replies to applicants stay unlimited)
 - [ ] AI scam check on new job posts: clean posts go live instantly; suspicious ones go to an admin review queue
 - [ ] Worker reviews from employers (needs Mark as hired, done)
@@ -107,7 +116,7 @@ Features we decided to build, many inspired by looking through OnlineJobs.ph (em
 - [x] Work setup: internet speed, backup power, backup internet, own laptop, headset
 - [x] English level + other languages
 - [x] Resume download on the profile (worker can switch it off)
-  - [ ] Follow-up: run `npm run db:init` on production before deploying (new profile columns)
+  - [x] Follow-up: run `npm run db:init` on production before deploying (new profile columns) (first CI/CD release, 2026-10-19)
 - [x] "Can start" (now / 1 week / 2 weeks / 1 month)
 - [x] Hint under About: no email, phone or social links
 
@@ -122,7 +131,7 @@ Features we decided to build, many inspired by looking through OnlineJobs.ph (em
 ## 5. Worker side
 
 - [ ] Account settings: change email, change password
-- [ ] "Open to work" toggle: hide yourself from search when not looking
+- [x] "Open to work" toggle: covered by Deactivate (Account settings)
 - [ ] Bookmark jobs + Saved jobs list
 - [ ] Job alerts: pick skills, get emailed when a matching job is posted
 - [x] Application status for workers: messaged / hired / job closed (on the worker dashboard)

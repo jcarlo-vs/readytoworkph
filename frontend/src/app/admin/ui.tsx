@@ -1,5 +1,5 @@
 'use client';
-import { createContext, useContext } from 'react';
+import { createContext, useContext, useState } from 'react';
 import { API, read } from '@/lib/api';
 
 // The admin panel has its own login (an HttpOnly cookie for /api/admin only), separate from user accounts.
@@ -72,19 +72,43 @@ export function Search({ value, onChange, placeholder }: { value: string; onChan
   );
 }
 
-// "1-25 of 312 · ← Previous · Page 1 of 13 · Next →", only when there's more than one page.
-export function Pager({ page, total, size, onPage, noun }: { page: number; total: number; size: number; onPage: (p: number) => void; noun: string }) {
+export const PAGE_SIZES = [10, 25, 50, 100];
+// Rows per page, remembered for every admin table. Admin pages only render in the browser (after the login
+// check), so reading localStorage on first render is safe.
+export function usePageSize(): [number, (n: number) => void] {
+  const [size, setSize] = useState(() => {
+    try { const n = Number(localStorage.getItem('admin-rows')); return PAGE_SIZES.includes(n) ? n : 25; } catch { return 25; }
+  });
+  return [size, (n) => { setSize(n); try { localStorage.setItem('admin-rows', String(n)); } catch {} }];
+}
+// One page of a list that's already fully loaded.
+export const pageOf = <T,>(list: T[], page: number, size: number) => list.slice(page * size, (page + 1) * size);
+
+// "Rows [25] · 1-25 of 312 · ← Previous · Page 1 of 13 · Next →"; the page buttons only when there's more than one page.
+export function Pager({ page, total, size, onPage, onSize, noun }: {
+  page: number; total: number; size: number; onPage: (p: number) => void; onSize: (n: number) => void; noun: string;
+}) {
   const pages = Math.max(1, Math.ceil(total / size));
-  if (total <= size) return <p className="text-sm text-slate-500">{total.toLocaleString('en-US')} {noun}</p>;
   const btn = 'rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-50 disabled:opacity-40';
   return (
     <nav className="flex flex-wrap items-center justify-between gap-3 text-sm" aria-label={`${noun} pages`}>
-      <span className="tabular-nums text-slate-500">{page * size + 1}-{Math.min(total, (page + 1) * size)} of {total.toLocaleString('en-US')} {noun}</span>
-      <div className="flex items-center gap-2">
-        <button type="button" className={btn} disabled={page === 0} onClick={() => onPage(page - 1)}>← Previous</button>
-        <span className="text-xs tabular-nums text-slate-500">Page {page + 1} of {pages}</span>
-        <button type="button" className={btn} disabled={page >= pages - 1} onClick={() => onPage(page + 1)}>Next →</button>
+      <div className="flex items-center gap-3 text-slate-500">
+        <label className="flex items-center gap-2 text-xs">
+          Rows
+          <select value={size} onChange={(e) => { onSize(Number(e.target.value)); onPage(0); }}
+            className="rounded-lg border border-slate-300 bg-white px-2 py-1.5 text-xs font-semibold text-slate-700 focus:border-emerald-600 focus:outline-none">
+            {PAGE_SIZES.map((n) => <option key={n} value={n}>{n}</option>)}
+          </select>
+        </label>
+        <span className="tabular-nums">{total ? `${page * size + 1}-${Math.min(total, (page + 1) * size)} of ` : ''}{total.toLocaleString('en-US')} {noun}</span>
       </div>
+      {pages > 1 && (
+        <div className="flex items-center gap-2">
+          <button type="button" className={btn} disabled={page === 0} onClick={() => onPage(page - 1)}>← Previous</button>
+          <span className="text-xs tabular-nums text-slate-500">Page {page + 1} of {pages}</span>
+          <button type="button" className={btn} disabled={page >= pages - 1} onClick={() => onPage(page + 1)}>Next →</button>
+        </div>
+      )}
     </nav>
   );
 }

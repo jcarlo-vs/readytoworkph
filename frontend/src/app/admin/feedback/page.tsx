@@ -1,7 +1,7 @@
 'use client';
 import { useCallback, useEffect, useState } from 'react';
 import { ErrorText, card } from '@/components/ui';
-import { PageHeader, Search, Seg, adminApi, ago, failed, pill, useAdmin } from '../ui';
+import { PageHeader, Pager, Search, Seg, adminApi, ago, failed, pageOf, pill, usePageSize, useAdmin } from '../ui';
 
 type Feedback = {
   id: number; type: 'idea' | 'bug' | 'other' | 'support'; subject: string | null; message: string; page: string | null; contact_ok: boolean;
@@ -20,6 +20,8 @@ export default function FeedbackPage() {
   const [items, setItems] = useState<Feedback[] | null>(null);
   const [filter, setFilter] = useState<'open' | 'all' | Feedback['type']>('open');
   const [q, setQ] = useState('');
+  const [page, setPage] = useState(0);
+  const [size, setSize] = usePageSize();
   const [error, setError] = useState('');
   const load = useCallback(() => adminApi<Feedback[]>('/feedback').then(setItems, failed(logout, setError)), [logout]);
   useEffect(() => { load(); }, [load]);
@@ -37,16 +39,16 @@ export default function FeedbackPage() {
   return (
     <>
       <PageHeader title="Feedback & support" sub={`${open} open · each one is also emailed to support@readytowork.ph`}>
-        <Search value={q} onChange={setQ} placeholder="Search feedback" />
+        <Search value={q} onChange={(v) => { setQ(v); setPage(0); }} placeholder="Search feedback" />
       </PageHeader>
-      <Seg label="Show" value={filter} onChange={setFilter} options={[['open', 'Open'], ['all', 'All'], ['support', 'Support'], ['idea', 'Ideas'], ['bug', 'Broken'], ['other', 'Other']]} />
+      <Seg label="Show" value={filter} onChange={(v) => { setFilter(v); setPage(0); }} options={[['open', 'Open'], ['all', 'All'], ['support', 'Support'], ['idea', 'Ideas'], ['bug', 'Broken'], ['other', 'Other']]} />
       <ErrorText msg={error} />
       <section className={card}>
         {!items ? <p className="text-sm text-slate-500">Loading…</p> : shown.length === 0 ? (
           <p className="rounded-lg border border-dashed border-slate-300 p-6 text-center text-sm text-slate-500">{filter === 'open' && !term ? 'Nothing open. Nice!' : 'No feedback matches.'}</p>
         ) : (
           <ul className="divide-y divide-slate-100">
-            {shown.map((f) => (
+            {pageOf(shown, page, size).map((f) => (
               <li key={f.id} className={`flex flex-wrap items-start gap-4 py-4 first:pt-0 last:pb-0 ${f.done_at ? 'opacity-60' : ''}`}>
                 <div className="min-w-0 flex-1 space-y-1.5">
                   <div className="flex flex-wrap items-center gap-2 text-xs text-slate-500">
@@ -75,6 +77,7 @@ export default function FeedbackPage() {
           </ul>
         )}
       </section>
+      {items && shown.length > 0 && <Pager page={page} total={shown.length} size={size} onPage={setPage} onSize={setSize} noun="items" />}
     </>
   );
 }

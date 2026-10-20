@@ -5,6 +5,7 @@ import { useApi, salary, interest, type Job } from '@/lib/api';
 import { useAuth } from '@/lib/auth';
 import { Skills, ErrorText, LoadError, Initials, BackButton, TimeAgo, button, card } from '@/components/ui';
 import { postDate } from '@/lib/time';
+import { MembersOnlyText } from '@/components/Talent';
 import { ApplyPanel } from '@/components/ApplyPanel';
 import { JobOwnerActions } from '@/components/JobOwnerActions';
 
@@ -134,12 +135,12 @@ export function JobView({ initial }: { initial: Job }) {
 
           <section className="space-y-3 border-t border-slate-100 pt-6">
             <h2 className="text-lg font-semibold">About the job</h2>
-            <p className="whitespace-pre-line leading-relaxed text-slate-700">{job.description}</p>
-            {/* The server hides email addresses from visitors; tell them how to see them. */}
-            {!user && /\[email hidden/.test(job.title + job.description) && (
+            <p className="whitespace-pre-line leading-relaxed text-slate-700"><MembersOnlyText text={job.description} jobId={job.id} /></p>
+            {/* The server hides contact details from visitors; tell them how to see them. */}
+            {!user && /\[contact hidden/.test(job.title + job.description) && (
               <p className="flex items-center gap-2 rounded-lg bg-slate-50 px-3 py-2 text-sm text-slate-600">
                 <svg viewBox="0 0 24 24" className="h-4 w-4 shrink-0 text-slate-400" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><rect x="5" y="11" width="14" height="10" rx="2" /><path d="M8 11V7a4 4 0 0 1 8 0v4" /></svg>
-                <span>Contact details are only shown to members. <Link href={`/login?next=/jobs/${job.id}`} className="font-semibold text-emerald-700 hover:underline">Log in</Link> or <Link href={`/register?next=/jobs/${job.id}`} className="font-semibold text-emerald-700 hover:underline">sign up free</Link> to see them.</span>
+                <span>This job has contact details for members only. Please <Link href={`/register?next=/jobs/${job.id}`} className="font-semibold text-emerald-700 hover:underline">sign up free</Link> or <Link href={`/login?next=/jobs/${job.id}`} className="font-semibold text-emerald-700 hover:underline">log in</Link> first to see them.</span>
               </p>
             )}
           </section>

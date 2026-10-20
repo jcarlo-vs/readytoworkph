@@ -76,7 +76,7 @@ export function AuthForm({ mode }: { mode: 'login' | 'register' }) {
     if (role) q.set('role', role); else q.delete('role');
     return `/register${q.size ? `?${q}` : ''}`;
   };
-  const [form, setForm] = useState({ name: '', email: mode === 'register' ? (params.get('email') ?? '') : '', password: '' });
+  const [form, setForm] = useState({ name: '', first_name: '', last_name: '', email: mode === 'register' ? (params.get('email') ?? '') : '', password: '' });
   const [error, setError] = useState('');
   // The robot check: always on sign-up; on login only after 2 wrong tries (the server says when).
   const [robotToken, setRobotToken] = useState('');
@@ -97,7 +97,8 @@ export function AuthForm({ mode }: { mode: 'login' | 'register' }) {
     setExisting(null);
     setFailure(null);
     try {
-      const { user } = await api<{ user: User }>(path, { body });
+      const { user, reactivated } = await api<{ user: User; reactivated?: boolean }>(path, { body });
+      if (reactivated) try { sessionStorage.setItem('flash', 'Welcome back! Your account is active again.'); } catch { /* storage off */ }
       signingIn.current = true;
       signIn(user);
       router.push(next && !(next === '/jobs/new' && user.role !== 'employer') ? next : register && user.role === 'worker' ? '/profile' : '/dashboard');
@@ -151,7 +152,7 @@ export function AuthForm({ mode }: { mode: 'login' | 'register' }) {
         <div className="space-y-6 p-8 sm:p-10">
           <div>
             <h1 className="text-2xl font-bold tracking-tight">Create your account</h1>
-            <p className="mt-1 text-sm text-slate-500">Already have an account? <Link href={`/login${carry}`} className="font-medium text-emerald-700 hover:underline">Log in</Link></p>
+            <p className="mt-1 text-sm text-slate-500">Already have an account? <Link href={`/login${carry}`} className="font-semibold text-emerald-700 hover:underline">Log in here</Link></p>
           </div>
           <fieldset>
             <legend className="mb-3 font-semibold text-slate-800">How will you use ReadyToWork.ph?</legend>
@@ -170,7 +171,10 @@ export function AuthForm({ mode }: { mode: 'login' | 'register' }) {
         // Step 2: the account itself, for the role they picked (Change goes back to step 1).
         <form onSubmit={submit} className="space-y-5 p-8 sm:p-10">
           <div className="space-y-3">
-            <h1 className="text-2xl font-bold tracking-tight">Create your account</h1>
+            <div>
+              <h1 className="text-2xl font-bold tracking-tight">Create your account</h1>
+              <p className="mt-1 text-sm text-slate-500">Already have an account? <Link href={`/login${carry}`} className="font-semibold text-emerald-700 hover:underline">Log in here</Link></p>
+            </div>
             <div className="inline-flex items-center gap-2 rounded-full bg-emerald-50 py-1 pl-3 pr-1 text-sm font-semibold text-emerald-900 ring-1 ring-emerald-600/15">
               <svg viewBox="0 0 24 24" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d={ROLES.find((r) => r.value === chosen)!.icon} /></svg>
               {ROLES.find((r) => r.value === chosen)!.title}
@@ -196,9 +200,16 @@ export function AuthForm({ mode }: { mode: 'login' | 'register' }) {
               </div>
             </div>
           )}
-          <Field label={chosen === 'employer' ? 'Company or your name' : 'Full name'}>
-            <input className={input} required autoComplete="name" value={form.name} onChange={set('name')} />
-          </Field>
+          {chosen === 'employer' ? (
+            <Field label="Company or your name">
+              <input className={input} required autoComplete="organization" value={form.name} onChange={set('name')} />
+            </Field>
+          ) : (
+            <div className="grid gap-4 sm:grid-cols-2">
+              <Field label="First name"><input className={input} required autoComplete="given-name" value={form.first_name} onChange={set('first_name')} /></Field>
+              <Field label="Last name"><input className={input} required autoComplete="family-name" value={form.last_name} onChange={set('last_name')} /></Field>
+            </div>
+          )}
           <Field label="Email"><input className={input} type="email" required autoComplete="email" value={form.email} onChange={set('email')} /></Field>
           <div className="space-y-1.5">
             <label htmlFor="password" className="text-sm font-medium text-slate-700">Password</label>

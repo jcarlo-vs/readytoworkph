@@ -14,6 +14,7 @@ const PLAN_NAME = { free: 'Free', pro: 'Pro', premium: 'Premium' };
 type Applicant = {
   id: number; worker_id: number; name: string; email: string; title: string | null; skills: string[] | null;
   cover_letter: string; credits: number; created_at: string; analysis: Analysis | null; resume_name: string | null;
+  deleted?: boolean; deactivated?: boolean;
 };
 
 const band = (score: number) =>
@@ -244,11 +245,16 @@ export default function Applicants() {
       <ErrorText msg={error} />
       {page?.total === 0 && <p className={`${card} text-center text-slate-500`}>No applicants yet. They&apos;ll appear here as workers apply.</p>}
       <ul className="space-y-4">
-        {list.map((a) => (
+        {list.map((a) => a.deleted ? (
+          <li key={a.id} className="rounded-2xl border border-dashed border-slate-300 px-5 py-3 text-sm text-slate-500">
+            An applicant deleted their account · applied <TimeAgo date={a.created_at} /> · ⚡ {a.credits} credit{a.credits === 1 ? '' : 's'}
+          </li>
+        ) : (
           <li key={a.id} id={`applicant-${a.id}`} className={`${card} scroll-mt-24 space-y-4 target:ring-2 target:ring-amber-400`}>
             <div className="flex flex-wrap items-start justify-between gap-3">
               <div>
                 <Link href={`/workers/${a.worker_id}`} className="font-semibold text-emerald-800 hover:underline">{a.name}</Link>
+                {a.deactivated && <span className="ml-2 rounded-full bg-slate-200 px-2 py-0.5 text-[11px] font-semibold text-slate-600" title="Paused their account: can't get new messages right now">Deactivated</span>}
                 <p className="text-sm text-slate-500">
                   {a.title || 'No title'} · applied <TimeAgo date={a.created_at} /> · <a href={`mailto:${a.email}`} className="underline">{a.email}</a>
                 </p>

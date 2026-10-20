@@ -37,6 +37,7 @@ export default function MessagesPage() {
                 <span className="min-w-0 flex-1">
                   <span className="flex items-baseline justify-between gap-2">
                     <span className={`truncate ${c.unread ? 'font-bold text-slate-900' : 'font-semibold text-slate-800'}`}>{c.name}</span>
+                    {c.deactivated && <span className="shrink-0 rounded-full bg-slate-200 px-1.5 py-0.5 text-[10px] font-semibold text-slate-600">Deactivated</span>}
                     <span className="shrink-0 text-xs text-slate-400"><TimeAgo date={c.last_at} /></span>
                   </span>
                   <span className="mt-0.5 flex items-center gap-2">
@@ -129,7 +130,13 @@ function ThreadView({ otherId, jobId, myId, onSent }: { otherId: string; jobId: 
         <div ref={bottom} />
       </div>
 
-      {thread.can_send ? (
+      {thread.user.status ? (
+        <p className="border-t border-slate-200 p-4 text-center text-sm text-slate-500">
+          {thread.user.status === 'deleted' ? 'This person deleted their account. You can still read your conversation.'
+            : thread.user.status === 'suspended' ? 'This account has been suspended. You can still read your conversation.'
+            : `${other.name.split(' ')[0]} has paused their account, so they can’t get new messages right now.`}
+        </p>
+      ) : thread.can_send ? (
         <form onSubmit={send} className="space-y-2 border-t border-slate-200 p-4">
           {job && <p className="text-xs text-slate-500">About: <span className="font-semibold text-emerald-800">{job.title}</span></p>}
           <div className="flex items-end gap-2">
