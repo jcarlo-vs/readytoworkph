@@ -25,9 +25,8 @@ export const metadata: Metadata = {
   description: DESCRIPTION,
   applicationName: "ReadyToWork.ph",
   keywords: ["remote jobs Philippines", "work from home jobs Philippines", "online jobs Philippines", "hire Filipino virtual assistant", "Filipino remote workers", "freelance jobs Philippines"],
-  alternates: { canonical: "/" },
   openGraph: {
-    type: "website", siteName: "ReadyToWork.ph", locale: "en_PH", url: "/",
+    type: "website", siteName: "ReadyToWork.ph", locale: "en_PH",
     title: "ReadyToWork.ph: Remote jobs for Filipino professionals", description: DESCRIPTION,
     images: [{ url: "/og.png", width: 1200, height: 630, alt: "ReadyToWork.ph: remote jobs for Filipino professionals" }],
   },
