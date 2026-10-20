@@ -905,6 +905,8 @@ test('Hire Talent: filters, sort, pages; save workers; mark as hired', async () 
   const mk = async (n, profile, seenDaysAgo) => {
     const w = await reg(`r1.w${n}@x.ph`, 'worker', `Worker${n} Cruz`);
     await call('/profile', { token: w.token, bio: 'x', ...profile }, 'PUT');
+    // "last active" is saved in the background after the reply; wait for it so it can't overwrite ours below
+    while (!(await pool.query('SELECT last_seen_at FROM users WHERE id = $1', [w.user.id])).rows[0].last_seen_at) await new Promise((r) => setTimeout(r, 5));
     await pool.query("UPDATE users SET last_seen_at = now() - $2 * interval '1 day' WHERE id = $1", [w.user.id, seenDaysAgo]);
     return w;
   };

@@ -24,6 +24,7 @@ Features we decided to build, many inspired by looking through OnlineJobs.ph (em
   - [x] Follow-up: Google sign-in: `https://readytowork.ph` + `www` added to the OAuth client's JavaScript origins; consent screen links and authorized domain updated
   - [x] Follow-up: after go-live, verify readytowork.ph in Google Search Console, then click **Verify branding** on the OAuth consent screen (shows the app name in the Google popup)
   - [x] Follow-up: after go-live, remove `remotepinas.com` and `remoteworks.ph` from the OAuth authorized domains and client origins (they only redirect)
+  - [ ] Follow-up: Paddle sandbox API key expires **Jan 16, 2027**: make a new one, update `backend/.env` and Secret Manager `paddle-api-key` (live keys expire too; check their date)
   - [ ] Follow-up: Paddle (sandbox now, live later): rename products to "ReadyToWork.ph Pro / Premium", statement text `READYTOWRK`, default payment link `https://readytowork.ph/pricing`, webhook URL `https://readytowork.ph/api/billing/webhook`, website approval for readytowork.ph
   - [x] Follow-up: Cloudflare Turnstile widget for readytowork.ph (see 3.)
   - [x] Follow-up: Google Search Console: readytowork.ph verified + sitemap submitted (no "Change of address": remoteworks.ph was never in Search Console; the 301 redirects cover it)
