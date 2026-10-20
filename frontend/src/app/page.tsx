@@ -202,18 +202,22 @@ function PhilippinesPin() {
 
 // After "Delete my account" sends people here (?deleted=1): a short goodbye they can close.
 function DeletedNotice() {
-  const [show, setShow] = useState(false);
+  const [show, setShow] = useState<'' | 'deleted' | 'paused'>('');
   useEffect(() => {
-    if (new URLSearchParams(location.search).get('deleted') !== '1') return;
-    setShow(true); // eslint-disable-line react-hooks/set-state-in-effect -- read once from the address after load
+    const q = new URLSearchParams(location.search);
+    const which = q.get('deleted') === '1' ? 'deleted' : q.get('paused') === '1' ? 'paused' : '';
+    if (!which) return;
+    setShow(which); // eslint-disable-line react-hooks/set-state-in-effect -- read once from the address after load
     history.replaceState(null, '', '/');
   }, []);
   if (!show) return null;
   return (
     <div className="bg-emerald-50 text-sm text-emerald-950" role="status">
       <div className="mx-auto flex max-w-6xl items-center gap-3 px-4 py-3">
-        <span className="flex-1">Your account has been deleted. Thanks for being part of ReadyToWork.ph; you&apos;re welcome back anytime.</span>
-        <button type="button" onClick={() => setShow(false)} className="font-semibold text-emerald-800 hover:underline">Close</button>
+        <span className="flex-1">{show === 'deleted'
+          ? <>Your account has been deleted. Thanks for being part of ReadyToWork.ph; you&apos;re welcome back anytime.</>
+          : <>Your account is paused. Log in anytime to make it active again.</>}</span>
+        <button type="button" onClick={() => setShow('')} className="font-semibold text-emerald-800 hover:underline">Close</button>
       </div>
     </div>
   );

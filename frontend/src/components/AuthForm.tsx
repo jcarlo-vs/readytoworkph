@@ -97,7 +97,8 @@ export function AuthForm({ mode }: { mode: 'login' | 'register' }) {
     setExisting(null);
     setFailure(null);
     try {
-      const { user } = await api<{ user: User }>(path, { body });
+      const { user, reactivated } = await api<{ user: User; reactivated?: boolean }>(path, { body });
+      if (reactivated) try { sessionStorage.setItem('flash', 'Welcome back! Your account is active again.'); } catch { /* storage off */ }
       signingIn.current = true;
       signIn(user);
       router.push(next && !(next === '/jobs/new' && user.role !== 'employer') ? next : register && user.role === 'worker' ? '/profile' : '/dashboard');

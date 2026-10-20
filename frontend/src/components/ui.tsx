@@ -279,6 +279,26 @@ export function ConfirmEmailBanner({ email }: { email: string }) {
   );
 }
 
+// A one-time green notice carried across a redirect in sessionStorage (e.g. "Welcome back!").
+function Flash() {
+  const [text, setText] = useState('');
+  useEffect(() => {
+    try {
+      const t = sessionStorage.getItem('flash');
+      if (t) { sessionStorage.removeItem('flash'); setText(t); } // eslint-disable-line react-hooks/set-state-in-effect -- read once after load
+    } catch { /* storage off */ }
+  }, []);
+  if (!text) return null;
+  return (
+    <div className="border-t border-emerald-200 bg-emerald-50 text-sm text-emerald-950" role="status">
+      <div className="mx-auto flex max-w-6xl items-center gap-3 px-4 py-2">
+        <span className="flex-1">✅ {text}</span>
+        <button type="button" onClick={() => setText('')} className="font-semibold text-emerald-800 hover:underline">Close</button>
+      </div>
+    </div>
+  );
+}
+
 export function Nav() {
   const { user, signOut } = useAuth();
   const { data: unread, reload: reloadUnread } = useApi<{ count: number }>(user ? '/messages/unread-count' : null, 30000);
@@ -344,6 +364,7 @@ export function Nav() {
         )}
       </nav>
       {user?.email_verified === false && <ConfirmEmailBanner email={user.email} />}
+      <Flash />
     </header>
   );
 }

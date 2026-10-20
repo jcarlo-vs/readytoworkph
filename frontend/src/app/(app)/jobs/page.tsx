@@ -6,6 +6,7 @@ import { useApi, salary, type Credits, type Job, type Worker } from '@/lib/api';
 import { useAuth } from '@/lib/auth';
 import { Skills, ErrorText, Initials, TimeAgo, SearchLabel, band, button, card, input } from '@/components/ui';
 import { Select, JOB_TYPES } from '@/components/Select';
+import { MembersOnlyText } from '@/components/Talent';
 
 const TYPE_TAG: Record<string, string> = {
   'full-time': 'bg-emerald-100 text-emerald-800',
@@ -118,7 +119,7 @@ function Landing({ form, setForm, onSearch, searching, applied }: SearchProps) {
                   </div>
                   <h3 className="font-display text-lg font-bold text-slate-900">{j.title}</h3>
                   <p className="text-sm text-slate-500">{j.employer_name} · <TimeAgo date={j.created_at} /></p>
-                  <p className="line-clamp-2 text-sm leading-relaxed text-slate-600">{j.description}</p>
+                  <p className="line-clamp-2 text-sm leading-relaxed text-slate-600"><MembersOnlyText text={j.description} jobId={j.id} link={false} /></p>
                   <p className="mt-auto pt-1 font-semibold text-emerald-900">{salary(j)}</p>
                 </Link>
               </li>
@@ -143,7 +144,7 @@ function Landing({ form, setForm, onSearch, searching, applied }: SearchProps) {
                     {applied.has(j.id) && <AppliedTag />}
                   </div>
                   <p className="mt-1 text-sm text-slate-500">{j.employer_name} · <TimeAgo date={j.created_at} /></p>
-                  <p className="mt-2 line-clamp-2 text-sm leading-relaxed text-slate-600">{j.description}</p>
+                  <p className="mt-2 line-clamp-2 text-sm leading-relaxed text-slate-600"><MembersOnlyText text={j.description} jobId={j.id} link={false} /></p>
                 </div>
                 <p className="font-semibold text-emerald-900">{salary(j)}</p>
               </Link>
@@ -230,7 +231,7 @@ function Results({ query, selectedId, form, setForm, onSearch, searching, applie
               <Link href={`/jobs/${selected.id}?back=${encodeURIComponent(`${query}&job=${selected.id}`)}`} className={`${button} w-full py-3 text-base`}>
                 {applied.has(selected.id) ? 'View your application' : 'Apply'}
               </Link>
-              <p className="whitespace-pre-line leading-relaxed text-slate-700">{selected.description}</p>
+              <p className="whitespace-pre-line leading-relaxed text-slate-700"><MembersOnlyText text={selected.description} jobId={selected.id} /></p>
               {selected.skills.length > 0 && (
                 <div className="space-y-2">
                   <h3 className="text-sm font-semibold text-slate-900">Skills required</h3>

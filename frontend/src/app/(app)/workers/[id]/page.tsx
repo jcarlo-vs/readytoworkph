@@ -9,6 +9,7 @@ import { ENGLISH, SETUP, START_WHEN, WORK_HOURS, labelOf } from '@/lib/profile';
 import { EmployerGate } from '@/components/EmployerGate';
 import { JOB_TYPES } from '@/components/Select';
 import { MaskedText, SaveButton, lastActive, rateLine } from '@/components/Talent';
+import { useModal } from '@/components/useModal';
 
 const longDate = (iso?: string | null) => (iso ? new Date(iso).toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' }) : '-');
 
@@ -58,9 +59,9 @@ function Tile({ label, wide = false, children }: { label: string; wide?: boolean
 
 // The worker's CV. The server decides: employers who can message the worker get the file, others are
 // asked to upgrade (CVs usually carry contact details).
-function ResumeButton({ workerId, limited }: { workerId: number; limited: boolean }) {
+function ResumeButton({ workerId, limited, onUpgrade }: { workerId: number; limited: boolean; onUpgrade: () => void }) {
   const [error, setError] = useState('');
-  if (limited) return <Link href="/pricing" className={`${buttonGhost} w-full gap-2`}>📄 Upgrade to see the CV</Link>;
+  if (limited) return <button type="button" onClick={onUpgrade} className={`${buttonGhost} w-full gap-2`}>📄 Download CV</button>;
   async function open() {
     setError('');
     const tab = window.open('', '_blank'); // opened on the click, so popup blockers allow it
@@ -80,12 +81,56 @@ function ResumeButton({ workerId, limited }: { workerId: number; limited: boolea
   );
 }
 
+// Free employers see the same buttons as everyone; clicking one explains the plan limit and offers the way forward.
+function UpgradeModal({ open, onClose, first, goal }: { open: boolean; onClose: () => void; first: string; goal: string }) {
+  const dialog = useModal(open, onClose);
+  const plans: [string, string][] = [
+    ['Pro', 'Message any worker first, see your top 150 applicants per job, 500 AI fit scores a month'],
+    ['Premium', 'Everything in Pro, plus every applicant, unlimited AI fit scores and your hiring analytics'],
+  ];
+  return (
+    <dialog ref={dialog} onClose={onClose} aria-labelledby="upgrade-title"
+      onClick={(e) => { if (e.target === dialog.current) onClose(); }}
+      className="mx-auto mt-[12vh] w-[min(30rem,calc(100vw-2rem))] rounded-2xl p-0 shadow-2xl backdrop:bg-slate-950/60 backdrop:backdrop-blur-sm">
+      <div className="space-y-5 p-6">
+        <div className="flex items-start justify-between gap-4">
+          <div className="space-y-1">
+            <span className="grid h-11 w-11 place-items-center rounded-xl bg-amber-100 text-xl" aria-hidden="true">🔒</span>
+            <h2 id="upgrade-title" className="pt-2 font-display text-xl font-bold text-slate-900">Upgrade to {goal}</h2>
+            <p className="text-sm text-slate-600">
+              On the Free plan you can message workers who applied to your jobs. To reach out to {first} first, and see their full
+              name, links and CV, move to <strong>Pro</strong> or <strong>Premium</strong>.
+            </p>
+          </div>
+          <button type="button" onClick={onClose} aria-label="Close" className="rounded-lg p-2 text-slate-500 hover:bg-slate-100 hover:text-slate-800">
+            <svg viewBox="0 0 20 20" className="h-5 w-5" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" aria-hidden="true"><path d="M5 5l10 10M15 5 5 15" /></svg>
+          </button>
+        </div>
+        <ul className="space-y-2">
+          {plans.map(([name, text]) => (
+            <li key={name} className="rounded-xl border border-slate-200 px-4 py-3 text-sm">
+              <p className="font-semibold text-slate-900">{name}</p>
+              <p className="text-slate-600">{text}</p>
+            </li>
+          ))}
+        </ul>
+        <p className="text-xs text-slate-500">Keeping outreach to paid plans keeps spammers and fake job offers away from workers.</p>
+        <div className="flex flex-col gap-2 sm:flex-row-reverse">
+          <Link href="/pricing" className={`${buttonGold} flex-1`}>See plans &amp; prices</Link>
+          <Link href="/jobs/new" className={`${buttonGhost} flex-1`}>Post a job instead</Link>
+        </div>
+      </div>
+    </dialog>
+  );
+}
+
 export default function WorkerPage() {
   const { id } = useParams<{ id: string }>();
   const { user, ready } = useAuth();
   const allowed = user?.role === 'employer' || user?.id === Number(id); // workers can preview their own profile
   const { data, error, status, reload } = useApi<Worker>(allowed ? `/workers/${id}` : null);
   const [hiredAt, setHiredAt] = useState<string | null | undefined>(undefined); // after Mark as hired / Undo
+  const [upgrade, setUpgrade] = useState(''); // what a Free employer tried to do, shown in the upgrade modal
   const employer = user?.role === 'employer';
 
   if (ready && !allowed) return <EmployerGate signedIn={!!user} />;
@@ -110,7 +155,8 @@ export default function WorkerPage() {
         <div className="flex flex-wrap items-center gap-5">
           <Initials name={w.name} id={w.id} size="h-20 w-20 text-2xl ring-4 ring-white/15" />
           <div className="min-w-0 flex-1">
-            <h1 className="font-display text-3xl font-bold tracking-tight">{w.name}</h1>
+            <h1 className="flex flex-wrap items-center gap-3 font-display text-3xl font-bold tracking-tight">{w.name}
+              {w.deactivated && <span className="rounded-full bg-white/15 px-3 py-1 font-sans text-xs font-semibold text-emerald-100">Deactivated · not taking messages</span>}</h1>
             <p className="text-lg text-emerald-100">{w.title ? <MaskedText text={w.title} /> : 'No title yet'}</p>
             <p className="mt-1 text-sm text-emerald-200/80">
               {w.location && <>📍 <MaskedText text={w.location} /> · </>}{lastActive(w.last_seen_at)} · Member since {longDate(w.member_since)}
@@ -120,7 +166,7 @@ export default function WorkerPage() {
         {employer && (w.limited ? (
           // A Free employer this worker hasn't applied to or talked with: say how to reach them, not a dead-end chat.
           <div className="flex flex-wrap items-center gap-3">
-            <Link href="/pricing" className={buttonGold}>Upgrade to message {first}</Link>
+            <button type="button" onClick={() => setUpgrade(`message ${first}`)} className={buttonGold}>Message {first}</button>
             <Link href="/jobs/new" className="text-sm font-medium text-emerald-100 hover:text-white hover:underline">Or post a job and invite them to apply</Link>
             <div className="ml-auto w-36"><SaveButton workerId={w.id} saved={w.saved} /></div>
           </div>
@@ -194,7 +240,7 @@ export default function WorkerPage() {
         )}
         {(w.has_resume || w.portfolio_url || w.linkedin_url || w.limited) && (
           <Tile label="Resume & links">
-            {w.has_resume && <ResumeButton workerId={w.id} limited={!!w.limited} />}
+            {w.has_resume && <ResumeButton workerId={w.id} limited={!!w.limited} onUpgrade={() => setUpgrade(`see ${first}’s CV`)} />}
             {/* Worker-supplied links: open in a new tab, no referrer, no SEO credit. */}
             {[[w.portfolio_url, 'Sample work / portfolio'], [w.linkedin_url, 'LinkedIn profile']].map(([href, label]) => href && (
               <a key={label} href={href} target="_blank" rel="noopener noreferrer nofollow" className="block text-sm font-medium text-emerald-700 hover:underline">🔗 {label} ↗</a>
@@ -203,6 +249,7 @@ export default function WorkerPage() {
           </Tile>
         )}
       </div>
+      {w.limited && <UpgradeModal open={!!upgrade} onClose={() => setUpgrade('')} first={first} goal={upgrade} />}
     </div>
   );
 }

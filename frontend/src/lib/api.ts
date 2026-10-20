@@ -5,7 +5,7 @@ import { useEffect, useState } from 'react';
 // (next.config.ts). The browser then sends the login cookie by itself; no token is handled in code.
 export const API = '/api';
 
-export type User = { id: number; email: string; name: string; role: 'worker' | 'employer'; has_photo?: boolean; plan?: 'free' | 'pro' | 'premium'; email_verified?: boolean };
+export type User = { id: number; email: string; name: string; role: 'worker' | 'employer'; has_photo?: boolean; plan?: 'free' | 'pro' | 'premium'; email_verified?: boolean; has_google?: boolean; has_password?: boolean; first_name?: string; last_name?: string };
 export type Job = {
   id: number; employer_id: number; employer_name: string; title: string; description: string;
   skills: string[]; job_type: string; salary_period: SalaryPeriod;
@@ -16,6 +16,7 @@ export type Worker = {
   id: number; name: string; title: string; bio: string; skills: string[];
   hourly_rate: string | null; availability: string; portfolio_url: string | null; linkedin_url: string | null;
   limited?: true; // shown to a Free employer who can't contact this worker yet: "Maria S.", no links
+  deactivated?: boolean; // paused account
   member_since?: string; last_seen_at?: string | null; saved?: boolean; hired_at?: string | null;
   // Bento profile (all optional; labels in lib/profile.ts)
   skill_years: Record<string, number>; location: string; work_hours: string | null; hours_per_week: number | null;
@@ -164,11 +165,12 @@ export function useApi<T>(path: string | null, refreshMs?: number, initial?: T) 
 
 export type Conversation = {
   user_id: number; name: string; role: User['role']; last_body: string; last_at: string; last_from_me: boolean; unread: number;
+  deleted?: boolean; deactivated?: boolean;
 };
 export type Message = {
   id: number; sender_id: number; body: string; created_at: string; read_at: string | null; job_id: number | null; job_title: string | null;
 };
-export type Thread = { user: Pick<User, 'id' | 'name' | 'role'>; can_send: boolean; messages: Message[] };
+export type Thread = { user: Pick<User, 'id' | 'name' | 'role'> & { status?: 'deleted' | 'deactivated' | 'suspended' | null }; can_send: boolean; messages: Message[] };
 
 export type SalaryPeriod = 'hour' | 'month' | 'year' | 'fixed';
 export const PAY_PERIODS: { value: SalaryPeriod; label: string }[] = [

@@ -1,7 +1,7 @@
 'use client';
 import { useEffect, useState } from 'react';
 import { ErrorText, card } from '@/components/ui';
-import { PLAN_PILL, PageHeader, Pager, Search, Seg, adminApi, date, failed, pill, td, th, useAdmin } from '../ui';
+import { PLAN_PILL, PageHeader, Pager, Search, Seg, adminApi, date, failed, pill, td, th, usePageSize, useAdmin } from '../ui';
 
 type Job = {
   id: number; title: string; job_type: string; created_at: string; closed_at: string | null;
@@ -15,16 +15,17 @@ export default function Jobs() {
   const [q, setQ] = useState('');
   const [status, setStatus] = useState<'' | 'open' | 'closed'>('');
   const [page, setPage] = useState(0);
+  const [size, setSize] = usePageSize();
   const [data, setData] = useState<{ jobs: Job[]; total: number; page_size: number } | null>(null);
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(0);
 
   useEffect(() => {
     const t = setTimeout(() => {
-      adminApi<typeof data>(`/jobs?${new URLSearchParams({ q, status, page: String(page) })}`).then(setData, failed(logout, setError));
+      adminApi<typeof data>(`/jobs?${new URLSearchParams({ q, status, page: String(page), per_page: String(size) })}`).then(setData, failed(logout, setError));
     }, q ? 250 : 0);
     return () => clearTimeout(t);
-  }, [q, status, page, logout]);
+  }, [q, status, page, size, logout]);
 
   async function setClosed(job: Job, closed: boolean) {
     setBusy(job.id); setError('');
@@ -78,7 +79,7 @@ export default function Jobs() {
           </tbody>
         </table>
       </section>
-      {data && <Pager page={page} total={data.total} size={data.page_size} onPage={setPage} noun="job posts" />}
+      {data && <Pager page={page} total={data.total} size={data.page_size} onPage={setPage} onSize={setSize} noun="job posts" />}
     </>
   );
 }

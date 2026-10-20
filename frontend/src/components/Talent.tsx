@@ -94,3 +94,30 @@ export function Pager({ page, total, size, onPage, noun }: { page: number; total
     </nav>
   );
 }
+
+// Contact details in a job post arrive from the server as this placeholder for visitors (the real email or
+// link is never sent, so there's nothing to un-blur). Each shows as a blurred chip asking them to sign up or
+// log in; after that they come back to this job and see it. Inside a clickable card, pass link={false}.
+const MEMBERS_ONLY = '[contact hidden, log in to see it]';
+export function MembersOnlyText({ text, jobId, link = true }: { text: string; jobId: number; link?: boolean }) {
+  const parts = text.split(MEMBERS_ONLY);
+  if (parts.length === 1) return <>{text}</>;
+  const chip = (
+    <>
+      <span aria-hidden="true" className="select-none blur-[3px]">contact@details.ph</span>
+      <span className="ml-1 text-xs font-semibold not-italic text-emerald-800">🔒 Sign up or log in to see</span>
+    </>
+  );
+  return (
+    <>
+      {parts.map((part, i) => (
+        <span key={i}>
+          {part}
+          {i < parts.length - 1 && (link
+            ? <Link href={`/register?next=/jobs/${jobId}`} className="inline-block rounded-md bg-emerald-50 px-1.5 align-baseline ring-1 ring-emerald-600/15 hover:bg-emerald-100" aria-label="Contact details are for members. Sign up or log in to see them.">{chip}</Link>
+            : <span className="inline-block rounded-md bg-emerald-50 px-1.5 align-baseline">{chip}</span>)}
+        </span>
+      ))}
+    </>
+  );
+}

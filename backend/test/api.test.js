@@ -7,7 +7,7 @@ delete process.env.TURNSTILE_SECRET; // tests that need the robot check switch i
 const { pool } = await import('../src/db.js');
 const { app } = await import('../src/app.js');
 
-await pool.query('DROP TABLE IF EXISTS email_verifications, hires, saved_workers, feedback, ai_analyses, password_resets, settings, messages, applications, jobs, worker_profiles, users');
+await pool.query('DROP TABLE IF EXISTS blocked_emails, email_verifications, hires, saved_workers, feedback, ai_analyses, password_resets, settings, messages, applications, jobs, worker_profiles, users');
 // Never send real email from tests, even if .env has a Resend key; tests read `sent` instead.
 const sent = [];
 // Email-confirmation messages go to every new email sign-up; most tests don't care, so they're left out.
@@ -591,7 +591,7 @@ test('emails in job posts are hidden from visitors, shown to signed-in members',
   const job = (await call('/jobs', { token: boss, title: 'VA (apply: hr@maskco.com.ph)', description: 'Send your CV to Jobs.Team+va@mask-co.com or HR@maskco.com.ph today. Not an email: 5 @ 10am.', job_type: 'gig' })).body;
   const visitor = (await call(`/jobs/${job.id}`)).body;
   assert.ok(!/@mask/i.test(visitor.title + visitor.description));
-  assert.equal(visitor.description, 'Send your CV to [email hidden, log in to see it] or [email hidden, log in to see it] today. Not an email: 5 @ 10am.');
+  assert.equal(visitor.description, 'Send your CV to [contact hidden, log in to see it] or [contact hidden, log in to see it] today. Not an email: 5 @ 10am.');
   assert.ok(!(await call('/jobs')).body.some((j) => /@mask/i.test(j.description + j.title))); // the list too
   const member = (await call(`/jobs/${job.id}`, { token: boss }, 'GET')).body;
   assert.match(member.description, /Jobs\.Team\+va@mask-co\.com/);
@@ -830,6 +830,10 @@ test('admin: users, jobs and subscriptions pages; close a job; admin only', asyn
   assert.deepEqual([users.total, users.users[0].email, users.users[0].jobs], [1, 'adm.boss@acme.ph', 1]);
   assert.equal((await call('/admin/users?q=100%', { token: admin }, 'GET')).body.total, 0); // % is searched literally
   assert.equal((await call('/admin/users', { token: boss.token }, 'GET')).status, 401);
+  const all = (await call('/admin/users', { token: admin }, 'GET')).body;
+  const p2 = (await call('/admin/users?per_page=10&page=1', { token: admin }, 'GET')).body; // rows per page, second page
+  assert.deepEqual([p2.page_size, p2.users.length], [10, Math.max(0, Math.min(10, all.total - 10))]);
+  assert.equal((await call('/admin/users?per_page=9999', { token: admin }, 'GET')).body.page_size, 25); // only 10/25/50/100
 
   const jobs = (await call('/admin/jobs?q=100%25', { token: admin }, 'GET')).body;
   assert.deepEqual([jobs.total, jobs.jobs[0].title, jobs.jobs[0].employer_name], [1, 'Spammy 100% legit job', 'Adm Boss']);
@@ -1071,12 +1075,15 @@ test('delete my account: type DELETE, data and files gone, chats kept as "Delete
   assert.equal((await del(w.token, 'DELETE')).status, 204);
   assert.equal((await call('/me', { token: w.token }, 'GET')).status, 401); // signed out everywhere
   assert.equal((await call('/auth/login', { email: 'del.w@x.ph', password: 'password1' })).body.code, 'no_account');
-  assert.equal((await pool.query('SELECT 1 FROM applications WHERE worker_id = $1', [w.user.id])).rowCount, 0);
+  const apps = (await call(`/jobs/${job.id}/applications`, { token: boss.token }, 'GET')).body.applicants;
+  assert.deepEqual(apps.map((a) => [a.name, a.deleted, a.cover_letter, a.analysis, a.resume_name]), [['Deleted user', true, '', null, null]]); // an anonymous trace
   assert.equal((await pool.query('SELECT 1 FROM worker_profiles WHERE user_id = $1', [w.user.id])).rowCount, 0);
   assert.deepEqual([files.has('photos/del.jpg'), files.has('resumes/del.pdf')], [false, false]);
   const inbox = (await call('/messages', { token: boss.token }, 'GET')).body;
   assert.equal(inbox.find((c) => c.user_id === w.user.id).name, 'Deleted user'); // the boss keeps the chat
   assert.equal((await call(`/messages/${w.user.id}`, { token: boss.token, body: 'still there?' })).status, 404); // can't write to them
+  const thread = (await call(`/messages/${w.user.id}`, { token: boss.token }, 'GET')).body; // but the old chat still opens
+  assert.deepEqual([thread.user.status, thread.can_send, thread.messages.length], ['deleted', false, 2]);
   assert.equal((await reg('del.w@x.ph', 'worker', 'Back Again')).user.name, 'Back Again'); // the email is free again, fresh account
 
   // A paid plan is cancelled at Paddle first; if Paddle fails, nothing is deleted.
@@ -1088,6 +1095,11 @@ test('delete my account: type DELETE, data and files gone, chats kept as "Delete
     if (String(url).includes('/subscriptions/sub_del/cancel')) { cancelled = JSON.parse(opts.body); return new Response(JSON.stringify({ error: { code: 'x' } }), { status: 500 }); }
     return realFetch(url, opts);
   };
+  // While PADDLE_TESTERS is set, only those emails can start a checkout (sandbox keys on the live site).
+  Object.assign(process.env, { PADDLE_TESTERS: 'Someone.Else@x.ph', PADDLE_PRICE_PRO_MONTHLY: 'pri_pro' });
+  assert.equal((await call('/billing/checkout', { token: boss.token, plan: 'pro' })).status, 403);
+  delete process.env.PADDLE_TESTERS;
+
   assert.equal((await del(boss.token, 'DELETE')).status, 502);
   assert.equal((await pool.query('SELECT deleted_at FROM users WHERE id = $1', [boss.user.id])).rows[0].deleted_at, null);
   globalThis.fetch = async (url, opts) => (String(url).includes('/subscriptions/sub_del/cancel') ? new Response(JSON.stringify({ data: {} }), { status: 200 }) : realFetch(url, opts));
@@ -1109,4 +1121,87 @@ test('names: first and last kept separately from sign-up and from Google', async
   app.locals.verifyGoogle = async () => ({ sub: 'g-names', email: 'names.g@gmail.com', email_verified: true, name: 'Ana Lim', given_name: 'Ana', family_name: 'Lim' });
   await call('/auth/google', { credential: 'x', role: 'worker' });
   assert.deepEqual(await row('names.g@gmail.com'), { name: 'Ana Lim', first_name: 'Ana', last_name: 'Lim' });
+
+  // changing your name later
+  const put = (body, token = w.body.token) => call('/me', { token, ...body }, 'PUT');
+  assert.equal((await put({ first_name: 'Maria', last_name: 'Santos' })).body.name, 'Maria Santos');
+  assert.deepEqual(await row('names.w@x.ph'), { name: 'Maria Santos', first_name: 'Maria', last_name: 'Santos' });
+  assert.equal((await put({ name: '  ' })).status, 400);
+  const boss = (await call('/auth/register', { email: 'names.co@x.ph', password: 'password1', name: 'Acme', role: 'employer' })).body;
+  assert.equal((await put({ name: 'Acme Outsourcing Inc.' }, boss.token)).body.name, 'Acme Outsourcing Inc.');
+  assert.equal((await call('/me', { name: 'x' }, 'PUT')).status, 401);
+});
+
+test('deactivate: hidden from search, jobs and new messages; history kept; logging in reactivates', async () => {
+  const reg = async (email, role, name) => (await call('/auth/register', { email, password: 'password1', name, role })).body;
+  const boss = await reg('pause.boss@co.com', 'employer', 'Pause Boss');
+  const w = await reg('pause.w@x.ph', 'worker', 'Pause Worker');
+  await call('/profile', { token: w.token, title: 'Pausebookkeeper', bio: 'x', skills: 'books', availability: 'gig' }, 'PUT');
+  const job = (await call('/jobs', { token: boss.token, title: 'Pausejob', description: 'x', job_type: 'gig' })).body;
+  await call(`/jobs/${job.id}/apply`, { token: w.token, cover_letter: 'hi' });
+  await call(`/messages/${w.user.id}`, { token: boss.token, body: 'Hello', job_id: job.id });
+  await pool.query("UPDATE users SET plan = 'pro' WHERE id = $1", [boss.user.id]); // may search talent
+
+  assert.equal((await call('/me/deactivate', { token: w.token }, 'POST')).status, 204);
+  assert.equal((await call('/me', { token: w.token }, 'GET')).status, 401); // signed out
+  assert.equal((await call('/workers?q=Pausebookkeeper', { token: boss.token }, 'GET')).body.total, 0); // out of search
+  const apps = (await call(`/jobs/${job.id}/applications`, { token: boss.token }, 'GET')).body.applicants;
+  assert.deepEqual(apps.map((a) => [a.name, a.deactivated, a.cover_letter]), [['Pause Worker', true, 'hi']]); // everything kept, flagged
+  assert.equal((await call(`/messages/${w.user.id}`, { token: boss.token, body: 'Hi again' })).status, 403); // no new messages
+  assert.equal((await call(`/messages/${w.user.id}`, { token: boss.token }, 'GET')).body.user.status, 'deactivated');
+
+  const back = await call('/auth/login', { email: 'pause.w@x.ph', password: 'password1' });
+  assert.equal(back.body.reactivated, true);
+  assert.equal((await call('/workers?q=Pausebookkeeper', { token: boss.token }, 'GET')).body.total, 1);
+  assert.equal((await call('/auth/login', { email: 'pause.w@x.ph', password: 'password1' })).body.reactivated, false);
+
+  // A paused employer's jobs leave the job list and stop taking applications.
+  await call('/me/deactivate', { token: boss.token }, 'POST');
+  assert.equal((await call('/jobs?q=Pausejob', {}, 'GET')).body.length, 0);
+  const w2 = await reg('pause.w2@x.ph', 'worker', 'Other Worker');
+  assert.notEqual((await call(`/jobs/${job.id}/apply`, { token: w2.token, cover_letter: 'hi' })).status, 201);
+});
+
+test('job posts: emails, links, phones and @handles hidden from visitors only; ordinary numbers stay', async () => {
+  const { MEMBERS_ONLY } = await import('../src/app.js');
+  const boss = (await call('/auth/register', { email: 'mask.jobs@co.com', password: 'password1', name: 'Mask Jobs Co', role: 'employer' })).body;
+  const description = 'Apply at hire@acme.com, see acme.com/jobs or https://t.me/acmehr, WhatsApp +63 917 123 4567 or @acme_hr. Pay $900-$1,300, 2024-2025 season, 40 hrs.';
+  const job = (await call('/jobs', { token: boss.token, title: 'Masked VA', description, job_type: 'gig' })).body;
+  const visitor = (await call(`/jobs/${job.id}`, {}, 'GET')).body;
+  assert.equal(visitor.description, `Apply at ${MEMBERS_ONLY}, see ${MEMBERS_ONLY} or ${MEMBERS_ONLY}, WhatsApp ${MEMBERS_ONLY} or ${MEMBERS_ONLY}. Pay $900-$1,300, 2024-2025 season, 40 hrs.`);
+  assert.ok(!(await call('/jobs?q=Masked', {}, 'GET')).body[0].description.includes('acme')); // the list API too
+  const w = (await call('/auth/register', { email: 'mask.reader@x.ph', password: 'password1', name: 'Reader', role: 'worker' })).body;
+  assert.equal((await call(`/jobs/${job.id}`, { token: w.token }, 'GET')).body.description, description); // members see it all
+});
+
+test('admin suspends an account: signed out, can’t log in, hidden, email blocked from signing up again; lifting it undoes that', async () => {
+  const { signAdminToken } = await import('../src/auth.js');
+  const admin = signAdminToken();
+  const reg = async (email, role, name) => (await call('/auth/register', { email, password: 'password1', name, role })).body;
+  const scam = await reg('scam.boss@co.com', 'employer', 'Scam Co');
+  const job = (await call('/jobs', { token: scam.token, title: 'Scamjob easy money', description: 'x', job_type: 'gig' })).body;
+  const w = await reg('susp.w@x.ph', 'worker', 'Susp Worker');
+  const suspend = (on) => call(`/admin/users/${scam.user.id}/suspend`, { token: admin, suspended: on }, 'PUT');
+
+  assert.equal((await call(`/admin/users/${scam.user.id}/suspend`, { token: w.token, suspended: true }, 'PUT')).status, 401); // admins only
+  assert.ok((await suspend(true)).body.suspended_at);
+  assert.equal((await call('/me', { token: scam.token }, 'GET')).status, 401); // signed out everywhere
+  assert.equal((await call('/auth/login', { email: 'scam.boss@co.com', password: 'password1' })).body.code, 'suspended');
+  assert.equal((await call('/jobs?q=Scamjob', {}, 'GET')).body.length, 0); // their jobs are hidden
+  assert.notEqual((await call(`/jobs/${job.id}/apply`, { token: w.token, cover_letter: 'hi' })).status, 201);
+  assert.equal((await call('/admin/users?q=scam.boss', { token: admin }, 'GET')).body.users[0].suspended_at !== null, true);
+
+  // Deleting their account doesn't free the email: it stays blocked.
+  await pool.query("UPDATE users SET email = 'deleted-x@deleted.invalid', deleted_at = now() WHERE id = $1", [scam.user.id]);
+  assert.equal((await call('/auth/register', { email: 'scam.boss@co.com', password: 'password1', name: 'Again', role: 'employer' })).body.code, 'blocked');
+  process.env.GOOGLE_CLIENT_ID = 'test-client';
+  app.locals.verifyGoogle = async () => ({ sub: 'g-scam', email: 'scam.boss@co.com', email_verified: true, name: 'Scam' });
+  assert.equal((await call('/auth/google', { credential: 'x', role: 'employer' })).body.code, 'blocked');
+
+  // Lifting a suspension on a live account lets them back in.
+  const other = await reg('susp.lift@co.com', 'employer', 'Lift Co');
+  await call(`/admin/users/${other.user.id}/suspend`, { token: admin, suspended: true }, 'PUT');
+  assert.equal((await call('/auth/login', { email: 'susp.lift@co.com', password: 'password1' })).body.code, 'suspended');
+  await call(`/admin/users/${other.user.id}/suspend`, { token: admin, suspended: false }, 'PUT');
+  assert.equal((await call('/auth/login', { email: 'susp.lift@co.com', password: 'password1' })).status, 200);
 });

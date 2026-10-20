@@ -2,7 +2,7 @@
 import { useEffect, useState } from 'react';
 import { ErrorText, FormAlert, card } from '@/components/ui';
 import { useApi } from '@/lib/api';
-import { PLAN_PILL, PageHeader, adminApi, date, failed, money, pill, td, th, useAdmin } from '../ui';
+import { PLAN_PILL, PageHeader, Pager, adminApi, date, failed, money, pageOf, pill, td, th, usePageSize, useAdmin } from '../ui';
 
 type Sub = {
   id: number; name: string; email: string; plan: 'pro' | 'premium'; since: string | null; source: 'paddle' | 'manual' | 'unknown';
@@ -19,6 +19,8 @@ export default function Subscriptions() {
   const { logout } = useAdmin();
   const [data, setData] = useState<Data | null>(null);
   const [error, setError] = useState('');
+  const [page, setPage] = useState(0);
+  const [size, setSize] = usePageSize();
   useEffect(() => { adminApi<Data>('/subscriptions').then(setData, failed(logout, setError)); }, [logout]);
   const { data: billing } = useApi<{ environment: string }>('/billing/config');
   const paddleEnv = billing?.environment;
@@ -65,7 +67,7 @@ export default function Subscriptions() {
           </thead>
           <tbody className="divide-y divide-slate-100">
             {data.subscriptions.length === 0 && <tr><td colSpan={6} className="px-4 py-8 text-center text-slate-500">No paying employers yet.</td></tr>}
-            {data.subscriptions.map((s) => {
+            {pageOf(data.subscriptions, page, size).map((s) => {
               const [label, tone] = status(s);
               return (
                 <tr key={s.id} className="hover:bg-slate-50">
@@ -81,6 +83,7 @@ export default function Subscriptions() {
           </tbody>
         </table>
       </section>
+      {data.subscriptions.length > 0 && <Pager page={page} total={data.subscriptions.length} size={size} onPage={setPage} onSize={setSize} noun="paying employers" />}
     </>
   );
 }

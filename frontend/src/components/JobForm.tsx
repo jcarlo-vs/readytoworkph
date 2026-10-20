@@ -66,6 +66,10 @@ export function JobForm({ job, heading, submitLabel, notice, onSubmit }: {
         <textarea className={input + overStyle(descriptionOver)} rows={8} required value={form.description} onChange={set('description')}
           aria-invalid={descriptionOver} aria-describedby="description-limit" />
         <Limit id="description-limit" length={form.description.length} max={DESCRIPTION_MAX} />
+        <p className="mt-1.5 flex gap-2 rounded-lg bg-emerald-50 px-3 py-2 text-xs text-emerald-900">
+          <span aria-hidden="true">💡</span>
+          <span>Tip: applicants can message you right here on ReadyToWork.ph. If you add an email, phone number or link, only signed-in members see it; visitors are asked to sign up first.</span>
+        </p>
       </Field>
       <Field label="Skills (comma separated)"><input className={input} placeholder="react, seo, customer service" value={form.skills} onChange={set('skills')} /></Field>
       <Field label="Type">

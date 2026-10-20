@@ -68,7 +68,7 @@ Features we decided to build, many inspired by looking through OnlineJobs.ph (em
 - [x] Rate shown per hour only (monthly estimate removed 2026-10-19: it looked like the asking salary; see "Hours per day / week" in 4.)
 - [x] Worker privacy: Free employers see "Maria S.", no links, until they can contact the worker
 - [x] Contact details in worker bios/headlines hidden (blurred "upgrade to see", clickable)
-- [ ] Hide contact details for the employer side too (company name / job post text), see 3.
+- [x] Hide contact details for the employer side too (job post text), see 3.
 
 ## 2. Keep employers coming back
 
@@ -89,14 +89,19 @@ Features we decided to build, many inspired by looking through OnlineJobs.ph (em
   - [x] Follow-up: run `npm run db:init` on production before deploying (new `sessions_valid_from` column) (first CI/CD release, 2026-10-19)
 - [x] Email confirmation: a link on email sign-up (3 days, one use), yellow reminder bar with "Send a new link", employers confirm before posting jobs; Google sign-ups and password resets count as confirmed; Google linking keeps the password of a confirmed account
   - [x] Follow-up: production `npm run db:init` (adds the columns; existing Google accounts are marked confirmed, existing email accounts see the reminder bar) (first CI/CD release, 2026-10-19)
-- [ ] Admin: suspend an account (it signs them out everywhere)
+- [x] Admin: suspend an account (Users page): signed out everywhere, can't log in, hidden like a paused account, email blocked from signing up again (hashed); lift suspension undoes it
 - [x] Delete my account (Data Privacy Act: right to erasure): Account settings page, type DELETE; profile, files, applications, jobs, saved/hired lists removed; chats kept for the other person as "Deleted user"; paid plan cancelled at Paddle first; email free to sign up again
-  - [ ] Follow-up (with "Admin: suspend an account"): keep a hashed email of suspended accounts so they can't sign up again
+  - [x] Follow-up (with "Admin: suspend an account"): keep a hashed email of suspended accounts so they can't sign up again
+- [x] Deactivate (pause) my account: hidden from search, jobs hidden, no new messages, everything kept; logging in reactivates ("Welcome back"); employers see a "Deactivated" badge
+- [x] Delete leaves anonymous traces: "An applicant deleted their account" rows keep counts and rankings; hires stay as "Deleted user"; old chats still open (read-only)
+- [x] Privacy policy: deactivate vs delete explained; backups erased within 30 days (R2 rule `delete-old-backups` already in place)
 - [x] First and last name stored separately (sign-up asks for both; Google sends both); employers can still give a company name
+- [x] Change your name in Account settings (workers: first/last; employers: company or own name); employers upload a profile photo or logo there too
 - [x] Email buttons ("Email us", footer, error pages, plan buttons without checkout) open the Contact us form instead of a mail app
 - [x] Contact us page (+ footer and menu links); support requests in the admin inbox with Reply-To the sender
   - [x] Follow-up: make sure support@readytowork.ph is a real inbox (forwards to readytoworksupport@gmail.com)
-- [ ] Block contact info (emails, phone numbers, Telegram/WhatsApp/Viber links) in **job posts**, with a clear message
+- [x] Contact details in job posts (emails, links, phones, @handles) hidden from visitors on the server (HTML and API); blurred "Sign up or log in to see" chips; tip for employers when posting
+  - [ ] Later, if scams or plan-skipping show up: block contact details in job posts entirely
 - [ ] Outreach caps: Pro 100 / Premium 500 workers a month an employer can message first (replies to applicants stay unlimited)
 - [ ] AI scam check on new job posts: clean posts go live instantly; suspicious ones go to an admin review queue
 - [ ] Worker reviews from employers (needs Mark as hired, done)
@@ -125,7 +130,7 @@ Features we decided to build, many inspired by looking through OnlineJobs.ph (em
 ## 5. Worker side
 
 - [ ] Account settings: change email, change password
-- [ ] "Open to work" toggle: hide yourself from search when not looking
+- [x] "Open to work" toggle: covered by Deactivate (Account settings)
 - [ ] Bookmark jobs + Saved jobs list
 - [ ] Job alerts: pick skills, get emailed when a matching job is posted
 - [x] Application status for workers: messaged / hired / job closed (on the worker dashboard)

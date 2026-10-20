@@ -195,21 +195,23 @@ const loginFails = limiter(10, 15 * 60_000); // wrong passwords per visitor
 const signups = limiter(10, 60 * 60_000); // new accounts per visitor
 
 // --- Auth ---
+// Suspended accounts can't log in, and their email can't sign up again (kept only as a one-way hash).
+const SUSPENDED = { error: 'This account has been suspended. If you think this is a mistake, contact support@readytowork.ph.', code: 'suspended' };
+const BLOCKED = { error: 'This email can’t be used to create an account. If you think this is a mistake, contact support@readytowork.ph.', code: 'blocked' };
+const isSuspended = async (id) => (await q('SELECT 1 FROM users WHERE id = $1 AND suspended_at IS NOT NULL', [id])).rowCount > 0;
+const isBlocked = async (email) => (await q('SELECT 1 FROM blocked_emails WHERE email_hash = $1', [hashToken(email)])).rowCount > 0;
+
 app.post('/api/auth/register', async (req, res) => {
   if (signups.blocked(visitor(req))) return tooMany(res, 'an hour');
   if (!(await verifyHuman(req))) return notHuman(res);
   const email = str(req.body.email, 200).toLowerCase();
-  // People give a first and last name; an employer may instead give a company name (`name`). A single
-  // name (older pages) is split at the first space.
-  const name = str(req.body.first_name, 50) && str(req.body.last_name, 50)
-    ? `${str(req.body.first_name, 50)} ${str(req.body.last_name, 50)}` : str(req.body.name, 100);
-  const first = str(req.body.first_name, 50) || name.split(' ')[0];
-  const last = str(req.body.first_name, 50) ? str(req.body.last_name, 50) : name.split(' ').slice(1).join(' ');
+  const { name, first, last } = nameOf(req.body);
   const { password, role } = req.body;
   if (!/^\S+@\S+\.\S+$/.test(email)) return bad(res, 'Valid email required');
   if (!name) return bad(res, 'Name required');
   if (typeof password !== 'string' || password.length < 8) return bad(res, 'Password must be at least 8 characters');
   if (!['worker', 'employer'].includes(role)) return bad(res, 'Role must be worker or employer');
+  if (await isBlocked(email)) return res.status(403).json(BLOCKED);
 
   const { rows } = await q(
     `INSERT INTO users (email, password_hash, name, role, first_name, last_name) VALUES ($1, $2, $3, $4, $5, $6)
@@ -280,10 +282,12 @@ app.post('/api/auth/login', async (req, res) => {
     return fail('wrong_password', 'Incorrect password.', { accountLeft: ACCOUNT_TRIES - tries, accountTries: tries });
   }
   loginFails.clear(visitor(req));
+  if (user.suspended_at) return res.status(403).json(SUSPENDED);
   if (user.recent_fails || user.login_locked_until) await q('UPDATE users SET failed_logins = 0, failed_login_at = NULL, login_locked_until = NULL WHERE id = $1', [user.id]);
   const { id, email, name, role, plan } = user;
+  const reactivated = await reactivate(id);
   startSession(req, res, user);
-  res.json({ user: { id, email, name, role, plan, has_photo: !!user.photo_key, email_verified: !!user.email_verified_at } });
+  res.json({ user: { id, email, name, role, plan, has_photo: !!user.photo_key, email_verified: !!user.email_verified_at }, reactivated });
 });
 
 app.post('/api/auth/logout', (req, res) => {
@@ -429,12 +433,15 @@ app.post('/api/auth/google', throttle(30, 15 * 60_000, '15 minutes'), async (req
   if (rows[0] && role && role !== rows[0].role)
     return res.status(409).json({ error: `This Google account already has a ${rows[0].role === 'worker' ? 'job seeker' : 'employer'} account. To ${role === 'employer' ? 'hire' : 'look for work'}, sign up with a different email.`, existingRole: rows[0].role });
   if (rows[0]) {
+    if (await isSuspended(rows[0].id)) return res.status(403).json(SUSPENDED);
+    const reactivated = await reactivate(rows[0].id);
     startSession(req, res, rows[0]);
-    return res.json({ user: rows[0] });
+    return res.json({ user: rows[0], reactivated });
   }
 
   if (!['worker', 'employer'].includes(role))
     return res.status(404).json({ error: 'No account yet. Choose how you’ll use ReadyToWork.ph to sign up.', needsRole: true });
+  if (await isBlocked(email)) return res.status(403).json(BLOCKED);
   ({ rows } = await q(
     `INSERT INTO users (email, name, role, google_sub, email_verified_at, first_name, last_name) VALUES ($1, $2, $3, $4, now(), $5, $6) RETURNING id, email, name, role, plan, photo_key IS NOT NULL AS has_photo, email_verified_at IS NOT NULL AS email_verified`,
     [email, str(g.name, 100) || email.split('@')[0], role, g.sub, str(g.given_name, 50) ?? '', str(g.family_name, 50) ?? ''] // Google sends both names
@@ -468,10 +475,12 @@ app.delete('/api/me', requireAuth(), throttle(5, 60 * 60_000, 'an hour', perUser
     await db.query('BEGIN');
     for (const sql of [
       'DELETE FROM jobs WHERE employer_id = $1', // and, with them, their applications
-      'DELETE FROM applications WHERE worker_id = $1',
+      // A worker's applications stay as anonymous rows ("An applicant deleted their account"), so employers'
+      // counts and rankings still add up; what they wrote, their resume and the AI analysis are removed.
+      'UPDATE applications SET cover_letter = \'\', analysis = NULL, analyzed_at = NULL, resume_attached = false WHERE worker_id = $1',
       'DELETE FROM worker_profiles WHERE user_id = $1',
       'DELETE FROM saved_workers WHERE employer_id = $1 OR worker_id = $1',
-      'DELETE FROM hires WHERE employer_id = $1 OR worker_id = $1',
+      'DELETE FROM hires WHERE employer_id = $1', // an employer's own list goes; a worker stays in theirs as "Deleted user"
       'DELETE FROM password_resets WHERE user_id = $1',
       'DELETE FROM email_verifications WHERE user_id = $1',
       `UPDATE users SET name = 'Deleted user', first_name = '', last_name = '', email = 'deleted-' || id || '@deleted.invalid', password_hash = NULL, google_sub = NULL,
@@ -490,8 +499,40 @@ app.delete('/api/me', requireAuth(), throttle(5, 60 * 60_000, 'an hour', perUser
   res.status(204).end();
 });
 
+// Pause my account: hidden from search and new messages, jobs hidden; everything is kept. It signs out every
+// device; logging in again (password or Google) reactivates it.
+app.post('/api/me/deactivate', requireAuth(), async (req, res) => {
+  await q(`UPDATE users SET deactivated_at = now(), sessions_valid_from = now() + interval '1 second' WHERE id = $1`, [req.user.id]);
+  endSession(req, res);
+  res.status(204).end();
+});
+// Called on every successful login: true when it just woke a paused account.
+const reactivate = async (id) => (await q('UPDATE users SET deactivated_at = NULL WHERE id = $1 AND deactivated_at IS NOT NULL', [id])).rowCount > 0;
+
+// People give a first and last name; an employer may instead give a company name (`name`). A single
+// name (older pages) is split at the first space.
+function nameOf(body) {
+  const name = str(body?.first_name, 50) && str(body?.last_name, 50)
+    ? `${str(body.first_name, 50)} ${str(body.last_name, 50)}` : str(body?.name, 100);
+  const first = str(body?.first_name, 50) || name.split(' ')[0];
+  const last = str(body?.first_name, 50) ? str(body?.last_name, 50) : name.split(' ').slice(1).join(' ');
+  return { name, first, last };
+}
+
+// Change your name (a worker's first and last name, or an employer's company or own name).
+app.put('/api/me', requireAuth(), async (req, res) => {
+  const { name, first, last } = nameOf(req.body);
+  if (!name) return bad(res, 'Name required');
+  const { rows: [u] } = await q(
+    `UPDATE users SET name = $2, first_name = $3, last_name = $4 WHERE id = $1
+     RETURNING id, email, name, role, plan, photo_key IS NOT NULL AS has_photo, email_verified_at IS NOT NULL AS email_verified`,
+    [req.user.id, name, first, last]);
+  res.json(u);
+});
+
 app.get('/api/me', requireAuth(), async (req, res) => {
-  const { rows } = await q('SELECT id, email, name, role, plan, photo_key IS NOT NULL AS has_photo, email_verified_at IS NOT NULL AS email_verified FROM users WHERE id = $1', [req.user.id]);
+  const { rows } = await q(`SELECT id, email, name, role, plan, photo_key IS NOT NULL AS has_photo, email_verified_at IS NOT NULL AS email_verified,
+    google_sub IS NOT NULL AS has_google, password_hash IS NOT NULL AS has_password, first_name, last_name FROM users WHERE id = $1`, [req.user.id]);
   rows[0] ? res.json(rows[0]) : res.status(404).json({ error: 'User not found' });
 });
 
@@ -506,15 +547,16 @@ app.get('/api/stats', async (req, res) => {
 });
 
 // --- Jobs ---
-// Email addresses in job posts are only shown to signed-in members, so scrapers and spam bots
-// reading the public pages or this API can't harvest them.
+// Contact details in job posts (emails, links, phone numbers, @handles) are only sent to signed-in members.
+// Visitors, scrapers and bots get a placeholder instead, in the HTML and in this API alike, so there's
+// nothing to un-blur; the page shows it as "Sign up or log in to see".
 const EMAIL = /[A-Z0-9._%+-]+@[A-Z0-9-]+(?:\.[A-Z0-9-]+)*\.[A-Z]{2,}/gi;
-export const EMAIL_HIDDEN = '[email hidden, log in to see it]';
+export const MEMBERS_ONLY = '[contact hidden, log in to see it]';
 const forViewer = async (req, jobs) => ((await signedInUser(req)) ? jobs
-  : jobs.map((j) => ({ ...j, title: j.title.replace(EMAIL, EMAIL_HIDDEN), description: j.description.replace(EMAIL, EMAIL_HIDDEN) })));
+  : jobs.map((j) => ({ ...j, title: hideContacts(j.title, MEMBERS_ONLY), description: hideContacts(j.description, MEMBERS_ONLY) })));
 
 app.get('/api/jobs', async (req, res) => {
-  const where = ['j.closed_at IS NULL'];
+  const where = ['j.closed_at IS NULL', 'u.deactivated_at IS NULL', 'u.suspended_at IS NULL'];
   const params = [];
   const add = (sql, v) => { params.push(v); where.push(sql.replaceAll('?', `$${params.length}`)); };
   if (req.query.q) add('(j.title ILIKE ? OR j.description ILIKE ?)', `%${str(req.query.q, 100)}%`);
@@ -743,8 +785,9 @@ app.post('/api/jobs/:id/apply', requireAuth('worker'), async (req, res) => {
     await db.query('BEGIN');
     // Lock this worker's row so parallel applies can't overspend today's credits.
     await db.query('SELECT 1 FROM users WHERE id = $1 FOR UPDATE', [req.user.id]);
-    const { rows: [target] } = await db.query('SELECT closed_at FROM jobs WHERE id = $1', [num(req.params.id)]);
-    if (target?.closed_at) {
+    const { rows: [target] } = await db.query(
+      'SELECT j.closed_at, u.deactivated_at, u.suspended_at FROM jobs j JOIN users u ON u.id = j.employer_id WHERE j.id = $1', [num(req.params.id)]);
+    if (target?.closed_at || target?.deactivated_at || target?.suspended_at) {
       await db.query('ROLLBACK');
       return res.status(409).json({ error: 'This job is closed and no longer accepting applications' });
     }
@@ -803,6 +846,7 @@ app.get('/api/jobs/:id/applications', requireAuth('employer'), async (req, res) 
   const limit = PLAN_LIMITS[plan].applicants;
   const { rows } = await q(
     `SELECT a.id, a.cover_letter, a.credits, a.analysis, a.analyzed_at, CASE WHEN a.resume_attached THEN p.resume_name END AS resume_name, a.created_at, u.id AS worker_id, u.name, u.email, p.title, p.skills,
+       u.deleted_at IS NOT NULL AS deleted, u.deactivated_at IS NOT NULL AS deactivated,
        count(*) OVER ()::int AS total
      FROM applications a JOIN jobs j ON j.id = a.job_id
      JOIN users u ON u.id = a.worker_id LEFT JOIN worker_profiles p ON p.user_id = u.id
@@ -821,7 +865,7 @@ app.get('/api/my/jobs', requireAuth('employer'), async (req, res) => {
        (SELECT max(a.created_at) FROM applications a WHERE a.job_id = j.id) AS last_applied_at,
        (SELECT coalesce(json_agg(u.name ORDER BY t.credits DESC, t.created_at), '[]')
           FROM (SELECT worker_id, credits, created_at FROM applications WHERE job_id = j.id ORDER BY credits DESC, created_at LIMIT 3) t
-          JOIN users u ON u.id = t.worker_id) AS top_applicants
+          JOIN users u ON u.id = t.worker_id AND u.deleted_at IS NULL) AS top_applicants
      FROM jobs j WHERE employer_id = $1 ORDER BY created_at DESC`,
     [req.user.id]
   );
@@ -845,7 +889,8 @@ app.get('/api/my/applications', requireAuth('worker'), async (req, res) => {
 // --- Workers ---
 const WORKER_SELECT = `SELECT u.id, u.name, p.title, p.bio, p.skills, p.hourly_rate, p.availability, p.portfolio_url, p.linkedin_url, p.updated_at,
     p.skill_years, p.location, p.work_hours, p.hours_per_week, p.start_when, p.english, p.languages, p.internet_mbps, p.setup, p.show_resume,
-    (p.resume_key IS NOT NULL AND p.show_resume) AS has_resume, u.created_at AS member_since, u.last_seen_at
+    (p.resume_key IS NOT NULL AND p.show_resume) AS has_resume, u.created_at AS member_since, u.last_seen_at,
+    u.deactivated_at IS NOT NULL AS deactivated
   FROM users u JOIN worker_profiles p ON p.user_id = u.id`;
 
 // A worker's surname, LinkedIn and portfolio would let an employer find them elsewhere and skip both the
@@ -874,9 +919,12 @@ const CONTACT_RE = new RegExp([
   String.raw`(?:https?:\/\/|www\.)[^\s,;)]+`, // a link ends at a space, comma, semicolon or bracket
   String.raw`\b[a-z0-9-]+(?:\.[a-z0-9-]+)*\.(?:com|ph|io|dev|me|co|org|app|link|site|xyz|info|biz)(?:\/[^\s,;)]*)?`,
   String.raw`(?:\+?\d[\d\s().-]{7,}\d)`,
-  String.raw`(?<![\w.])@[a-z0-9_.]{3,}(?![\w.]*@)`, // an @handle, but not the start of an email ("@juan@gmail.com")
+  String.raw`(?<![\w.])@[a-z0-9_.]{2,}[a-z0-9_](?![\w.]*@)`, // an @handle (never ending in a full stop), not the start of an email
 ].join('|'), 'gi');
-export const hideContacts = (text) => String(text ?? '').replace(CONTACT_RE, HIDDEN);
+// Number runs only count as a phone number with 10+ digits, so "2024-2025" or "1,300" stay readable.
+const PHONE = /^\+?\d[\d\s().-]{7,}\d$/;
+export const hideContacts = (text, mark = HIDDEN) => String(text ?? '').replace(CONTACT_RE,
+  (m) => (PHONE.test(m) && m.replace(/\D/g, '').length < 10 ? m : mark));
 const limitWorker = (w) => ({
   ...w, name: shortName(w.name), title: hideContacts(w.title), bio: hideContacts(w.bio),
   location: hideContacts(w.location), languages: hideContacts(w.languages),
@@ -894,7 +942,7 @@ const WORKER_SORTS = {
 app.get('/api/workers', requireAuth('employer'), async (req, res) => {
   const params = [req.user.id];
   const add = (v) => { params.push(v); return `$${params.length}`; };
-  const where = ["p.title <> ''"];
+  const where = ["p.title <> ''", 'u.deactivated_at IS NULL', 'u.suspended_at IS NULL']; // paused and suspended accounts stay out of search
   const text = str(req.query.q, 100);
   let match = '';
   if (text) {
@@ -1232,24 +1280,39 @@ app.put('/api/admin/feedback/:id', requireAdmin, async (req, res) => {
 });
 
 // --- Admin: users, jobs, subscriptions ---
-const ADMIN_PAGE = 25;
+const PAGE_SIZES = [10, 25, 50, 100];
+const sizeOf = (req) => (PAGE_SIZES.includes(Number(req.query.per_page)) ? Number(req.query.per_page) : 25); // rows per page the admin picked
 const like = (v) => `%${str(v, 100).replace(/[\\%_]/g, (c) => `\\${c}`)}%`; // a search term, with LIKE's wildcards taken literally
 const pageOf = (req) => Math.max(0, Math.floor(num(req.query.page) ?? 0));
 
 // Everyone, newest first; search by name or email, filter by role or plan.
+// Suspend (or lift it): signs them out everywhere, hides them and their jobs, and blocks their email from
+// signing up again. Lifting it removes the block; they can log in again.
+app.put('/api/admin/users/:id/suspend', requireAdmin, async (req, res) => {
+  const on = req.body?.suspended === true;
+  const { rows: [u] } = await q(
+    `UPDATE users SET suspended_at = CASE WHEN $2 THEN coalesce(suspended_at, now()) END,
+       sessions_valid_from = CASE WHEN $2 THEN now() + interval '1 second' ELSE sessions_valid_from END
+     WHERE id = $1 AND deleted_at IS NULL RETURNING email, suspended_at`, [num(req.params.id), on]);
+  if (!u) return res.status(404).json({ error: 'User not found' });
+  if (on) await q('INSERT INTO blocked_emails (email_hash) VALUES ($1) ON CONFLICT DO NOTHING', [hashToken(u.email)]);
+  else await q('DELETE FROM blocked_emails WHERE email_hash = $1', [hashToken(u.email)]);
+  res.json({ suspended_at: u.suspended_at });
+});
+
 app.get('/api/admin/users', requireAdmin, async (req, res) => {
   const role = ['worker', 'employer'].includes(req.query.role) ? req.query.role : '';
   const plan = ['free', 'pro', 'premium'].includes(req.query.plan) ? req.query.plan : '';
   const { rows } = await q(
-    `SELECT u.id, u.name, u.email, u.role, u.plan, u.created_at, u.last_seen_at, u.last_country, u.google_sub IS NOT NULL AS google,
+    `SELECT u.id, u.name, u.email, u.role, u.plan, u.created_at, u.last_seen_at, u.last_country, u.google_sub IS NOT NULL AS google, u.suspended_at,
        (SELECT count(*)::int FROM jobs j WHERE j.employer_id = u.id) AS jobs,
        (SELECT count(*)::int FROM applications a WHERE a.worker_id = u.id) AS applications,
        count(*) OVER ()::int AS total
      FROM users u
      WHERE u.deleted_at IS NULL AND ($1 = '%%' OR u.name ILIKE $1 OR u.email ILIKE $1) AND ($2 = '' OR u.role = $2) AND ($3 = '' OR (u.role = 'employer' AND u.plan = $3))
-     ORDER BY u.created_at DESC LIMIT ${ADMIN_PAGE} OFFSET $4`,
-    [like(req.query.q), role, plan, pageOf(req) * ADMIN_PAGE]);
-  res.json({ users: rows.map(({ total: _, ...u }) => u), total: rows[0]?.total ?? 0, page_size: ADMIN_PAGE });
+     ORDER BY u.created_at DESC LIMIT $5 OFFSET $4`,
+    [like(req.query.q), role, plan, pageOf(req) * sizeOf(req), sizeOf(req)]);
+  res.json({ users: rows.map(({ total: _, ...u }) => u), total: rows[0]?.total ?? 0, page_size: sizeOf(req) });
 });
 
 // Every job post, newest first; search by title or employer, filter open/closed.
@@ -1262,9 +1325,9 @@ app.get('/api/admin/jobs', requireAdmin, async (req, res) => {
      FROM jobs j JOIN users u ON u.id = j.employer_id
      WHERE ($1 = '%%' OR j.title ILIKE $1 OR u.name ILIKE $1 OR u.email ILIKE $1)
        AND ($2 = '' OR ($2 = 'open' AND j.closed_at IS NULL) OR ($2 = 'closed' AND j.closed_at IS NOT NULL))
-     ORDER BY j.created_at DESC LIMIT ${ADMIN_PAGE} OFFSET $3`,
-    [like(req.query.q), status, pageOf(req) * ADMIN_PAGE]);
-  res.json({ jobs: rows.map(({ total: _, ...j }) => j), total: rows[0]?.total ?? 0, page_size: ADMIN_PAGE });
+     ORDER BY j.created_at DESC LIMIT $4 OFFSET $3`,
+    [like(req.query.q), status, pageOf(req) * sizeOf(req), sizeOf(req)]);
+  res.json({ jobs: rows.map(({ total: _, ...j }) => j), total: rows[0]?.total ?? 0, page_size: sizeOf(req) });
 });
 
 // Close a post (spam, scams, a job the employer forgot) or reopen it. Closing hides it from search and stops applications.
@@ -1407,7 +1470,7 @@ app.get('/api/messages', requireAuth(), async (req, res) => {
        SELECT CASE WHEN sender_id = $1 THEN recipient_id ELSE sender_id END AS other, sender_id, body, created_at
        FROM messages WHERE sender_id = $1 OR recipient_id = $1
      ), latest AS (SELECT DISTINCT ON (other) * FROM m ORDER BY other, created_at DESC)
-     SELECT l.other AS user_id, u.name, u.role, l.body AS last_body, l.created_at AS last_at, l.sender_id = $1 AS last_from_me,
+     SELECT l.other AS user_id, u.name, u.role, u.deleted_at IS NOT NULL AS deleted, u.deactivated_at IS NOT NULL AS deactivated, l.body AS last_body, l.created_at AS last_at, l.sender_id = $1 AS last_from_me,
        (SELECT count(*)::int FROM messages x WHERE x.sender_id = l.other AND x.recipient_id = $1 AND x.read_at IS NULL) AS unread
      FROM latest l JOIN users u ON u.id = l.other ORDER BY l.created_at DESC`,
     [req.user.id]
@@ -1422,7 +1485,9 @@ app.get('/api/messages/unread-count', requireAuth(), async (req, res) => {
 
 // The other person, if messaging them is allowed at all (employer <-> worker only).
 async function counterpart(me, otherId) {
-  const { rows } = await q('SELECT id, name, email, role FROM users WHERE id = $1 AND deleted_at IS NULL', [num(otherId)]);
+  const { rows } = await q(
+    `SELECT id, name, email, role, CASE WHEN deleted_at IS NOT NULL THEN 'deleted' WHEN suspended_at IS NOT NULL THEN 'suspended' WHEN deactivated_at IS NOT NULL THEN 'deactivated' END AS status
+     FROM users WHERE id = $1`, [num(otherId)]);
   const other = rows[0];
   return other && other.id !== me.id && other.role !== me.role ? other : null;
 }
@@ -1457,12 +1522,13 @@ app.get('/api/messages/:userId', requireAuth(), async (req, res) => {
      ORDER BY m.created_at, m.id`,
     [req.user.id, other.id]
   );
-  res.json({ user: { id: other.id, name: other.name, role: other.role }, can_send: await canSend(req.user, other), messages: rows });
+  res.json({ user: { id: other.id, name: other.name, role: other.role, status: other.status }, can_send: !other.status && await canSend(req.user, other), messages: rows });
 });
 
 app.post('/api/messages/:userId', requireAuth(), throttle(60, 60 * 60_000, 'an hour', perUser), async (req, res) => {
   const other = await counterpart(req.user, req.params.userId);
-  if (!other) return res.status(404).json({ error: 'You can only message employers or workers on ReadyToWork.ph' });
+  if (!other || other.status === 'deleted') return res.status(404).json({ error: 'You can only message employers or workers on ReadyToWork.ph' });
+  if (other.status) return res.status(403).json({ error: other.status === 'suspended' ? 'This account has been suspended.' : `${other.name} has paused their account, so they can’t get new messages right now.` });
   const body = str(req.body.body, 5000);
   if (!body) return bad(res, 'Message can’t be empty');
   if (!(await canSend(req.user, other))) return res.status(403).json(req.user.role === 'employer'
@@ -1671,6 +1737,11 @@ app.post('/api/billing/checkout', requireAuth('employer'), async (req, res) => {
   const price = PRICES()[req.body?.plan]?.[req.body?.yearly ? 'yearly' : 'monthly'];
   if (!price) return bad(res, 'Choose Pro or Premium');
   const u = await billingAccount(req.user.id);
+  // Testing sandbox payments on the live site: Paddle's public test card would hand anyone a free paid plan,
+  // so only the emails in PADDLE_TESTERS may check out. Unset it (with live keys) to open checkout to everyone.
+  const testers = (process.env.PADDLE_TESTERS ?? '').toLowerCase().split(',').map((e) => e.trim()).filter(Boolean);
+  if (testers.length && !testers.includes(u.email.toLowerCase()))
+    return res.status(403).json({ error: 'Online checkout is coming soon. Contact us at support@readytowork.ph to upgrade.' });
   if (u.plan !== 'free' && u.paddle_subscription_id) return res.status(409).json({ error: 'You already have a paid plan. Switch plans from the pricing page.' });
   const txn = await paddle('/transactions', {
     items: [{ price_id: price, quantity: 1 }],
@@ -1686,6 +1757,8 @@ app.get('/api/billing/subscription', requireAuth('employer'), async (req, res) =
   const u = await billingAccount(req.user.id);
   if (!u.paddle_subscription_id || u.plan === 'free') return res.json({ subscription: null });
   const sub = await paddle(`/subscriptions/${u.paddle_subscription_id}`);
+  // A missed webhook would leave the account on a plan Paddle already ended; catch up from what Paddle says now.
+  if (!LIVE.includes(sub.status)) { await saveSubscription(sub, req.user.id); return res.json({ subscription: null }); }
   const price = sub.items?.[0]?.price?.id;
   res.json({ subscription: {
     plan: planOfPrice(price), yearly: isYearly(price), status: sub.status, next_billed_at: sub.next_billed_at,

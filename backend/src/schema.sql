@@ -230,3 +230,15 @@ ALTER TABLE users ADD COLUMN IF NOT EXISTS first_name text NOT NULL DEFAULT '';
 ALTER TABLE users ADD COLUMN IF NOT EXISTS last_name text NOT NULL DEFAULT '';
 UPDATE users SET first_name = split_part(name, ' ', 1), last_name = trim(substr(name, length(split_part(name, ' ', 1)) + 1))
   WHERE first_name = '' AND last_name = '' AND deleted_at IS NULL;
+
+-- Deactivated (paused) accounts: hidden from search, can't be messaged, their jobs are hidden; everything is
+-- kept and logging in again reactivates the account.
+ALTER TABLE users ADD COLUMN IF NOT EXISTS deactivated_at timestamptz;
+
+-- Suspended accounts (admin): signed out everywhere, can't log in, hidden like a paused account. Their email
+-- is kept only as a one-way hash so it can't be used to sign up again (also after the account is deleted).
+ALTER TABLE users ADD COLUMN IF NOT EXISTS suspended_at timestamptz;
+CREATE TABLE IF NOT EXISTS blocked_emails (
+  email_hash text PRIMARY KEY,
+  created_at timestamptz NOT NULL DEFAULT now()
+);

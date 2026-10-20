@@ -45,7 +45,11 @@ export default function PrivacyPage() {
           <p>Some of these providers store data outside the Philippines. We may also share information if the law requires it, or to protect users from fraud or harm.</p>
       </Section>
       <Section title="Cookies and storage"><p>We don&apos;t use advertising or tracking cookies. Your browser stores your login session and unsent drafts on your device so the site works. Google sign-in may set its own cookies when you use it.</p></Section>
-      <Section title="How long we keep it"><p>We keep your information while your account is active. When you replace or remove a resume or photo, the old file is deleted. If you ask us to delete your account, we delete your personal information, except where we must keep some records by law (such as payment records).</p></Section>
+      <Section title="How long we keep it">
+        <p>We keep your information while your account is active. When you replace or remove a resume or photo, the old file is deleted.</p>
+        <p><strong>Deactivating</strong> your account (Account settings) hides it and keeps everything, so you can come back by logging in.</p>
+        <p><strong>Deleting</strong> your account removes your personal information right away: your name, email, profile, photo, resume and what you wrote in applications. So that employers&apos; records still make sense, they see that an applicant or a hire existed, without who it was, and people you messaged keep their side of the conversation, shown from &ldquo;Deleted user&rdquo;. Copies in our backups are erased within 30 days. We keep only what the law requires, such as payment records held by our payment provider, Paddle.</p>
+      </Section>
       <Section title="Your rights">
           <p>Under the Data Privacy Act you can ask to access, correct or delete your personal information, object to its processing, or get a copy of it. You can edit most of your information yourself in your profile. For anything else, email <Mail /> and we will reply within 15 days.</p>
           <p>You can also file a complaint with the National Privacy Commission (privacy.gov.ph).</p>
