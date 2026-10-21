@@ -7,7 +7,7 @@ delete process.env.TURNSTILE_SECRET; // tests that need the robot check switch i
 const { pool } = await import('../src/db.js');
 const { app } = await import('../src/app.js');
 
-await pool.query('DROP TABLE IF EXISTS blocked_emails, email_verifications, hires, saved_workers, feedback, ai_analyses, password_resets, settings, messages, applications, jobs, worker_profiles, users');
+await pool.query('DROP TABLE IF EXISTS match_runs, blocked_emails, email_verifications, hires, saved_workers, feedback, ai_analyses, password_resets, settings, messages, applications, jobs, worker_profiles, users');
 // Never send real email from tests, even if .env has a Resend key; tests read `sent` instead.
 const sent = [];
 // Email-confirmation messages go to every new email sign-up; most tests don't care, so they're left out.

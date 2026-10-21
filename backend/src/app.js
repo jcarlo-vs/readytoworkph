@@ -5,6 +5,7 @@ import { pool, q } from './db.js';
 import { hashPassword, verifyPassword, requireAuth, signedInUser, requireAdmin, startSession, endSession, startAdminSession, endAdminSession } from './auth.js';
 import { sendEmail, renderEmail } from './email.js';
 import { analyzeApplication } from './analyzer.js';
+import { callClaude, runMatchAgent } from './matchAgent.js';
 import { extractText, getDocumentProxy } from 'unpdf';
 import { storage } from './storage.js';
 import { randomUUID, randomBytes, createHash, createHmac, timingSafeEqual } from 'node:crypto';
@@ -16,9 +17,9 @@ const PERIODS = ['hour', 'month', 'year', 'fixed'];
 // Free's AI analyses are set by the admin. Job posts and analyses count per calendar month in
 // Philippine time, so they reset on the 1st.
 const PLAN_LIMITS = {
-  free: { name: 'Free', posts: 3, applicants: 20, outreach: false },
-  pro: { name: 'Pro', posts: 5, applicants: 150, analyses: 500, outreach: true },
-  premium: { name: 'Premium', posts: 10, applicants: null, analyses: null, outreach: true },
+  free: { name: 'Free', posts: 3, applicants: 20, outreach: false, matches: 0 },
+  pro: { name: 'Pro', posts: 5, applicants: 150, analyses: 500, outreach: true, matches: 3 },
+  premium: { name: 'Premium', posts: 10, applicants: null, analyses: null, outreach: true, matches: 30 },
 };
 // Premium's AI analyses are unlimited for any real hiring; this fair-use ceiling only stops a runaway
 // script (each analysis costs about $0.001-0.002, so the ceiling bounds one account at ~$10-20 a month).
@@ -939,23 +940,28 @@ const WORKER_SORTS = {
   rate: 'p.hourly_rate ASC NULLS LAST, u.last_seen_at DESC NULLS LAST',
   newest: 'u.created_at DESC',
 };
-app.get('/api/workers', requireAuth('employer'), async (req, res) => {
-  const params = [req.user.id];
+// Hire Talent's filters, shared by the page and the AI matcher. Adds its values to `params`.
+function workerFilters(query, params) {
   const add = (v) => { params.push(v); return `$${params.length}`; };
   const where = ["p.title <> ''", 'u.deactivated_at IS NULL', 'u.suspended_at IS NULL']; // paused and suspended accounts stay out of search
-  const text = str(req.query.q, 100);
+  const text = str(query.q, 100);
   let match = '';
   if (text) {
     const t = add(like(text));
     where.push(`(p.title ILIKE ${t} OR p.bio ILIKE ${t} OR EXISTS (SELECT 1 FROM unnest(p.skills) s WHERE s ILIKE ${t}))`);
     match = `(p.title ILIKE ${t}) DESC, `; // title matches first
   }
-  const skills = skillList(req.query.skills ?? req.query.skill).slice(0, 10);
+  const skills = skillList(query.skills ?? query.skill).slice(0, 10);
   if (skills.length) where.push(`p.skills @> ${add(skills)}::text[]`);
-  if (TYPES.includes(req.query.availability)) where.push(`p.availability = ${add(req.query.availability)}`);
-  if (num(req.query.rate_min) !== null) where.push(`p.hourly_rate >= ${add(num(req.query.rate_min))}`);
-  if (num(req.query.rate_max) !== null) where.push(`p.hourly_rate <= ${add(num(req.query.rate_max))}`);
-  if ([1, 7, 30].includes(num(req.query.active))) where.push(`u.last_seen_at > now() - ${add(num(req.query.active))} * interval '1 day'`);
+  if (TYPES.includes(query.availability)) where.push(`p.availability = ${add(query.availability)}`);
+  if (num(query.rate_min) !== null) where.push(`p.hourly_rate >= ${add(num(query.rate_min))}`);
+  if (num(query.rate_max) !== null) where.push(`p.hourly_rate <= ${add(num(query.rate_max))}`);
+  if ([1, 7, 30].includes(num(query.active))) where.push(`u.last_seen_at > now() - ${add(num(query.active))} * interval '1 day'`);
+  return { where, match, add };
+}
+app.get('/api/workers', requireAuth('employer'), async (req, res) => {
+  const params = [req.user.id];
+  const { where, match, add } = workerFilters(req.query, params);
   const sort = WORKER_SORTS[req.query.sort] ?? WORKER_SORTS.active;
   const { rows } = await q(
     `${WORKER_SELECT.replace(' FROM users u', `, EXISTS (SELECT 1 FROM saved_workers s WHERE s.employer_id = $1 AND s.worker_id = u.id) AS saved,
@@ -1377,6 +1383,168 @@ app.get('/api/admin/subscriptions', requireAdmin, async (req, res) => {
     },
     subscriptions: rows, paddle_error: paddleError,
   });
+});
+
+// --- Find matches: the AI recruiting agent (matchAgent.js) ---
+// Pro gets 3 runs a month, Premium 30. A run holds its request open while it streams steps (Cloud Run only
+// gives CPU during a request), so runs are capped per server to leave room for everyone else's pages.
+app.locals.matchModel = callClaude; // swappable so tests run the agent with a scripted fake model
+const MATCH_STALE = "interval '3 minutes'"; // a run still 'running' after this was interrupted
+const MAX_LIVE_RUNS = 20;
+let liveRuns = 0;
+
+// Runs this calendar month (Philippine time). Interrupted and failed runs don't count.
+async function matchUsage(db, employerId) {
+  const { rows: [r] } = await db.query(
+    `SELECT u.plan, (SELECT count(*)::int FROM match_runs WHERE employer_id = u.id AND created_at >= ${MONTH_PH}
+       AND (status = 'done' OR (status = 'running' AND created_at > now() - ${MATCH_STALE}))) AS used
+     FROM users u WHERE u.id = $1`, [employerId]);
+  const limit = PLAN_LIMITS[r.plan].matches;
+  return { plan: r.plan, used: r.used, limit, remaining: Math.max(0, limit - r.used) };
+}
+const stopStaleRuns = () => q(`UPDATE match_runs SET status = 'failed', error = 'Interrupted before it finished', finished_at = now()
+  WHERE status = 'running' AND created_at < now() - ${MATCH_STALE}`);
+const ownJob = async (employerId, jobId) => (await q(
+  'SELECT id, title, description, skills, job_type, salary_min, salary_max, salary_period FROM jobs WHERE id = $1 AND employer_id = $2',
+  [jobId, employerId])).rows[0];
+const payText = (j) => (j.salary_min == null && j.salary_max == null ? ''
+  : `$${[j.salary_min, j.salary_max].filter((v) => v != null).map(Number).join('-')} ${j.salary_period === 'fixed' ? 'fixed price' : `per ${j.salary_period}`}`);
+
+// The agent's tools, scoped to one employer: the same search and privacy rules as Hire Talent ("Maria S.",
+// no links, contact details hidden, unless that employer may contact the worker), in a compact form.
+const daysAgo = (t) => (t ? Math.floor((Date.now() - new Date(t).getTime()) / 86_400_000) : null);
+const agentCard = (w) => ({
+  id: w.id, name: w.name, title: w.title, skills: w.skills, hourly_rate: w.hourly_rate, availability: w.availability,
+  hours_per_week: w.hours_per_week, work_hours: w.work_hours, last_active_days_ago: daysAgo(w.last_seen_at),
+});
+function matchTools(employerId) {
+  return {
+    async search({ query, skills, max_rate, availability }) {
+      const params = [];
+      const { where, match } = workerFilters({ q: query, skills, rate_max: max_rate, availability }, params);
+      const { rows } = await q(`${WORKER_SELECT} WHERE ${where.join(' AND ')} ORDER BY ${match}${WORKER_SORTS.active} LIMIT 15`, params);
+      const full = await revealFor(employerId, rows.map((w) => w.id));
+      return rows.map((w) => agentCard(full(w.id) ? w : limitWorker(w)));
+    },
+    async profile(id) {
+      const { rows: [w] } = await q(`${WORKER_SELECT} WHERE u.id = $1 AND p.title <> '' AND u.deactivated_at IS NULL AND u.suspended_at IS NULL`, [id]);
+      if (!w) return null;
+      const full = (await revealFor(employerId, [id]))(id);
+      const v = full ? w : limitWorker(w);
+      // The CV text, when the worker shares their CV and this employer may download it (the same rule as the CV button).
+      const cv = full && w.has_resume
+        ? (await q('SELECT resume_text FROM worker_profiles WHERE user_id = $1', [id])).rows[0]?.resume_text : null;
+      return {
+        ...agentCard(v), bio: str(v.bio, 1500), skill_years: v.skill_years, location: v.location, start_when: v.start_when,
+        english: v.english, languages: v.languages,
+        cv: cv ? str(cv, 4000) : w.has_resume ? 'Shared, but the employer can’t see it on their plan.' : 'No CV shared.',
+      };
+    },
+  };
+}
+
+// A saved run with its shortlist shown live: today's names and details under today's privacy rules. People who
+// deleted or had their account suspended drop off; paused ones and people already hired are marked.
+// The job's hourly budget ceiling, when the job is paid by the hour (for the "above your budget" note).
+const hourlyCap = (job) => (job.salary_period === 'hour' && job.salary_max != null ? Number(job.salary_max) : null);
+async function matchRunView(employerId, run, job) {
+  if (!run) return null;
+  const cap = hourlyCap(job);
+  const ids = (run.shortlist ?? []).map((m) => m.worker_id);
+  const { rows } = ids.length ? await q(`${WORKER_SELECT} WHERE u.id = ANY($1) AND u.suspended_at IS NULL`, [ids]) : { rows: [] };
+  const full = await revealFor(employerId, ids);
+  const workers = new Map(rows.map((w) => [w.id, full(w.id) ? w : limitWorker(w)]));
+  const { rows: hires } = await q('SELECT worker_id FROM hires WHERE employer_id = $1 AND worker_id = ANY($2)', [employerId, ids]);
+  const hired = new Set(hires.map((h) => h.worker_id));
+  return {
+    id: run.id, status: run.status, summary: run.summary, error: run.error, steps: run.steps,
+    created_at: run.created_at, finished_at: run.finished_at,
+    matches: (run.shortlist ?? []).filter((m) => workers.has(m.worker_id)).map((m) => {
+      const w = workers.get(m.worker_id);
+      return {
+        score: m.score, reason: hideContacts(m.reason), hired: hired.has(w.id),
+        over_budget: cap !== null && w.hourly_rate != null && Number(w.hourly_rate) > cap,
+        worker: { id: w.id, name: w.name, title: w.title, skills: w.skills, hourly_rate: w.hourly_rate, availability: w.availability, last_seen_at: w.last_seen_at, deactivated: w.deactivated, limited: !!w.limited },
+      };
+    }),
+  };
+}
+
+// A job's latest finished run (or ?run=<id>), its past runs, and this month's allowance.
+app.get('/api/jobs/:id/matches', requireAuth('employer'), async (req, res) => {
+  const job = await ownJob(req.user.id, num(req.params.id));
+  if (!job) return res.status(404).json({ error: 'Job not found' });
+  await stopStaleRuns();
+  const { rows: runs } = await q(
+    `SELECT id, status, jsonb_array_length(coalesce(shortlist, '[]')) AS count, created_at FROM match_runs
+     WHERE job_id = $1 ORDER BY created_at DESC LIMIT 20`, [job.id]);
+  const pick = req.query.run ? runs.find((r) => r.id === num(req.query.run)) : runs.find((r) => r.status === 'done');
+  const { rows: [run] } = pick ? await q('SELECT * FROM match_runs WHERE id = $1', [pick.id]) : { rows: [] };
+  res.json({ runs, run: await matchRunView(req.user.id, run, job), budget: payText(job), usage: await matchUsage(pool, req.user.id) });
+});
+
+// Starts a run and streams what the agent does (Server-Sent Events); every step is saved as it happens.
+app.post('/api/jobs/:id/matches', requireAuth('employer'), throttle(20, 60 * 60_000, 'an hour', perUser), async (req, res) => {
+  const job = await ownJob(req.user.id, num(req.params.id));
+  if (!job) return res.status(404).json({ error: 'Job not found' });
+  if (liveRuns >= MAX_LIVE_RUNS) return res.status(503).json({ error: 'The AI matcher is busy right now. Please try again in a minute.' });
+  await stopStaleRuns();
+
+  // Check the allowance and that no other run is going, under a lock so two clicks can't both start one.
+  const db = await pool.connect();
+  let run;
+  try {
+    await db.query('BEGIN');
+    await db.query('SELECT 1 FROM users WHERE id = $1 FOR UPDATE', [req.user.id]);
+    const usage = await matchUsage(db, req.user.id);
+    const refuse = (status, body) => db.query('ROLLBACK').then(() => res.status(status).json(body));
+    if (usage.remaining === 0) {
+      return await refuse(402, usage.limit === 0
+        ? { error: 'Find matches with AI is part of the Pro and Premium plans.', upgrade: true, usage }
+        : { error: `You've used this month's ${usage.limit} AI match searches on the ${PLAN_LIMITS[usage.plan].name} plan. They reset on the 1st.`, upgrade: usage.plan !== 'premium', usage });
+    }
+    if ((await db.query("SELECT 1 FROM match_runs WHERE employer_id = $1 AND status = 'running'", [req.user.id])).rowCount)
+      return await refuse(409, { error: 'A match search is already running. It takes about a minute.' });
+    ({ rows: [run] } = await db.query('INSERT INTO match_runs (job_id, employer_id) VALUES ($1, $2) RETURNING id', [job.id, req.user.id]));
+    await db.query('COMMIT');
+  } catch (err) {
+    await db.query('ROLLBACK').catch(() => {});
+    throw err;
+  } finally {
+    db.release();
+  }
+
+  res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache, no-transform', 'x-accel-buffering': 'no' });
+  const send = (event) => { if (!res.writableEnded) res.write(`data: ${JSON.stringify(event)}\n\n`); };
+  send({ type: 'start', run_id: run.id });
+  const steps = [];
+  liveRuns++;
+  try {
+    const result = await runMatchAgent({
+      job: { ...job, pay: payText(job) },
+      tools: matchTools(req.user.id),
+      model: app.locals.matchModel,
+      onStep: (step) => {
+        const saved = { ...step, at: new Date().toISOString() };
+        steps.push(saved);
+        send(saved);
+        q('UPDATE match_runs SET steps = $2 WHERE id = $1', [run.id, JSON.stringify(steps)]).catch((err) => console.error(err));
+      },
+    });
+    const { rows: [done] } = await q(
+      `UPDATE match_runs SET status = 'done', steps = $2, shortlist = $3, summary = $4, input_tokens = $5, output_tokens = $6, finished_at = now()
+       WHERE id = $1 RETURNING *`,
+      [run.id, JSON.stringify(steps), JSON.stringify(result.shortlist), result.summary, result.usage.input_tokens, result.usage.output_tokens]);
+    send({ type: 'result', run: await matchRunView(req.user.id, done, job), budget: payText(job), usage: await matchUsage(pool, req.user.id) });
+  } catch (err) {
+    console.error(err);
+    await q("UPDATE match_runs SET status = 'failed', steps = $2, error = $3, finished_at = now() WHERE id = $1",
+      [run.id, JSON.stringify(steps), 'The AI matcher ran into a problem']).catch((e) => console.error(e));
+    send({ type: 'error', error: 'The AI matcher ran into a problem, and this search wasn’t counted. Please try again.' });
+  } finally {
+    liveRuns--;
+    res.end();
+  }
 });
 
 // --- Hiring analytics (Premium) ---

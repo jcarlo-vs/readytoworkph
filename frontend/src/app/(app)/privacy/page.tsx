@@ -1,7 +1,7 @@
 import type { Metadata } from 'next';
 import { LegalPage, Section, Mail, OPERATOR } from '@/components/Legal';
 
-export const metadata: Metadata = { title: 'Privacy Policy | ReadyToWork.ph' };
+export const metadata: Metadata = { title: 'Privacy Policy' };
 
 export default function PrivacyPage() {
   return (
