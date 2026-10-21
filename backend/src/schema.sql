@@ -242,3 +242,23 @@ CREATE TABLE IF NOT EXISTS blocked_emails (
   email_hash text PRIMARY KEY,
   created_at timestamptz NOT NULL DEFAULT now()
 );
+
+-- "Find matches" AI agent runs, one per click: what it did (steps) and who it shortlisted, kept so the
+-- employer sees the latest list when they come back. Names and details are shown live from the profiles.
+-- Runs still 'running' after a few minutes were interrupted (tab closed, server restart) and don't count.
+CREATE TABLE IF NOT EXISTS match_runs (
+  id            serial PRIMARY KEY,
+  job_id        int NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+  employer_id   int NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  status        text NOT NULL DEFAULT 'running' CHECK (status IN ('running', 'done', 'failed')),
+  steps         jsonb NOT NULL DEFAULT '[]',
+  shortlist     jsonb,
+  summary       text,
+  error         text,
+  input_tokens  int NOT NULL DEFAULT 0,
+  output_tokens int NOT NULL DEFAULT 0,
+  created_at    timestamptz NOT NULL DEFAULT now(),
+  finished_at   timestamptz
+);
+CREATE INDEX IF NOT EXISTS match_runs_job ON match_runs (job_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS match_runs_employer ON match_runs (employer_id, created_at);

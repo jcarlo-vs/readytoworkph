@@ -2,7 +2,7 @@ import type { Metadata } from 'next';
 import Link from 'next/link';
 import { LegalPage, Section, Mail, OPERATOR } from '@/components/Legal';
 
-export const metadata: Metadata = { title: 'Terms of Service | ReadyToWork.ph' };
+export const metadata: Metadata = { title: 'Terms of Service' };
 
 export default function TermsPage() {
   return (

@@ -2,7 +2,7 @@ import type { Metadata } from 'next';
 import Link from 'next/link';
 import { LegalPage, Section, Mail } from '@/components/Legal';
 
-export const metadata: Metadata = { title: 'Refund Policy | ReadyToWork.ph' };
+export const metadata: Metadata = { title: 'Refund Policy' };
 
 export default function RefundsPage() {
   return (

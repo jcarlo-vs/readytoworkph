@@ -3,7 +3,7 @@ import Link from 'next/link';
 import { StatusPage } from '@/components/StatusPage';
 import { button, buttonGhost } from '@/components/styles';
 
-export const metadata: Metadata = { title: 'Page not found | ReadyToWork.ph' };
+export const metadata: Metadata = { title: 'Page not found' };
 
 export default function NotFound() {
   return (
