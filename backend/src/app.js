@@ -1679,6 +1679,8 @@ app.post('/api/jobs/:id/matches', requireAuth('employer'), throttle(20, 60 * 60_
   const send = (event) => { if (!res.writableEnded) res.write(`data: ${JSON.stringify(event)}\n\n`); };
   send({ type: 'start', run_id: run.id });
   const steps = [];
+  // Step saves run one after another and finish before the final save, so a late one can't overwrite it.
+  let saving = Promise.resolve();
   liveRuns++;
   try {
     const result = await runMatchAgent({
@@ -1689,9 +1691,11 @@ app.post('/api/jobs/:id/matches', requireAuth('employer'), throttle(20, 60 * 60_
         const saved = { ...step, at: new Date().toISOString() };
         steps.push(saved);
         send(saved);
-        q('UPDATE match_runs SET steps = $2 WHERE id = $1', [run.id, JSON.stringify(steps)]).catch((err) => console.error(err));
+        const json = JSON.stringify(steps);
+        saving = saving.then(() => q('UPDATE match_runs SET steps = $2 WHERE id = $1', [run.id, json])).catch((err) => console.error(err));
       },
     });
+    await saving;
     const { rows: [done] } = await q(
       `UPDATE match_runs SET status = 'done', steps = $2, shortlist = $3, summary = $4, input_tokens = $5, output_tokens = $6, finished_at = now()
        WHERE id = $1 RETURNING *`,
@@ -1699,6 +1703,7 @@ app.post('/api/jobs/:id/matches', requireAuth('employer'), throttle(20, 60 * 60_
     send({ type: 'result', run: await matchRunView(req.user.id, done, job), budget: payText(job), usage: await matchUsage(pool, req.user.id) });
   } catch (err) {
     console.error(err);
+    await saving;
     await q("UPDATE match_runs SET status = 'failed', steps = $2, error = $3, finished_at = now() WHERE id = $1",
       [run.id, JSON.stringify(steps), 'Smart Matching ran into a problem']).catch((e) => console.error(e));
     send({ type: 'error', error: 'Smart Matching ran into a problem, and this search wasn’t counted. Please try again.' });
