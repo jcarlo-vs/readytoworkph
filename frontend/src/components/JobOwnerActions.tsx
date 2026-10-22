@@ -6,13 +6,14 @@ import { useModal } from '@/components/useModal';
 import { api, type Job } from '@/lib/api';
 import { ErrorText } from '@/components/ui';
 
-const icon = { viewBox: '0 0 24 24', className: 'h-4 w-4', fill: 'none', stroke: 'currentColor', strokeWidth: 2, strokeLinecap: 'round', strokeLinejoin: 'round', 'aria-hidden': true } as const;
-const action = 'inline-flex h-10 items-center gap-2 rounded-lg border px-4 text-sm font-semibold shadow-sm transition focus-visible:outline-none focus-visible:ring-2 disabled:opacity-50';
+const icon = { viewBox: '0 0 24 24', className: 'h-3.5 w-3.5 shrink-0', fill: 'none', stroke: 'currentColor', strokeWidth: 2, strokeLinecap: 'round', strokeLinejoin: 'round', 'aria-hidden': true } as const;
+const action = 'inline-flex h-8 items-center gap-1.5 rounded-full border px-3 text-xs font-semibold transition focus-visible:outline-none focus-visible:ring-2 disabled:opacity-50';
 const LOCK = <svg {...icon}><rect x="5" y="11" width="14" height="10" rx="2" /><path d="M8 11V7a4 4 0 0 1 8 0v4" /></svg>;
 
 const modalClass = 'mx-auto mt-[12vh] w-[min(32rem,calc(100vw-2rem))] rounded-2xl p-0 shadow-2xl backdrop:bg-slate-950/60 backdrop:backdrop-blur-sm';
 
-// Edit / Close (or Reopen) / Delete for the employer who posted the job. Closing and deleting ask first.
+// The owner's bar on their job post: whether it's taking applications, then Edit, Close (or Reopen) and a
+// quiet Delete icon. Closing and deleting ask first.
 export function JobOwnerActions({ job, onChange }: { job: Job; onChange: () => void }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
@@ -34,8 +35,14 @@ export function JobOwnerActions({ job, onChange }: { job: Job; onChange: () => v
 
   return (
     <div className="space-y-2">
-      <div className="flex flex-wrap gap-2">
-        <Link href={`/jobs/${job.id}/edit`} className={`${action} border-slate-300 bg-white text-slate-700 hover:border-emerald-600 hover:text-emerald-800 focus-visible:ring-emerald-600/30`}>
+      <div className="flex flex-wrap items-center gap-2 rounded-2xl border border-slate-200 bg-white py-2 pl-4 pr-2">
+        <span className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">Your job post</span>
+        <span className={`inline-flex items-center gap-1.5 text-xs font-semibold ${job.closed_at ? 'text-slate-600' : 'text-emerald-800'}`}>
+          <span className={`h-2 w-2 rounded-full ${job.closed_at ? 'bg-slate-400' : 'bg-emerald-500'}`} aria-hidden="true" />
+          {job.closed_at ? 'Closed · not taking applications' : 'Open · taking applications'}
+        </span>
+        <span className="flex-1" />
+        <Link href={`/jobs/${job.id}/edit?from=post`} className={`${action} border-emerald-950 bg-emerald-950 text-white hover:bg-emerald-900 focus-visible:ring-emerald-600/30`}>
           <svg {...icon}><path d="M12 20h9M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z" /></svg>Edit job
         </Link>
         {job.closed_at ? (
@@ -45,13 +52,13 @@ export function JobOwnerActions({ job, onChange }: { job: Job; onChange: () => v
           </button>
         ) : (
           <button type="button" onClick={() => setConfirm('close')}
-            className={`${action} border-slate-300 bg-white text-slate-700 hover:border-amber-500 hover:bg-amber-50 hover:text-amber-900 focus-visible:ring-amber-500/40`}>
+            className={`${action} border-amber-300 bg-amber-50 text-amber-900 hover:border-amber-400 hover:bg-amber-100 focus-visible:ring-amber-500/40`}>
             {LOCK}Close job
           </button>
         )}
-        <button type="button" onClick={() => setConfirm('delete')}
-          className={`${action} border-red-200 bg-white text-red-600 hover:border-red-400 hover:bg-red-50 focus-visible:ring-red-500/30`}>
-          <svg {...icon}><path d="M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3" /></svg>Delete
+        <button type="button" onClick={() => setConfirm('delete')} aria-label="Delete job" title="Delete job"
+          className={`${action} w-8 shrink-0 justify-center border-red-200 bg-white px-0 text-red-600 hover:border-red-400 hover:bg-red-50 focus-visible:ring-red-500/30`}>
+          <svg {...icon} className="h-4 w-4 shrink-0"><path d="M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3" /></svg>
         </button>
       </div>
       <ErrorText msg={error} />
@@ -77,7 +84,7 @@ function CloseJobDialog({ job, open, busy, onCancel, onConfirm }: { job: Job; op
         <ul className="space-y-1.5 rounded-xl bg-slate-50 p-4 text-sm text-slate-700">
           <li>• It stops accepting new applications</li>
           <li>• It&apos;s hidden from job search</li>
-          <li>• Your applicants, AI scores and messages stay. You can still review and message them</li>
+          <li>• Your applicants, Smart Scores and messages stay. You can still review and message them</li>
           <li>• You can reopen it anytime</li>
         </ul>
         <div className="flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
@@ -126,7 +133,7 @@ function DeleteJobDialog({ job, open, onClose, onCloseInstead }: { job: Job; ope
           <p className="font-semibold">This can&apos;t be undone. Deleting will:</p>
           <ul className="list-disc space-y-1 pl-5">
             <li>Remove the job post from your records for good</li>
-            <li>Delete every application, cover letter and AI score for it</li>
+            <li>Delete every application, cover letter and Smart Score for it</li>
             <li>Remove it from your past jobs, so you can&apos;t look back at who applied or who you hired</li>
           </ul>
           <p>Your messages with applicants are kept.</p>

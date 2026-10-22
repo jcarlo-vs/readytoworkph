@@ -7,3 +7,8 @@ export const buttonGhost = 'inline-flex items-center justify-center rounded-full
 export const card = 'rounded-2xl border border-emerald-950/5 bg-white p-6 shadow-[0_1px_0_rgba(2,44,34,0.04),0_10px_28px_-20px_rgba(2,44,34,0.3)]';
 // The dark-green band with a soft, lighter glow in the top corner.
 export const band = 'rounded-3xl bg-[radial-gradient(120%_140%_at_100%_0%,#065f46_0%,#022c22_58%)] text-white';
+// Tables (admin panel and employer pages): a soft card, small uppercase headings, light row lines.
+export const tableCard = `${card} overflow-hidden p-0`;
+export const th = 'whitespace-nowrap px-4 py-3 text-left text-[11px] font-semibold uppercase tracking-wide text-slate-500';
+export const td = 'px-4 py-3';
+export const theadRow = 'border-b border-slate-200 text-left text-[11px] uppercase tracking-wide text-slate-500';

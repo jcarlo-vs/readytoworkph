@@ -58,6 +58,9 @@ ALTER TABLE worker_profiles ADD COLUMN IF NOT EXISTS resume_name text;
 ALTER TABLE worker_profiles ADD COLUMN IF NOT EXISTS resume_uploaded_at timestamptz;
 -- Text extracted from the resume at upload ('' when it's a scanned image), read by the AI analyzer.
 ALTER TABLE worker_profiles ADD COLUMN IF NOT EXISTS resume_text text;
+-- Shown to employers as an age (never the date) and a gender; workers fill them in on their profile.
+ALTER TABLE worker_profiles ADD COLUMN IF NOT EXISTS birth_date date;
+ALTER TABLE worker_profiles ADD COLUMN IF NOT EXISTS gender text;
 ALTER TABLE applications ADD COLUMN IF NOT EXISTS resume_attached boolean NOT NULL DEFAULT false;
 ALTER TABLE applications DROP COLUMN IF EXISTS resume_key;
 ALTER TABLE applications DROP COLUMN IF EXISTS resume_name;
@@ -100,6 +103,9 @@ ALTER TABLE jobs ADD COLUMN IF NOT EXISTS salary_period text NOT NULL DEFAULT 'm
 -- Editing and closing job posts. Closed jobs keep their applicants but leave search and stop taking applications.
 ALTER TABLE jobs ADD COLUMN IF NOT EXISTS updated_at timestamptz;
 ALTER TABLE jobs ADD COLUMN IF NOT EXISTS closed_at timestamptz;
+-- When the employer last opened this job's applicants: later applications show in the 🔔 as new.
+-- Existing jobs start at the time this column is added, so old applicants don't all show as new.
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS applicants_seen_at timestamptz NOT NULL DEFAULT now();
 
 -- Plans: free, pro, premium. plan_changed_at is stamped by a trigger whenever the plan changes
 -- (upgrades are switched on by hand for now), so the pricing page can show real upgrade counts.
@@ -262,3 +268,20 @@ CREATE TABLE IF NOT EXISTS match_runs (
 );
 CREATE INDEX IF NOT EXISTS match_runs_job ON match_runs (job_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS match_runs_employer ON match_runs (employer_id, created_at);
+
+-- Website visits (Admin › Visitors): one row per page view, sent by the site itself, so bots that don't run
+-- JavaScript stay out. IP and country identify visitors; rows older than 90 days are deleted.
+CREATE TABLE IF NOT EXISTS page_views (
+  id         bigserial PRIMARY KEY,
+  at         timestamptz NOT NULL DEFAULT now(),
+  ip         text NOT NULL,
+  country    text,
+  path       text NOT NULL,
+  referrer   text,
+  user_id    int REFERENCES users(id) ON DELETE SET NULL,
+  user_agent text
+);
+CREATE INDEX IF NOT EXISTS page_views_at ON page_views (at DESC);
+
+-- Optional: the employer's own cap on applications for a job (empty = the site-wide most). The job closes when reached.
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS max_applications int CHECK (max_applications BETWEEN 1 AND 5000);

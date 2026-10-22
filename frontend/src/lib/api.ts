@@ -10,18 +10,21 @@ export type Job = {
   id: number; employer_id: number; employer_name: string; title: string; description: string;
   skills: string[]; job_type: string; salary_period: SalaryPeriod;
   salary_min: number | string | null; salary_max: number | string | null; created_at: string;
-  updated_at: string | null; closed_at: string | null; // amounts arrive as strings (Postgres numeric)
+  updated_at: string | null; closed_at: string | null; max_applications?: number | null; // amounts arrive as strings (Postgres numeric)
 };
 export type Worker = {
   id: number; name: string; title: string; bio: string; skills: string[];
   hourly_rate: string | null; availability: string; portfolio_url: string | null; linkedin_url: string | null;
   limited?: true; // shown to a Free employer who can't contact this worker yet: "Maria S.", no links
+  name_hidden?: boolean; // limited and shown as "Maria S." (the admin can let Free employers see full names)
+  age: number | null; gender: string | null; birth_date?: string | null; // birth date only on your own profile
   deactivated?: boolean; // paused account
   member_since?: string; last_seen_at?: string | null; saved?: boolean; hired_at?: string | null;
   // Bento profile (all optional; labels in lib/profile.ts)
   skill_years: Record<string, number>; location: string; work_hours: string | null; hours_per_week: number | null;
   start_when: string | null; english: string | null; languages: string; internet_mbps: number | null; setup: string[];
   show_resume: boolean; has_resume: boolean;
+  email_verified?: boolean; has_photo?: boolean; has_links?: boolean; // trust checks on the profile page
 };
 
 export type Credits = { daily: number; used: number; remaining: number; resets_at: string };
@@ -165,12 +168,14 @@ export function useApi<T>(path: string | null, refreshMs?: number, initial?: T) 
 
 export type Conversation = {
   user_id: number; name: string; role: User['role']; last_body: string; last_at: string; last_from_me: boolean; unread: number;
-  deleted?: boolean; deactivated?: boolean;
+  deleted?: boolean; deactivated?: boolean; applied?: Applied[];
 };
+// Employer view of Messages: the employer's jobs this worker applied to, newest first.
+export type Applied = { application_id: number; job_id: number; title: string; created_at: string; credits: number; score: number | null; hired: boolean; messaged: boolean; recent: boolean };
 export type Message = {
   id: number; sender_id: number; body: string; created_at: string; read_at: string | null; job_id: number | null; job_title: string | null;
 };
-export type Thread = { user: Pick<User, 'id' | 'name' | 'role'> & { status?: 'deleted' | 'deactivated' | 'suspended' | null }; can_send: boolean; messages: Message[] };
+export type Thread = { user: Pick<User, 'id' | 'name' | 'role'> & { status?: 'deleted' | 'deactivated' | 'suspended' | null; title?: string | null; hourly_rate?: string | null }; can_send: boolean; messages: Message[]; applied?: Applied[] };
 
 export type SalaryPeriod = 'hour' | 'month' | 'year' | 'fixed';
 export const PAY_PERIODS: { value: SalaryPeriod; label: string }[] = [

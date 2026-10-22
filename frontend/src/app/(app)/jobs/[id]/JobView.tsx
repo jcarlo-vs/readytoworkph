@@ -1,9 +1,9 @@
 'use client';
 import Link from 'next/link';
 import { useParams, useSearchParams } from 'next/navigation';
-import { useApi, salary, interest, type Job } from '@/lib/api';
+import { useApi, salary, type Job } from '@/lib/api';
 import { useAuth } from '@/lib/auth';
-import { Skills, ErrorText, LoadError, Initials, BackButton, TimeAgo, button, card } from '@/components/ui';
+import { Skills, ErrorText, LoadError, Initials, BackButton, TimeAgo, ScoreDonut, button, card, scoreBand } from '@/components/ui';
 import { postDate } from '@/lib/time';
 import { MembersOnlyText } from '@/components/Talent';
 import { ApplyPanel } from '@/components/ApplyPanel';
@@ -22,7 +22,6 @@ type ApplicantPreview = {
 };
 
 const PREVIEW = 3;
-const scoreTone = (s: number) => (s >= 85 ? 'bg-emerald-100 text-emerald-800' : s >= 65 ? 'bg-emerald-50 text-emerald-700' : s >= 40 ? 'bg-amber-100 text-amber-800' : 'bg-red-50 text-red-700');
 
 // What the job's owner sees in the sidebar: a ranked preview of who applied, with a clear way into the full list.
 function OwnerApplicants({ jobId }: { jobId: number }) {
@@ -53,12 +52,15 @@ function OwnerApplicants({ jobId }: { jobId: number }) {
                 <Link href={`${all}#applicant-${a.id}`} className="flex items-center gap-3 px-3 py-3 transition hover:bg-slate-50">
                   <Initials name={a.name} id={a.worker_id} size="h-10 w-10 text-sm" />
                   <span className="min-w-0 flex-1">
-                    <span className="block truncate text-sm font-semibold text-slate-900">{a.name}</span>
+                    <span className="flex items-center gap-1.5">
+                      <span className="truncate text-sm font-semibold text-slate-900">{a.name}</span>
+                      <span className="shrink-0 text-[10px] font-semibold text-amber-800" title={`${a.credits} credits bid`}>⚡{a.credits}</span>
+                    </span>
                     <span className="block truncate text-xs text-slate-500">{a.title || 'No title'} · <TimeAgo date={a.created_at} /></span>
                   </span>
-                  <span className="flex shrink-0 flex-col items-end gap-1">
-                    <span className={`rounded-full px-2 py-0.5 text-[11px] font-semibold ${interest(a.credits).className}`}>⚡ {a.credits}</span>
-                    {a.analysis && <span className={`rounded-full px-2 py-0.5 text-[11px] font-bold ${scoreTone(a.analysis.score)}`}>AI {a.analysis.score}</span>}
+                  <span className="flex w-16 shrink-0 flex-col items-center gap-0.5">
+                    <ScoreDonut score={a.analysis?.score ?? null} size={36} />
+                    <span className={`whitespace-nowrap text-[10px] font-semibold ${a.analysis ? scoreBand(a.analysis.score).text : 'text-slate-400'}`}>{a.analysis ? scoreBand(a.analysis.score).label : 'Not scored'}</span>
                   </span>
                 </Link>
               </li>
@@ -71,7 +73,7 @@ function OwnerApplicants({ jobId }: { jobId: number }) {
         {data!.total > PREVIEW ? `View all ${data!.total} applicants` : apps.length ? 'Review applicants' : 'Open applicants page'}
         <svg viewBox="0 0 20 20" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M8 5l5 5-5 5" /></svg>
       </Link>
-      {apps.length > 0 && <p className="text-center text-xs text-slate-500">Message applicants and get their AI fit scores.</p>}
+      {apps.length > 0 && <p className="text-center text-xs text-slate-500">Message applicants and get their Smart Scores.</p>}
     </div>
   );
 }
@@ -84,16 +86,18 @@ export function JobView({ initial }: { initial: Job }) {
   const { data: job, error, status, reload } = useApi<Job>(`/jobs/${id}`, undefined, initial);
 
   // Opened from search results: go back to that same search (re-encoded, so it can only ever be a /jobs search).
-  const fromSearch = useSearchParams().get('back');
+  const params = useSearchParams();
+  const fromSearch = params.get('back');
+  const fromApplicants = params.get('from') === 'applicants'; // the owner came from this job's applicants page
   const back = fromSearch ? new URLSearchParams(fromSearch).toString() : '';
   if (error && !job) return <LoadError msg={error} status={status} onRetry={reload} />;
   if (!job) return <p className="text-slate-500">Loading…</p>;
 
   return (
     <div className="space-y-6">
-      <div className="flex flex-wrap items-center justify-between gap-3">
+      <div className="space-y-3">
         {user?.id === job.employer_id
-          ? <BackButton href="/dashboard">My Jobs</BackButton>
+          ? fromApplicants ? <BackButton href={`/dashboard/jobs/${job.id}`}>Applicants</BackButton> : <BackButton href="/dashboard/jobs">My Job Posts</BackButton>
           : back ? <BackButton href={`/jobs?${back}`}>Back to results</BackButton> : <BackButton href="/jobs">All jobs</BackButton>}
         {user?.id === job.employer_id && <JobOwnerActions job={job} onChange={reload} />}
       </div>

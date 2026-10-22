@@ -55,7 +55,7 @@ export default function AnalyticsPage() {
 function Teaser() {
   return (
     <div className="space-y-6">
-      <BackButton href="/dashboard">My Jobs</BackButton>
+      <BackButton href="/dashboard">Dashboard</BackButton>
       <div className={`${card} mx-auto max-w-xl space-y-4 p-10 text-center`}>
         <span className="mx-auto flex h-14 w-14 items-center justify-center rounded-2xl bg-emerald-950 text-amber-300" aria-hidden="true">
           <svg viewBox="0 0 24 24" className="h-7 w-7" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M4 20V10M10 20V4M16 20v-7M22 20H2" /></svg>
@@ -184,7 +184,7 @@ function Dashboard() {
 
   return (
     <div className="space-y-6">
-      <BackButton href="/dashboard">My Jobs</BackButton>
+      <BackButton href="/dashboard">Dashboard</BackButton>
       <PageBand eyebrow="Premium" title="Hiring analytics" sub={<>{selected ? selected.title : 'All jobs'} · last {period}{loading && ' · updating…'}</>}
         actions={<>
           <div className="inline-flex rounded-full bg-white/10 p-1 text-sm ring-1 ring-white/10" role="group" aria-label="Time period">
@@ -212,7 +212,7 @@ function Dashboard() {
         <div className={`space-y-6 transition-opacity ${loading ? 'opacity-60' : ''}`}>
           <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
             <Tile label="Applicants" value={t.applicants} hint={t.applicants_prev ? <><Delta now={t.applicants} before={t.applicants_prev} /> vs previous {period}</> : <Delta now={null} before={null} />} />
-            <Tile label="Avg fit score" value={t.avg_score ?? '-'} hint={<><Delta now={t.avg_score} before={t.avg_score_prev} unit=" pts" /> · {t.scored} scored</>} />
+            <Tile label="Avg Smart Score" value={t.avg_score ?? '-'} hint={<><Delta now={t.avg_score} before={t.avg_score_prev} unit=" pts" /> · {t.scored} scored</>} />
             <Tile label="Reply rate" value={t.messaged ? `${pct(t.replied, t.messaged)}%` : '-'}
               hint={t.messaged ? <><Delta now={pct(t.replied, t.messaged)} before={t.messaged_prev ? pct(t.replied_prev, t.messaged_prev) : null} unit=" pts" /> · {t.replied} of {t.messaged} replied</> : 'Message applicants to see this'} />
             <Tile label="First applicant" value={hours(t.first_applicant_hours)} hint={selected ? 'after you posted this job' : 'median time after posting'} />
@@ -255,10 +255,10 @@ function Dashboard() {
           <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(0,2fr)]">
             <section className={`${card} space-y-4 p-5`}>
               <div className="flex items-baseline justify-between gap-2">
-                <h2 className="font-semibold">Fit score mix</h2>
+                <h2 className="font-semibold">Smart Score mix</h2>
                 <span className="text-xs text-slate-500">{mixTotal} scored</span>
               </div>
-              {mixTotal === 0 ? <p className="text-sm text-slate-500">No fit scores in this period yet.</p> : (
+              {mixTotal === 0 ? <p className="text-sm text-slate-500">No Smart Scores in this period yet.</p> : (
                 <ul className="space-y-2.5">
                   {BANDS.map((b) => (
                     <li key={b.key} className="grid grid-cols-[6.5rem_minmax(0,1fr)_2rem] items-center gap-3 text-sm">
@@ -286,7 +286,7 @@ function Dashboard() {
                         <Link href={`/dashboard/jobs/${c.job_id}#applicant-${c.id}`} className="block truncate font-semibold text-slate-900 hover:text-emerald-800">{c.name}</Link>
                         <span className="block truncate text-xs text-slate-500">{c.title}{c.credits > 0 && <> · ⚡ {c.credits} credit{c.credits === 1 ? '' : 's'}</>}</span>
                       </span>
-                      <span className={`rounded-lg px-2 py-1 font-display text-sm font-bold tabular-nums ${scoreTone(c.score)}`} title="AI fit score">{c.score}</span>
+                      <span className={`rounded-lg px-2 py-1 font-display text-sm font-bold tabular-nums ${scoreTone(c.score)}`} title="Smart Score">{c.score}</span>
                       <Link href={`/messages?with=${c.worker_id}&job=${c.job_id}`} className={`${buttonGhost} px-3 py-1.5 text-xs`}>Message</Link>
                     </li>
                   ))}

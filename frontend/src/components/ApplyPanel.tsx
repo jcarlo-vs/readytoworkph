@@ -244,7 +244,7 @@ export function ApplyPanel({ jobId, closed }: { jobId: number; closed: boolean }
         </div>
       ) : (
         <div className="flex items-center gap-3 rounded-xl border border-dashed border-slate-300 p-3 text-xs text-slate-500">
-          <span className="flex-1">Add one to stand out. It also makes the employer&apos;s AI score more accurate. PDF, max 5 MB.</span>
+          <span className="flex-1">Add one to stand out. It also makes the employer&apos;s Smart Score more accurate. PDF, max 5 MB.</span>
           {resumePicker('Upload resume', 'shrink-0 rounded-lg border border-emerald-700 bg-white px-2.5 py-1 font-semibold text-emerald-800 hover:bg-emerald-50')}
         </div>
       )}

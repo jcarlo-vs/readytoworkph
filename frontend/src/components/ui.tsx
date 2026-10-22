@@ -2,6 +2,7 @@
 import { FeedbackDialog, openFeedback } from '@/components/Feedback';
 import Link from 'next/link';
 import { band, button, buttonGold, buttonGhost, card } from './styles';
+import { interest } from '@/lib/api';
 import { StatusPage } from './StatusPage';
 export { band, button, buttonGold, buttonGhost, card };
 
@@ -26,10 +27,58 @@ export function PageBand({ eyebrow, title, sub, actions, children }: {
 }
 
 // A number tile inside the band. Gold for the one number that matters most on the page.
-export function BandStat({ label, value, hint, href, gold = false }: { label: string; value: React.ReactNode; hint?: string; href?: string; gold?: boolean }) {
+// What Smart Score and Smart Matching are, in one place, for the ⓘ labels on dashboards and pricing.
+export const SMART_SCORE_INFO = 'Our AI reads an applicant’s cover letter, profile and resume against your job post, then gives a score from 0 to 100 with their strengths and concerns. A guide to help you review, not a decision.';
+export const CREDITS_INFO = 'Shows how much a worker wants this job. Workers get 60 free Credits a day and choose how many to spend on each job they apply to, so more Credits means more interest. Applicants with the most Credits are listed first.';
+
+// An applicant's Credits for employers: a small "⚡ 5 credits" pill plus how keen that is, coloured by interest().
+export function Interest({ credits }: { credits: number }) {
+  const i = interest(credits);
+  return (
+    <span className="inline-flex flex-col items-start gap-0.5">
+      <span className={`whitespace-nowrap rounded-full px-1.5 py-px text-[10px] font-semibold tabular-nums ${i.className}`}>⚡ {credits} credit{credits === 1 ? '' : 's'}</span>
+      <span className="whitespace-nowrap text-[10px] text-slate-500">{i.label}</span>
+    </span>
+  );
+}
+// Score bands: the colours also differ in lightness, and the band's name is always written next to them.
+export const scoreBand = (score: number) =>
+  score >= 85 ? { label: 'Strong fit', stroke: '#047857', text: 'text-emerald-800', bg: 'bg-emerald-50' }
+  : score >= 65 ? { label: 'Good fit', stroke: '#14b8a6', text: 'text-teal-700', bg: 'bg-teal-50/70' }
+  : score >= 40 ? { label: 'Partial fit', stroke: '#f59e0b', text: 'text-amber-800', bg: 'bg-amber-50' }
+  : { label: 'Poor fit', stroke: '#dc2626', text: 'text-red-800', bg: 'bg-red-50' };
+
+// The Smart Score as a donut: the ring fills to the score, coloured by its band, the number in the middle.
+// No score yet (null): an empty grey ring with a dash, so rows still line up.
+export function ScoreDonut({ score, size = 40 }: { score: number | null; size?: number }) {
+  const b = score === null ? null : scoreBand(score);
+  return (
+    <svg viewBox="0 0 36 36" width={size} height={size} role="img" aria-label={b ? `Smart Score ${score} out of 100, ${b.label}` : 'Not scored yet'} className="shrink-0">
+      <circle cx="18" cy="18" r="15" fill="none" stroke="#e2e8f0" strokeWidth="4" />
+      {b && <circle cx="18" cy="18" r="15" fill="none" stroke={b.stroke} strokeWidth="4" strokeLinecap="round" strokeDasharray={`${(score! / 100) * 94.25} 94.25`} transform="rotate(-90 18 18)" />}
+      <text x="18" y="22.5" textAnchor="middle" fontSize="11" fontWeight="700" fill={b ? '#0f172a' : '#94a3b8'}>{b ? score : '–'}</text>
+    </svg>
+  );
+}
+
+export const SMART_MATCH_INFO = 'Our AI searches every worker on ReadyToWork.ph for your job, reads the most promising profiles and shortlists up to 10 people, best first, each with a reason. Age, gender, name and photo are never used.';
+
+// A small ⓘ that shows a short explanation on hover, tap or keyboard focus. A span, not a button, so it can
+// sit inside a link (a click on it doesn't follow the link).
+export function InfoTip({ text, label = 'What is this?', light = false }: { text: string; label?: string; light?: boolean }) {
+  return (
+    <span tabIndex={0} role="note" aria-label={`${label} ${text}`} onClick={(e) => e.preventDefault()}
+      className={`group relative inline-grid h-4 w-4 shrink-0 cursor-help place-items-center rounded-full align-middle font-sans text-[10px] font-bold normal-case tracking-normal outline-none ring-1 focus-visible:ring-2 ${light ? 'text-emerald-100 ring-white/40' : 'text-slate-500 ring-slate-300'}`}>
+      i
+      <span aria-hidden="true" className="invisible absolute bottom-full left-1/2 z-30 mb-2 w-64 -translate-x-1/2 whitespace-normal rounded-xl bg-slate-900 p-3 text-left text-xs font-normal leading-relaxed text-white opacity-0 shadow-xl transition group-hover:visible group-hover:opacity-100 group-focus:visible group-focus:opacity-100">{text}</span>
+    </span>
+  );
+}
+
+export function BandStat({ label, value, hint, href, gold = false, info }: { label: string; value: React.ReactNode; hint?: string; href?: string; gold?: boolean; info?: string }) {
   const body = (
     <>
-      <p className="text-[11px] font-semibold uppercase tracking-wide text-emerald-200/80">{label}</p>
+      <p className="flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wide text-emerald-200/80">{label}{info && <InfoTip text={info} label={label} light />}</p>
       <p className={`mt-1 font-display text-3xl font-bold tabular-nums ${gold ? 'text-amber-400' : 'text-white'}`}>{value}</p>
       {hint && <p className="mt-0.5 text-xs text-emerald-100/70">{hint}</p>}
     </>
@@ -79,9 +128,9 @@ export function Skills({ skills }: { skills: string[] }) {
 export function BackButton({ href, children }: { href: string; children: React.ReactNode }) {
   return (
     <Link href={href}
-      className="group inline-flex items-center gap-1.5 rounded-full border border-slate-200 bg-white py-2 pl-2.5 pr-4 text-sm font-medium text-slate-700 shadow-sm transition hover:border-emerald-600 hover:text-emerald-800 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-600/30">
-      <span className="flex h-6 w-6 items-center justify-center rounded-full bg-slate-100 transition group-hover:-translate-x-0.5 group-hover:bg-emerald-50">
-        <svg viewBox="0 0 20 20" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      className="group inline-flex items-center gap-1 rounded-full border border-slate-200 bg-white py-1 pl-1 pr-3 text-xs font-medium text-slate-700 shadow-sm transition hover:border-emerald-600 hover:text-emerald-800 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-600/30">
+      <span className="flex h-5 w-5 items-center justify-center rounded-full bg-slate-100 transition group-hover:-translate-x-0.5 group-hover:bg-emerald-50">
+        <svg viewBox="0 0 20 20" className="h-3.5 w-3.5" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
           <path d="M12 5l-5 5 5 5" />
         </svg>
       </span>
@@ -166,7 +215,7 @@ export function Logo({ light = false }: { light?: boolean }) {
 }
 
 // Avatar button that opens a small account menu: workers get My Profile and My Applications; employers get
-// My Jobs, Hiring analytics and Plan & billing (where their plan card, switching and Paddle's billing page live).
+// Dashboard, Hiring analytics and Plan & billing (where their plan card, switching and Paddle's billing page live).
 function ProfileMenu({ user, onSignOut }: { user: User; onSignOut: () => void }) {
   const [open, setOpen] = useState(false);
   const root = useRef<HTMLDivElement>(null);
@@ -220,7 +269,7 @@ function ProfileMenu({ user, onSignOut }: { user: User; onSignOut: () => void })
             </Link>
           )}
           <Link href="/dashboard" onClick={close} className={item}>
-            <svg {...icon}><path d="M4 4h7v7H4zM13 4h7v4h-7zM13 10h7v10h-7zM4 13h7v7H4z" /></svg>{user.role === 'worker' ? 'My Applications' : 'My Jobs'}
+            <svg {...icon}><path d="M4 4h7v7H4zM13 4h7v4h-7zM13 10h7v10h-7zM4 13h7v7H4z" /></svg>{user.role === 'worker' ? 'My Applications' : 'Dashboard'}
           </Link>
           {user.role === 'employer' && (
             <>
@@ -280,14 +329,15 @@ export function ConfirmEmailBanner({ email }: { email: string }) {
 }
 
 // A one-time green notice carried across a redirect in sessionStorage (e.g. "Welcome back!").
-function Flash() {
+export function Flash() {
   const [text, setText] = useState('');
+  const path = usePathname(); // checked on every page change: the layout holding this stays mounted across pages
   useEffect(() => {
     try {
       const t = sessionStorage.getItem('flash');
-      if (t) { sessionStorage.removeItem('flash'); setText(t); } // eslint-disable-line react-hooks/set-state-in-effect -- read once after load
+      if (t) { sessionStorage.removeItem('flash'); setText(t); } // eslint-disable-line react-hooks/set-state-in-effect -- read once per page
     } catch { /* storage off */ }
-  }, []);
+  }, [path]);
   if (!text) return null;
   return (
     <div className="border-t border-emerald-200 bg-emerald-50 text-sm text-emerald-950" role="status">
@@ -298,6 +348,60 @@ function Flash() {
     </div>
   );
 }
+
+// Employers' 🔔: how many people applied since they last opened each job's applicants. Each job links
+// straight to its applicants (opening them clears it). Checks every 30 seconds and on every page change.
+type NewApplicants = { count: number; jobs: { id: number; title: string; count: number; latest: string }[] };
+export function ApplicantsBell() {
+  const path = usePathname();
+  const { data, reload } = useApi<NewApplicants>('/my/new-applicants', 30000);
+  const [open, setOpen] = useState(false);
+  const root = useRef<HTMLDivElement>(null);
+  useEffect(() => { reload(); }, [path]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => {
+    window.addEventListener('rp:applicants-seen', reload);
+    return () => window.removeEventListener('rp:applicants-seen', reload);
+  });
+  useEffect(() => {
+    if (!open) return;
+    const onPointer = (e: PointerEvent) => { if (!root.current?.contains(e.target as Node)) setOpen(false); };
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setOpen(false); };
+    document.addEventListener('pointerdown', onPointer);
+    document.addEventListener('keydown', onKey);
+    return () => { document.removeEventListener('pointerdown', onPointer); document.removeEventListener('keydown', onKey); };
+  }, [open]);
+  const count = data?.count ?? 0;
+  return (
+    <div ref={root} className="relative">
+      <button type="button" onClick={() => setOpen((o) => !o)} aria-expanded={open} aria-controls="applicants-bell"
+        aria-label={count ? `New applicants: ${count}` : 'New applicants'}
+        className="relative grid h-9 w-9 place-items-center rounded-lg text-slate-600 hover:bg-slate-50 hover:text-emerald-700">
+        <svg viewBox="0 0 24 24" className="h-5 w-5" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M6 8a6 6 0 1 1 12 0c0 7 3 9 3 9H3s3-2 3-9M10.3 21a1.94 1.94 0 0 0 3.4 0" /></svg>
+        {count > 0 && (
+          <span className="absolute -right-0.5 -top-0.5 min-w-[18px] rounded-full bg-amber-400 px-1 py-0.5 text-center text-[11px] font-bold leading-none text-slate-900">{count > 99 ? '99+' : count}</span>
+        )}
+      </button>
+      {open && (
+        <div id="applicants-bell" className="absolute right-0 z-30 mt-2 w-80 max-w-[calc(100vw-2rem)] rounded-xl border border-slate-200 bg-white p-1.5 shadow-xl shadow-slate-900/10">
+          <p className="px-3 pb-2 pt-2 text-xs font-semibold uppercase tracking-wide text-slate-500">New applicants</p>
+          {data?.jobs.length ? data.jobs.map((j) => (
+            <Link key={j.id} href={`/dashboard/jobs/${j.id}`} onClick={() => setOpen(false)} className="flex items-center gap-3 rounded-lg px-3 py-2.5 hover:bg-slate-100">
+              <span className="grid h-8 min-w-8 place-items-center rounded-full bg-amber-100 px-1.5 text-xs font-bold text-amber-900 tabular-nums">+{j.count}</span>
+              <span className="min-w-0 flex-1">
+                <span className="block truncate text-sm font-semibold text-slate-900">{j.title}</span>
+                <span className="block text-xs text-slate-500">{j.count === 1 ? '1 new applicant' : `${j.count} new applicants`} · <TimeAgo date={j.latest} /></span>
+              </span>
+            </Link>
+          )) : <p className="px-3 pb-3 text-sm text-slate-500">No new applicants. When someone applies to your jobs, you&apos;ll see it here.</p>}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// Signed-in employers get their own app layout (components/EmployerShell.tsx) everywhere but the home page.
+export const usesEmployerShell = (user: { role: string } | null, path: string) =>
+  user?.role === 'employer' && path !== '/' && !path.startsWith('/admin');
 
 export function Nav() {
   const { user, signOut } = useAuth();
@@ -315,12 +419,12 @@ export function Nav() {
         ? 'border border-emerald-950 bg-emerald-950 text-white shadow-sm [&>svg]:text-amber-400'
         : 'border border-emerald-200 bg-white text-emerald-900 shadow-sm hover:border-emerald-600 hover:bg-emerald-50 [&>svg]:text-emerald-600'}`;
   const icon = { viewBox: '0 0 24 24', className: 'h-4 w-4', fill: 'none', stroke: 'currentColor', strokeWidth: 2, strokeLinecap: 'round', strokeLinejoin: 'round', 'aria-hidden': true } as const;
-  if (path.startsWith('/admin')) return null; // the admin has its own menu and login
+  if (path.startsWith('/admin') || usesEmployerShell(user, path)) return null; // admin and employers have their own menus
   return (
     <header className="sticky top-0 z-20 border-b border-emerald-950/5 bg-[#f3f7f4]/90 backdrop-blur">
       <nav className="mx-auto flex max-w-6xl flex-wrap items-center gap-x-2.5 gap-y-2 px-4 py-3 text-sm">
         <div className="mr-auto"><Logo /></div>
-        {/* Workers and visitors see Find Jobs; Hire Talent and My Jobs are for signed-in employers (talent isn't public). */}
+        {/* Workers and visitors see Find Jobs; Hire Talent and Dashboard are for signed-in employers (talent isn't public). */}
         {user?.role !== 'employer' && (
           <Link href="/jobs" className={section('/jobs')} aria-current={path.startsWith('/jobs') ? 'page' : undefined}>
             <svg {...icon}><circle cx="11" cy="11" r="6" /><path d="m16 16 4 4" /></svg>
@@ -336,7 +440,7 @@ export function Nav() {
         {user?.role === 'employer' && (
           <Link href="/dashboard" className={section('/dashboard')} aria-current={path.startsWith('/dashboard') ? 'page' : undefined}>
             <svg {...icon}><path d="M4 8h16v11H4zM9 8V5h6v3M4 13h16" /></svg>
-            My Jobs
+            Dashboard
           </Link>
         )}
         <span aria-hidden="true" className="mx-1.5 hidden h-6 w-px bg-slate-200 sm:block" />
@@ -352,6 +456,7 @@ export function Nav() {
                 </span>
               )}
             </Link>
+            {user.role === 'employer' && <ApplicantsBell />}
             {user.role === 'employer' && <Link href="/jobs/new" className={buttonGold}>Post a Job</Link>}
             <ProfileMenu user={user} onSignOut={signOut} />
           </>
@@ -369,10 +474,16 @@ export function Nav() {
   );
 }
 
+const HIRE_BY_SKILL = [
+  ['Virtual assistants', 'virtual assistant'], ['Customer support', 'customer support'], ['Social media managers', 'social media'],
+  ['Graphic designers', 'graphic design'], ['Video editors', 'video editing'], ['Bookkeepers', 'bookkeeping'],
+  ['Web developers', 'developer'], ['Shopify experts', 'shopify'],
+];
+
 export function Footer() {
   const { user } = useAuth();
   const path = usePathname();
-  if (path.startsWith('/admin')) return null;
+  if (path.startsWith('/admin') || usesEmployerShell(user, path)) return null;
   const col = (title: string, links: [string, string][]) => (
     <div>
       <h3 className="mb-3 text-sm font-semibold text-white">{title}</h3>
@@ -384,7 +495,7 @@ export function Footer() {
   return (
     <footer className="mt-20 bg-emerald-950 text-emerald-100/70">
       <FeedbackDialog />
-      <div className="mx-auto grid max-w-6xl gap-10 px-4 py-14 sm:grid-cols-2 lg:grid-cols-4">
+      <div className={`mx-auto grid max-w-6xl gap-10 px-4 py-14 sm:grid-cols-2 ${user?.role === 'worker' ? 'lg:grid-cols-4' : 'lg:grid-cols-5'}`}>
         <div className="space-y-3">
           <Logo light />
           <p className="text-sm leading-relaxed">Remote jobs for Filipino professionals. Employers hire direct, with no agency markups, and workers always join free.</p>
@@ -399,6 +510,8 @@ export function Footer() {
           : user?.role === 'employer'
             ? [['Post a job', '/jobs/new'], ['Browse talent', '/workers'], ['My jobs', '/dashboard'], ['Plan & billing', '/pricing']]
             : [['Post a job', '/jobs/new'], ['Pricing', '/pricing'], ['Sign up as an employer', '/register?role=employer']])}
+        {/* Shortcuts into Hire Talent by role (workers don't need them). */}
+        {user?.role !== 'worker' && col('Hire by skill', HIRE_BY_SKILL.map(([label, q]) => [label, `/workers?q=${encodeURIComponent(q)}`]))}
         <div>
           {col('Help', [['Frequently asked questions', '/pricing#faq'], ['Contact us', '/contact']])}
           <button type="button" onClick={openFeedback} className="mt-2 text-sm hover:text-white">Send feedback</button>

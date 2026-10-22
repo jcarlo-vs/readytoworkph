@@ -27,6 +27,11 @@ export const SETUP: Option[] = [
   { value: 'own_computer', label: 'Own laptop or PC' },
   { value: 'headset', label: 'Headset with microphone' },
 ];
+export const GENDERS: Option[] = [
+  { value: 'female', label: 'Female' },
+  { value: 'male', label: 'Male' },
+  { value: 'unsaid', label: 'Prefer not to say' },
+];
 export const labelOf = (list: Option[], value: string | null | undefined) => list.find((o) => o.value === value)?.label ?? null;
 
 // Suggested skills, so most workers pick the same spelling (and show up in the same searches).

@@ -73,7 +73,7 @@ export default function WorkersPage() {
 
       <div className={`grid gap-6 ${saved ? '' : 'lg:grid-cols-[16rem_minmax(0,1fr)]'}`}>
         {!saved && (
-          <aside className={`${card} h-fit space-y-5 p-5`} aria-label="Filters">
+          <aside className={`${card} h-fit space-y-5 p-5 lg:sticky lg:top-20 lg:max-h-[calc(100vh-6rem)] lg:overflow-y-auto`} aria-label="Filters">
             <div className="flex items-baseline justify-between">
               <h2 className="font-semibold">Filters</h2>
               {filtered && <button type="button" onClick={() => router.replace('/workers', { scroll: false })} className="text-sm font-medium text-emerald-700 hover:underline">Clear all</button>}

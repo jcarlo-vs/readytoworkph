@@ -70,9 +70,46 @@ Features we decided to build, many inspired by looking through OnlineJobs.ph (em
 - [x] Worker privacy: Free employers see "Maria S.", no links, until they can contact the worker
 - [x] Contact details in worker bios/headlines hidden (blurred "upgrade to see", clickable)
 - [x] Hide contact details for the employer side too (job post text), see 3.
+- [x] **Smart Matching** (2026-10-21; AI fit scores renamed **Smart Score**; ⓘ labels on dashboards and pricing): an AI recruiter agent (`backend/src/matchAgent.js`, Claude tool use) searches all talent for a job (Claude Haiku 5.5, about $0.002–0.02 a run), reads profiles and CVs, shortlists up to 10 with reasons; steps stream live; runs saved per job. Pro 3 / Premium 30 a month; skills ~80%, availability ~10%, rate ~10% (above-budget tag, never a filter)
+  - [ ] Follow-up: move runs to a queue + worker when simultaneous runs reach the hundreds (today they run inside the request, max 20 per server)
+  - [ ] Follow-up: put Smart Matching back on a job's applicants page (hidden 2026-10-21 while the page was redesigned; the component and API are still there: `useMatchFinder` in `components/MatchFinder.tsx`)
+  - [ ] Follow-up (only if AI costs grow): prompt caching for the agent's system prompt and tools
+  - [ ] Follow-up: skim wider at scale: 40 cards per search, up to 3 pages, about 200 cards per run; "narrow instead of paging" in the prompt
+  - [ ] Follow-up: block same-job reruns until the job is edited or 7 days pass
+  - [ ] Follow-up (5,000–10,000 workers): Postgres full-text index and ranking for worker search (Hire Talent too)
+  - [ ] Follow-up (50,000+ workers): semantic search (pgvector) to pick the best 50 before the AI reads them
+- [x] Worker age & gender (2026-10-21): birth date + gender required on the profile form (18+); employers see the age only, never the date; the AI matcher never sees either
+- [x] Admin setting "Show full names on Free" (off by default: "Maria S."); "?" next to a short name opens the upgrade popup
+- [x] Footer "Hire by skill" links into Hire Talent (employers and visitors)
+  - [x] Worker dashboard checklist asks for them
+  - [ ] Follow-up: one-time email to existing workers who haven't added them (they can't save their profile until they do)
+  - [ ] Decide: show age/gender on Hire Talent cards too. **Never** add an age filter or age preference on jobs (RA 10911, Anti-Age Discrimination in Employment Act)
+- [x] Worker profile Rate tile: "about $X/month" (hours per week, or 40 for full-time, × 52 ÷ 12)
+- [x] Privacy Policy and Terms: birth date/gender, Smart Score and Smart Matching (AI) explained
+- [ ] Education level on profiles (High school, College level, Bachelor's, Master's), like OnlineJobs
+- [ ] Skill tests shown on profiles (English level test, typing speed; later a personality test like DISC): earned badges beat self-reported levels
 
 ## 2. Keep employers coming back
 
+- [x] 🔔 New applicants bell for employers (2026-10-21): count since they last opened each job's applicants, per-job list linking to that job's applicants; opening them clears it
+- [x] Employer app layout (2026-10-21): dark green side menu (Dashboard, Messages · Hiring: My Job Posts, Saved Workers, My Hires · Browse: Hire Talent, Job Board · Account: Analytics, Plan & Billing, Settings), slim top bar with 🔔 and Post a job (talent search removed 2026-10-21; Hire Talent has its own); smaller text
+  - [x] Dashboard: greeting, to-do tiles (new applicants, unread messages, open posts + posts used this month), open job posts
+  - [x] My Job Posts page (open/closed), My Hires page; tick applicants and message them all at once (one private chat each, up to 50) on a job's applicants page and on All applicants (every job, filters, linked from My Job Posts)
+  - [x] Job applicants page: click a row to open a right-side drawer (↑ ↓ to move, Esc to close) with Smart Score, cover letter, actions and "Bookmark this worker" (adds to Saved workers); All · Bookmarked filter
+  - [x] Every /dashboard page asks visitors to log in instead of showing an empty page
+  - [x] Messages (employers): each conversation shows the job the worker applied to ("Data Entry · +1 job"); a side panel lists every application to you (credits, Smart Score, New / Messaged / Hired), each opening that applicant
+  - [x] Messages: workers you reached out to first show "Hasn't applied · you reached out", and the side panel offers "Invite to apply" (sends one of your open jobs as a link)
+  - [ ] Follow-up: the Messages side panel shows on wide screens only; bring it to phones and laptops (e.g. an "Applications" button that opens it)
+  - [x] Each job takes at most 250 applications (Admin → Settings), then closes itself and can't be reopened; Pro now sees the first 100 applicants (was 150)
+  - [x] Post a job / Edit job is a 3-step wizard (The job · Type and pay · Applicants); step 3 asks "Up to how many applications do you want to receive?" (20 / 50 / 100 / as many as possible, or a number). The job closes itself at that number; raising it lets you reopen. Free/Pro see an amber note when the limit is above what their plan shows
+  - [x] Visible applicants are first come, first served (Free: the first 20 to apply, Pro: the first 100); Credits only set the order they're listed in
+  - [ ] Follow-up: show workers "Taking up to N applications" on the job post
+  - [x] Employers see Credits as an "Interest" column (⚡ 5 credits · Strong interest, with an ⓘ explaining it) on a job's applicants and All applicants; the drawer says "Spent 5 of 60 daily Credits on this job"
+  - [x] Hire Talent: sticky filters; search matches every word in title, bio or skills (whole words, any order, never the resume)
+  - [x] Worker profile (employer view): compact résumé layout, left card with rate and actions plus "Trust checks" (email verified, active this week, profile filled in, photo, resume, portfolio/LinkedIn)
+  - [ ] Follow-up: restyle Hire Talent, Messages, Analytics, Pricing and Settings pages for the new layout (they still use the big green band)
+  - [ ] Follow-up: phone menu as a ☰ drawer (today it's a scrollable strip)
+- [x] Admin › People › Visitors (2026-10-21): every page view (IP, country, page, signed-in user, device, referring site), visitors and views for 24h/7d/30d, top countries and pages; bots and admin pages skipped; kept 90 days (Privacy Policy updated)
 - [ ] Application emails to employers (daily summary by default; instant / off as options). Today employers get **no** email when someone applies
 - [ ] After-posting success screen: "Your job is live", copy link to share, posts left this month, tips
 - [ ] Job views count on job cards and analytics ("142 views · 12 applicants")
@@ -106,6 +143,7 @@ Features we decided to build, many inspired by looking through OnlineJobs.ph (em
 - [ ] Outreach caps: Pro 100 / Premium 500 workers a month an employer can message first (replies to applicants stay unlimited)
 - [ ] AI scam check on new job posts: clean posts go live instantly; suspicious ones go to an admin review queue
 - [ ] Worker reviews from employers (needs Mark as hired, done)
+- [ ] Time tracker for hired workers (like OnlineJobs Timeproof): decide later; big build (desktop app, screenshots, privacy)
 - [ ] Verified ID badge, **after go-live**: use a third-party identity check (ID + live selfie) instead of an admin eyeballing uploads; the bento profile gets the badge then
 
 ## 4. Profile & posting extras
@@ -145,6 +183,8 @@ Features we decided to build, many inspired by looking through OnlineJobs.ph (em
 - [ ] Hiring kit (Premium): contractor agreement, NDA, "Hiring in the Philippines" guide (13th-month pay, holidays)
   - [ ] Follow-up: have a lawyer glance at the templates; add "templates, not legal advice"
 - [ ] Category landing pages for search traffic (e.g. `/hire/bookkeepers`, `/hire/virtual-assistants`)
+  - [ ] Follow-up: point the footer's "Hire by skill" links at them (today they open Hire Talent, which Google doesn't index)
+- [ ] Success stories page ("Real results"): hires and employer reviews, with permission
 - [ ] Referral program (later: needs tracking and payouts; Paddle has no built-in affiliates)
 
 ## 7. Business & legal (outside the code)
@@ -155,6 +195,14 @@ Features we decided to build, many inspired by looking through OnlineJobs.ph (em
 - [x] Decide the name: **ReadyToWork.ph** (domain bought; see section R. Rebrand)
 
 ---
+
+## 8. Testing
+
+Today: API tests (`backend/test`), typecheck and lint in CI. Nothing clicks through the website itself.
+- [ ] Browser tests (Playwright) in CI for the main flows: sign up, post a job, apply, message, Free employer upgrade popup and short names, admin "Show full names" switch
+- [ ] Dev-only sign-in for local UI checks (localhost and `NODE_ENV=development` only, never in production) so changes can be looked at in the browser as any test account without typing passwords
+- [ ] AI matcher check set: a few fixed sample jobs and workers with the people who should come out on top; rerun when the prompt or model changes
+- [ ] Error alerts: get an email or Slack message when the API logs errors in production (Cloud Run log alert)
 
 ## Decided not to build (and why)
 

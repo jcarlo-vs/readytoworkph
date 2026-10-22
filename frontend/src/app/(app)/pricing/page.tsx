@@ -3,7 +3,7 @@ import Link from 'next/link';
 import { useEffect, useRef, useState } from 'react';
 import { api, useApi, type User } from '@/lib/api';
 import { useAuth } from '@/lib/auth';
-import { band, button, buttonGhost, buttonGold, FormAlert } from '@/components/ui';
+import { band, button, buttonGhost, buttonGold, FormAlert, InfoTip, SMART_MATCH_INFO, SMART_SCORE_INFO } from '@/components/ui';
 
 // Features starting with NOT are shown crossed out, as what the plan doesn't include.
 const NOT = '✗ ';
@@ -14,17 +14,17 @@ type Plan = {
 const PLANS: Plan[] = [
   {
     name: 'Free', monthly: 0, blurb: 'For trying ReadyToWork.ph and occasional hiring.',
-    features: ['Up to 3 job posts per month', 'See your top 20 applicants per job', 'View job applications', 'Reply to your applicants', '10 AI fit scores per month', 'Applicants sorted by interest (Credits)', NOT + 'Reach out to workers first'],
+    features: ['Up to 3 job posts per month', 'See the first 20 applicants per job', 'View job applications', 'Reply to your applicants', '5 Smart Scores per month', 'Applicants sorted by interest (Credits)', NOT + 'Reach out to workers first', NOT + 'Smart Matching'],
     cta: ['Post a job free', '/jobs/new'],
   },
   {
     name: 'Pro', monthly: 19, blurb: 'For growing teams hiring every month.',
-    features: ['Up to 5 job posts per month', 'See your top 150 applicants per job', 'View job applications', 'Reach out to any worker first', '500 AI fit scores per month', 'AI reads resumes, cover letters and profiles'],
+    features: ['Up to 5 job posts per month', 'See the first 100 applicants per job', 'View job applications', 'Reach out to any worker first', 'Smart Matching: 3 shortlists per month', '500 Smart Scores per month', 'AI reads resumes, cover letters and profiles'],
     cta: ['Get Pro', '/contact?subject=Upgrade%20to%20Pro'],
   },
   {
     name: 'Premium', monthly: 49, blurb: 'For agencies and high-volume hiring.', popular: true,
-    features: ['Up to 10 job posts per month', 'See every applicant, no limit', 'View job applications', 'Reach out to any worker first', 'Unlimited AI fit scores', 'Score all applicants in one click, not one by one', 'Your own hiring analytics dashboard', 'Priority support'],
+    features: ['Up to 10 job posts per month', 'See every applicant (up to 250 per job)', 'View job applications', 'Reach out to any worker first', 'Smart Matching: 30 shortlists per month', 'Unlimited Smart Scores', 'Score all applicants in one click, not one by one', 'Your own hiring analytics dashboard', 'Priority support'],
     cta: ['Get Premium', '/contact?subject=Upgrade%20to%20Premium'],
   },
 ];
@@ -34,21 +34,22 @@ const WHY = [
   ['Hire direct', 'Talk to workers yourself, agree on pay together, and pay them directly. No middleman in between.'],
   ['No markups, no cut', 'We never take a percentage of salaries. Workers keep 100% of what you pay them.'],
   ['Serious applicants first', 'Workers bid Credits to show how much they want your job, so the most interested rise to the top.'],
-  ['AI that reads for you', 'Score each applicant against your job in seconds, with clear strengths and concerns.'],
+  ['Smart Scores and Smart Matching', 'Our AI scores each applicant against your job in seconds, and on Pro and Premium finds the best people for it from all our talent.'],
 ];
 
 const FAQ: [string, [string, string][]][] = [
   ['Plans and pricing', [
-    ['What does the Free plan include?', 'You can post up to 3 jobs a month, see your top 20 applicants on each job (most interested first), read their applications and reply to them. Workers can keep applying; upgrade anytime to see everyone who applied. It’s enough to see the quality of talent before you pay anything.'],
+    ['What does the Free plan include?', 'You can post up to 3 jobs a month, see the first 20 people who apply to each job (listed with the most interested first), read their applications and reply to them. Workers can keep applying; upgrade anytime to see everyone who applied. It’s enough to see the quality of talent before you pay anything.'],
     ['Why can’t I message workers first on the Free plan?', 'Free accounts that could message anyone would quickly attract spammers and fake “job offers”, and workers would stop trusting messages. Keeping outreach to paid plans protects workers, keeps quality high, and keeps ReadyToWork.ph running.'],
     ['Why pay a subscription instead of a fee per hire?', 'Agencies and many freelance sites add a markup on every hour you pay, for as long as the person works for you. We charge a simple monthly price instead, so once you hire someone, every peso of their pay goes to them.'],
     ['Monthly or yearly?', `Yearly costs the same as ${YEARLY_MONTHS} months, so you get 2 months free. It suits teams that hire regularly.`],
     ['Can I both hire and look for work?', 'Yes. Each account is either for hiring or for finding work, which keeps job seekers and employers clearly apart. To do both, create a second account with a different email address.'],
     ['Can I switch plans later?', 'Yes. You can move from Free to Pro or Premium, from Pro to Premium, or from monthly to yearly whenever you need more.'],
-    ['Is Premium’s AI really unlimited?', 'Yes, for any real hiring. A fair-use limit of 10,000 AI fit scores a month only stops automated abuse; that’s hundreds of applicants a day, every day.'],
-    ['Do limits reset?', 'Yes. Job posts and AI fit scores reset on the 1st of every month (Philippine time). Applicant limits are per job and don’t reset: upgrading shows everyone who already applied.'],
+    ['Is Premium’s AI really unlimited?', 'Yes, for any real hiring. A fair-use limit of 10,000 Smart Scores a month only stops automated abuse; that’s hundreds of applicants a day, every day.'],
+    ['Do limits reset?', 'Yes. Job posts and Smart Scores reset on the 1st of every month (Philippine time). Applicant limits are per job and don’t reset: upgrading shows everyone who already applied.'],
     ['What happens when a job reaches its application limit?', 'It stops accepting new applications and workers see that it’s full. Upgrade to receive more applications on your jobs.'],
-    ['What is an AI Fit Score?', 'A score from 0 to 100 for how well one applicant fits your job post, with their strengths and concerns. Opening a score again is free; asking the AI to re-score uses one.'],
+    ['What is a Smart Score?', 'A score from 0 to 100 for how well one applicant fits your job post, with their strengths and concerns. Our AI reads their cover letter, profile and resume. Opening a score again is free; asking for a fresh score uses one.'],
+    ['What is Smart Matching?', 'On Pro and Premium, our AI searches every worker on ReadyToWork.ph for one of your jobs, not only the people who applied. It reads the most promising profiles and shortlists up to 10 people, best first, each with a reason. Takes about a minute; results are saved on the job. Pro gets 3 searches a month and Premium 30. Age, gender, name and photo are never used.'],
   ]],
   ['Cancelling', [
     ['Do I have to stay subscribed after I hire someone?', 'No. There are no contracts or minimum terms. Many employers subscribe while hiring and cancel once their team is set. You keep your job history and your conversations.'],
@@ -57,7 +58,7 @@ const FAQ: [string, [string, string][]][] = [
   ]],
   ['Hiring and trust', [
     ['How do I pay the people I hire?', 'Directly, using whatever you both agree on, such as Wise, PayPal or a bank transfer. ReadyToWork.ph isn’t involved in salaries and never takes a cut.'],
-    ['How do I know if a worker is trustworthy?', 'Read their profile, resume and cover letter, use the AI score to spot gaps, and talk to them before hiring. Many employers start with a small paid test task. Filipino professionals are known for strong English and a long track record of working with overseas teams.'],
+    ['How do I know if a worker is trustworthy?', 'Read their profile, resume and cover letter, use the Smart Score to spot gaps, and talk to them before hiring. Many employers start with a small paid test task. Filipino professionals are known for strong English and a long track record of working with overseas teams.'],
     ['Is it free for workers?', 'Yes, always. Workers never pay to create a profile or apply, which is why so many skilled people are here.'],
   ]],
 ];
@@ -252,7 +253,7 @@ export default function PricingPage() {
             {(quota || usage) && (
               <div className="grid gap-4 border-t border-white/10 bg-white/5 px-6 py-4 sm:grid-cols-2">
                 {quota && <Meter label="Job posts this month" used={quota.posted} limit={quota.limit} />}
-                {usage && <Meter label="AI fit scores this month" used={usage.used} limit={usage.limit} />}
+                {usage && <Meter label="Smart Scores this month" used={usage.used} limit={usage.limit} />}
               </div>
             )}
           </section>
@@ -297,7 +298,7 @@ export default function PricingPage() {
               <ul className="mt-6 flex-1 space-y-3 text-sm text-slate-700">
                 {p.features.map((f) => f.startsWith(NOT)
                   ? <li key={f} className="flex gap-2 text-slate-400"><Cross /><span><span className="sr-only">Not included: </span>{f.slice(NOT.length)}</span></li>
-                  : <li key={f} className="flex gap-2"><Check />{f}</li>)}
+                  : <li key={f} className="flex gap-2"><Check /><span>{f}{f.startsWith('Smart') && <> <InfoTip text={f.startsWith('Smart Matching') ? SMART_MATCH_INFO : SMART_SCORE_INFO} label={f} /></>}</span></li>)}
               </ul>
               {(() => {
                 // Subscribers: only an upgrade is the gold button; downgrades stay quiet.
