@@ -5,7 +5,7 @@ import { useRouter } from 'next/navigation';
 import { api, useApi, type Worker } from '@/lib/api';
 import { useAuth } from '@/lib/auth';
 import { Field, ErrorText, PageBand, input, button, buttonGhost, buttonGold, card } from '@/components/ui';
-import { ENGLISH, SETUP, SKILL_SUGGESTIONS, START_WHEN, WORK_HOURS } from '@/lib/profile';
+import { ENGLISH, GENDERS, SETUP, SKILL_SUGGESTIONS, START_WHEN, WORK_HOURS } from '@/lib/profile';
 import { Select, JOB_TYPES } from '@/components/Select';
 import { ResumeCard } from '@/components/ResumeCard';
 import { PhotoCard } from '@/components/PhotoCard';
@@ -15,7 +15,7 @@ export default function ProfilePage() {
   const { data } = useApi<Worker>(user?.role === 'worker' ? `/workers/${user.id}` : null);
 
   if (ready && !user) return <p><Link href="/login?next=/profile" className="text-emerald-700 underline">Log in</Link> to edit your profile.</p>;
-  if (ready && user?.role !== 'worker') return <p className="text-slate-600">Employer accounts don&apos;t have a worker profile. <Link href="/dashboard" className="font-medium text-emerald-700 hover:underline">Go to My Jobs</Link></p>;
+  if (ready && user?.role !== 'worker') return <p className="text-slate-600">Employer accounts don&apos;t have a worker profile. <Link href="/dashboard" className="font-medium text-emerald-700 hover:underline">Go to your dashboard</Link></p>;
   if (!data) return <p className="text-slate-500">Loading…</p>;
   return <ProfileEditor initial={data} />;
 }
@@ -25,7 +25,7 @@ const inp = `${input} py-2`; // compact fields on this long page
 type Form = {
   title: string; bio: string; skills: string[]; skill_years: Record<string, number>; hourly_rate: string; availability: string;
   portfolio_url: string; linkedin_url: string; location: string; work_hours: string; hours_per_week: string; start_when: string;
-  english: string; languages: string; internet_mbps: string; setup: string[]; show_resume: boolean;
+  english: string; languages: string; internet_mbps: string; setup: string[]; show_resume: boolean; birth_date: string; gender: string;
 };
 
 // Bento editor: one card per section, each saved on its own (it sends the whole profile, so nothing is lost).
@@ -39,6 +39,7 @@ function ProfileEditor({ initial }: { initial: Worker }) {
     location: initial.location ?? '', work_hours: initial.work_hours ?? '', hours_per_week: initial.hours_per_week?.toString() ?? '',
     start_when: initial.start_when ?? '', english: initial.english ?? '', languages: initial.languages ?? '',
     internet_mbps: initial.internet_mbps?.toString() ?? '', setup: initial.setup ?? [], show_resume: initial.show_resume ?? true,
+    birth_date: initial.birth_date ?? '', gender: initial.gender ?? '',
   }));
   // What's on the server; the page has unsaved changes whenever the form differs from it.
   const [saved, setSaved] = useState(() => JSON.stringify(form));
@@ -49,6 +50,8 @@ function ProfileEditor({ initial }: { initial: Worker }) {
   const text = (k: keyof Form) => (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) => set({ [k]: e.target.value } as Partial<Form>);
 
   async function save() {
+    // Required for everyone: employers see the age and gender on every profile.
+    if (!form.birth_date || !form.gender) { setStatus({ error: 'Add your birth date and gender in Basics first.' }); return false; }
     setStatus({ busy: true });
     try {
       await api('/profile', { method: 'PUT', body: form });
@@ -84,7 +87,7 @@ function ProfileEditor({ initial }: { initial: Worker }) {
   const leave = (to: string) => { dirtyRef.current = false; setLeaving(null); router.push(to); };
 
   const sections = [
-    ['Basics', !!form.title && form.bio.length >= 40 && !!form.location],
+    ['Basics', !!form.title && form.bio.length >= 40 && !!form.location && !!form.birth_date && !!form.gender],
     ['Work & pay', !!form.hourly_rate && !!form.hours_per_week && !!form.start_when],
     ['Skills', form.skills.length >= 3 && form.skills.every((s) => form.skill_years[s] != null)],
     ['Work setup', !!form.internet_mbps || form.setup.length > 0],
@@ -110,7 +113,7 @@ function ProfileEditor({ initial }: { initial: Worker }) {
 
   return (
     <div className="mx-auto max-w-6xl space-y-4">
-      <PageBand title="Your profile" sub={`${done} of ${sections.length} sections done · complete profiles get more messages and higher AI Fit Scores`}
+      <PageBand title="Your profile" sub={`${done} of ${sections.length} sections done · complete profiles get more messages and higher Smart Scores`}
         actions={<Link href={`/workers/${initial.id}`} className={buttonGold}>Preview profile</Link>}>
         <div className="h-2 overflow-hidden rounded-full bg-white/15" role="progressbar" aria-valuenow={done} aria-valuemin={0} aria-valuemax={sections.length} aria-label="Profile completeness">
           <div className="h-full rounded-full bg-amber-400 transition-all" style={{ width: `${(done / sections.length) * 100}%` }} />
@@ -124,7 +127,10 @@ function ProfileEditor({ initial }: { initial: Worker }) {
               <div className="grid gap-3 sm:grid-cols-2">
                 <Field label="Professional title"><input id="p-title" className={inp} required placeholder="Virtual Assistant" value={form.title} onChange={text('title')} /></Field>
                 <Field label="Location (city or province)"><input id="p-location" className={inp} maxLength={80} placeholder="Cebu City, Cebu" value={form.location} onChange={text('location')} /></Field>
+                <Field label="Birth date"><input id="p-birth" className={inp} type="date" required max={`${new Date().getFullYear() - 18}-12-31`} value={form.birth_date} onChange={text('birth_date')} /></Field>
+                <Field label="Gender"><Select label="Gender" value={form.gender} onChange={(gender) => set({ gender })} options={GENDERS} /></Field>
               </div>
+              <p className="text-xs text-slate-500">Employers see your age, not your birth date.</p>
               <Field label="About you">
                 <textarea id="p-bio" className={inp} rows={4} value={form.bio} onChange={text('bio')} placeholder="What you do best, who you’ve worked for, and the results you get." />
                 <span className="mt-1 block text-xs text-slate-500">Don&apos;t add your email, phone or social links. Employers message you here, and contact details are hidden from most employers anyway.</span>

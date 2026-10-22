@@ -59,7 +59,7 @@ function EmployerNewJob({ onPosted }: { onPosted: (job: Job) => void }) {
   }
   return (
     <JobForm heading="Post a job" submitLabel="Post job"
-      notice={quota && <p>{quota.remaining} of {quota.limit} job posts left this month.</p>}
+      notice={quota && <p className="text-xs text-slate-500">After this, you’ll have {quota.remaining - 1} of {quota.limit} job posts left this month.</p>}
       onSubmit={async (form) => onPosted(await api<Job>('/jobs', { body: form }))} />
   );
 }

@@ -40,7 +40,7 @@ export default function Overview() {
   ];
   const groups: [string, [string, number][]][] = [
     ['Workers', [['Completed profiles', t.profiles_completed], ['Uploaded a resume', t.resumes], ['Applied to a job', t.workers_applied], ['Applications', t.applications], ['Applications, last 7 days', t.applications_7d]]],
-    ['Employers & jobs', [['Posted a job', t.employers_posted], ['Job posts', t.jobs], ['AI fit scores', t.ai_analyses], ['AI fit scores, last 7 days', t.ai_analyses_7d]]],
+    ['Employers & jobs', [['Posted a job', t.employers_posted], ['Job posts', t.jobs], ['Smart Scores', t.ai_analyses], ['Smart Scores, last 7 days', t.ai_analyses_7d]]],
     ['People & messages', [['New, last 24 hours', t.new_24h], ['Signed up with Google', t.google_users], ['Messages sent', t.messages], ['Messages, last 7 days', t.messages_7d]]],
   ];
   const attention: [string, number, string][] = [

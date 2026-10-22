@@ -15,9 +15,15 @@ export function useModal(open: boolean, onClose: () => void) {
     if (!open && d?.open) d.close();
   }, [open]);
 
-  useEffect(() => () => {
-    ref.current?.close();
-    latestOnClose.current();
+  // Reset the owner on unmount, a tick later: React's dev double-mount runs this cleanup and mounts again
+  // straight away, which cancels it, so a modal that only exists while open isn't closed as it opens.
+  const pending = useRef<ReturnType<typeof setTimeout>>(undefined);
+  useEffect(() => {
+    clearTimeout(pending.current);
+    const d = ref.current;
+    return () => {
+      pending.current = setTimeout(() => { d?.close(); latestOnClose.current(); });
+    };
   }, []);
 
   return ref;

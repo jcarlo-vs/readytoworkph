@@ -3,7 +3,7 @@ import { useEffect, useState } from 'react';
 import { ErrorText, button, card, input } from '@/components/ui';
 import { PageHeader, adminApi, failed, useAdmin } from '../ui';
 
-type Settings = { topups_enabled: boolean; daily_applications: number; free_ai_analyses: number };
+type Settings = { topups_enabled: boolean; daily_applications: number; free_ai_analyses: number; free_full_names: boolean; max_job_applications: number };
 
 function Toggle({ checked, onChange, label }: { checked: boolean; onChange: (v: boolean) => void; label: string }) {
   return (
@@ -42,7 +42,7 @@ export default function SettingsPage() {
       failed(logout, (error) => setMsg({ ok: '', error }))(err as Error);
     }
   }
-  const num = (k: 'daily_applications' | 'free_ai_analyses') => (e: React.ChangeEvent<HTMLInputElement>) =>
+  const num = (k: 'daily_applications' | 'free_ai_analyses' | 'max_job_applications') => (e: React.ChangeEvent<HTMLInputElement>) =>
     setForm({ ...form, [k]: Math.trunc(Number(e.target.value)) });
   const changed = JSON.stringify(form) !== JSON.stringify(saved);
 
@@ -62,9 +62,17 @@ export default function SettingsPage() {
       </section>
       <section className={`${card} space-y-3`}>
         <h2 className="text-sm font-semibold uppercase tracking-wide text-slate-500">Employers</h2>
-        <Row title="AI fit scores per month on Free" hint="Pro gets 500 and Premium is unlimited (10,000 fair use). From 0 to 1,000.">
-          <div className="w-24 shrink-0"><input className={`${input} text-center`} type="number" min={0} max={1000} required aria-label="Free AI fit scores per month" value={form.free_ai_analyses} onChange={num('free_ai_analyses')} /></div>
+        <div className="divide-y divide-slate-100">
+        <Row title="Show full names on Free" hint="Off: Free employers see “Maria S.” until the worker applies or they upgrade. Links and contact details stay hidden either way.">
+          <Toggle label="Show full names on Free" checked={form.free_full_names} onChange={(free_full_names) => setForm({ ...form, free_full_names })} />
         </Row>
+        <Row title="Smart Scores per month on Free" hint="Pro gets 500 and Premium is unlimited (10,000 fair use). From 0 to 1,000.">
+          <div className="w-24 shrink-0"><input className={`${input} text-center`} type="number" min={0} max={1000} required aria-label="Free Smart Scores per month" value={form.free_ai_analyses} onChange={num('free_ai_analyses')} /></div>
+        </Row>
+        <Row title="Most applications per job" hint="A job closes itself when it gets this many, on every plan, and can't be reopened. Free sees the first 20 to apply, Pro the first 100, Premium all. From 10 to 5,000.">
+          <div className="w-24 shrink-0"><input className={`${input} text-center`} type="number" min={10} max={5000} required aria-label="Most applications per job" value={form.max_job_applications} onChange={num('max_job_applications')} /></div>
+        </Row>
+        </div>
       </section>
       <ErrorText msg={msg.error} />
       {msg.ok && !changed && <p className="text-sm font-medium text-emerald-700" role="status">{msg.ok}</p>}

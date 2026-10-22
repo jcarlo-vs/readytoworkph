@@ -113,5 +113,4 @@ export function Pager({ page, total, size, onPage, onSize, noun }: {
   );
 }
 
-export const th = 'whitespace-nowrap px-4 py-3 text-left text-[11px] font-semibold uppercase tracking-wide text-slate-500';
-export const td = 'px-4 py-3';
+export { th, td } from '@/components/styles'; // shared with the employer pages' tables

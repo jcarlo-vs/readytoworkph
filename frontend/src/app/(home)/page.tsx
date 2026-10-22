@@ -76,7 +76,7 @@ function NextSteps() {
   const { user } = useAuth();
   const [dark, light] = user?.role === 'worker'
     ? [['Your next job is waiting', 'New remote jobs are posted every day. Search by role or skill and apply with your Credits.', '/jobs?sort=new', 'Browse jobs'],
-       ['Stand out to employers', 'A complete profile with your skills, rate and resume gets more messages and higher AI Fit Scores.', '/profile', 'Edit your profile']]
+       ['Stand out to employers', 'A complete profile with your skills, rate and resume gets more messages and higher Smart Scores.', '/profile', 'Edit your profile']]
     : user?.role === 'employer'
       ? [['Post your next job', 'Describe the role and budget, and Filipino professionals start applying.', '/jobs/new', 'Post a job'],
          ['Reach out first', 'Browse talent by skill, rate and availability, and message the people you like.', '/workers', 'Browse talent']]

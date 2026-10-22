@@ -18,7 +18,7 @@ const PERIODS = ['hour', 'month', 'year', 'fixed'];
 // Philippine time, so they reset on the 1st.
 const PLAN_LIMITS = {
   free: { name: 'Free', posts: 3, applicants: 20, outreach: false, matches: 0 },
-  pro: { name: 'Pro', posts: 5, applicants: 150, analyses: 500, outreach: true, matches: 3 },
+  pro: { name: 'Pro', posts: 5, applicants: 100, analyses: 500, outreach: true, matches: 3 },
   premium: { name: 'Premium', posts: 10, applicants: null, analyses: null, outreach: true, matches: 30 },
 };
 // Premium's AI analyses are unlimited for any real hiring; this fair-use ceiling only stops a runaway
@@ -26,10 +26,11 @@ const PLAN_LIMITS = {
 export const PREMIUM_FAIR_USE = 10_000;
 const MONTH_PH = `(date_trunc('month', now() AT TIME ZONE 'Asia/Manila') AT TIME ZONE 'Asia/Manila')`;
 const planOf = async (db, userId) => (await db.query('SELECT plan FROM users WHERE id = $1', [userId])).rows[0]?.plan ?? 'free';
-// An application's place in its job's list (0 = top): most Credits first, then earliest. Employers see
-// their top applicants up to their plan's limit; the rest stay hidden until they upgrade.
+// An application's place in line for its job (0 = first to apply). Employers see applicants first come,
+// first served up to their plan's limit (Free: the first 20); later ones stay hidden until they upgrade.
+// Credits don't change who is visible, only the order the visible ones are listed in.
 const RANK = `(SELECT count(*) FROM applications b WHERE b.job_id = a.job_id
-  AND (b.credits > a.credits OR (b.credits = a.credits AND (b.created_at, b.id) < (a.created_at, a.id))))::int`;
+  AND (b.created_at, b.id) < (a.created_at, a.id))::int`;
 const hiddenApplicant = (res, plan) => res.status(402).json({
   error: `This applicant is beyond the ${PLAN_LIMITS[plan].applicants} you can see on the ${PLAN_LIMITS[plan].name} plan. Upgrade to see them.`, upgrade: true,
 });
@@ -39,7 +40,9 @@ export const DAILY_CREDITS = 60;
 const SETTINGS = {
   topups_enabled: { default: false, valid: (v) => typeof v === 'boolean' },
   daily_applications: { default: 60, valid: (v) => Number.isInteger(v) && v >= 1 && v <= 500 }, // spam cap; 0-credit applies are free
-  free_ai_analyses: { default: 10, valid: (v) => Number.isInteger(v) && v >= 0 && v <= 1000 },
+  free_ai_analyses: { default: 5, valid: (v) => Number.isInteger(v) && v >= 0 && v <= 1000 },
+  free_full_names: { default: false, valid: (v) => typeof v === 'boolean' }, // Free employers see "Maria Santos", not "Maria S."
+  max_job_applications: { default: 250, valid: (v) => Number.isInteger(v) && v >= 10 && v <= 5000 }, // a job closes itself when full
 };
 async function getSettings() {
   const { rows } = await q('SELECT key, value FROM settings');
@@ -135,7 +138,7 @@ function welcome({ email, name, role }) {
     intro: ['Welcome to ReadyToWork.ph! Your employer account is ready. Here’s how to find your next great hire:'],
     steps: [
       ['Post your first job', 'Describe the role, the skills you need and your budget. Posting is free.'],
-      ['Review applicants', 'Applicants are sorted by interest, and the AI score shows how well each one fits.'],
+      ['Review applicants', 'Applicants are sorted by interest, and the Smart Score shows how well each one fits.'],
       ['Message and hire directly', 'Talk to candidates, agree on pay together, and pay them directly. No markups.'],
     ],
     button: { label: 'Post your first job', url: `${site}/jobs/new` },
@@ -611,7 +614,11 @@ function jobFields(body) {
   if (!title || !description) return { error: 'Title and description required' };
   if (!TYPES.includes(job_type)) return { error: 'Invalid job type' };
   if (salary_min != null && salary_max != null && salary_min > salary_max) return { error: 'Min salary is above max' };
-  return { values: [title, description, skillList(body.skills), job_type, salary_min, salary_max, salary_period] };
+  // Optional cap the employer sets ("up to 50 applications"); empty means the site-wide most.
+  const max_applications = body.max_applications == null || body.max_applications === '' ? null : Number(body.max_applications);
+  if (max_applications !== null && !(Number.isInteger(max_applications) && max_applications >= 1 && max_applications <= 5000))
+    return { error: 'Application limit must be a whole number from 1 up' };
+  return { values: [title, description, skillList(body.skills), job_type, salary_min, salary_max, salary_period, max_applications] };
 }
 
 // ponytail: deleting a job frees its slot for the month; keep deleted jobs (soft delete) if that gets abused.
@@ -638,8 +645,8 @@ app.post('/api/jobs', requireAuth('employer'), throttle(30, 60 * 60_000, 'an hou
       return res.status(402).json({ error: postLimitMessage(plan, max), upgrade: plan !== 'premium' });
     }
     const { rows } = await db.query(
-      `INSERT INTO jobs (employer_id, title, description, skills, job_type, salary_min, salary_max, salary_period)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING *`,
+      `INSERT INTO jobs (employer_id, title, description, skills, job_type, salary_min, salary_max, salary_period, max_applications)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING *`,
       [req.user.id, ...values]
     );
     await db.query('COMMIT');
@@ -664,8 +671,11 @@ app.get('/api/my/job-quota', requireAuth('employer'), async (req, res) => {
 app.put('/api/jobs/:id', requireAuth('employer'), throttle(60, 60 * 60_000, 'an hour', perUser), async (req, res) => {
   const { error, values } = jobFields(req.body);
   if (error) return bad(res, error);
+  // Lowering the limit to (or below) the applications already in closes the job, as reaching it would.
   const { rows } = await q(
-    `UPDATE jobs SET title = $3, description = $4, skills = $5, job_type = $6, salary_min = $7, salary_max = $8, salary_period = $9, updated_at = now()
+    `UPDATE jobs SET title = $3, description = $4, skills = $5, job_type = $6, salary_min = $7, salary_max = $8, salary_period = $9,
+       max_applications = $10, updated_at = now(),
+       closed_at = CASE WHEN $10::int IS NOT NULL AND (SELECT count(*) FROM applications WHERE job_id = $1) >= $10 THEN coalesce(closed_at, now()) ELSE closed_at END
      WHERE id = $1 AND employer_id = $2 RETURNING *`,
     [num(req.params.id), req.user.id, ...values]
   );
@@ -675,6 +685,14 @@ app.put('/api/jobs/:id', requireAuth('employer'), throttle(60, 60 * 60_000, 'an 
 // Closing stops new applications and hides the job from search; applicants and messages stay.
 app.put('/api/jobs/:id/closed', requireAuth('employer'), async (req, res) => {
   if (typeof req.body.closed !== 'boolean') return bad(res, 'closed must be true or false');
+  if (!req.body.closed) { // a full job stays closed
+    const { max_job_applications } = await getSettings();
+    const { rows: [n] } = await q(
+      'SELECT j.max_applications, (SELECT count(*)::int FROM applications a WHERE a.job_id = j.id) AS received FROM jobs j WHERE j.id = $1 AND j.employer_id = $2',
+      [num(req.params.id), req.user.id]);
+    if (n && n.received >= max_job_applications) return res.status(409).json({ error: `This job has ${n.received} applicants, the most a job can take (${max_job_applications}). Post a new job to keep hiring.` });
+    if (n?.max_applications && n.received >= n.max_applications) return res.status(409).json({ error: `This job reached your limit of ${n.max_applications} applications. Raise the limit in Edit job to reopen it.` });
+  }
   const { rows } = await q(
     'UPDATE jobs SET closed_at = CASE WHEN $3 THEN coalesce(closed_at, now()) END WHERE id = $1 AND employer_id = $2 RETURNING *',
     [num(req.params.id), req.user.id, req.body.closed]
@@ -690,8 +708,8 @@ app.delete('/api/jobs/:id', requireAuth('employer'), async (req, res) => {
 // --- Settings & admin ---
 // Public: only what the site needs to render.
 app.get('/api/settings', async (req, res) => {
-  const { topups_enabled } = await getSettings();
-  res.json({ topups_enabled });
+  const { topups_enabled, max_job_applications } = await getSettings();
+  res.json({ topups_enabled, max_job_applications });
 });
 
 const adminFails = limiter(5, 15 * 60_000, true); // always strict, even in tests
@@ -781,13 +799,19 @@ app.post('/api/jobs/:id/apply', requireAuth('worker'), async (req, res) => {
   if (!Number.isInteger(credits) || credits < 0 || credits > DAILY_CREDITS)
     return bad(res, `Credits must be a whole number from 0 to ${DAILY_CREDITS}`);
 
+  // Read settings before taking a connection: inside the transaction it would need a second one, and a
+  // burst of applies holding every pooled connection would wait on each other forever.
+  const { daily_applications, max_job_applications } = await getSettings();
   const db = await pool.connect();
   try {
     await db.query('BEGIN');
-    // Lock this worker's row so parallel applies can't overspend today's credits.
+    // Lock this worker's row so parallel applies can't overspend today's credits, and the job's row so
+    // parallel applies can't push it past its cap.
     await db.query('SELECT 1 FROM users WHERE id = $1 FOR UPDATE', [req.user.id]);
     const { rows: [target] } = await db.query(
-      'SELECT j.closed_at, u.deactivated_at, u.suspended_at FROM jobs j JOIN users u ON u.id = j.employer_id WHERE j.id = $1', [num(req.params.id)]);
+      'SELECT j.closed_at, j.max_applications, u.deactivated_at, u.suspended_at FROM jobs j JOIN users u ON u.id = j.employer_id WHERE j.id = $1 FOR UPDATE OF j', [num(req.params.id)]);
+    // Counted after the lock, in its own statement, so it sees applies that committed while we waited.
+    const { rows: [{ received }] } = await db.query('SELECT count(*)::int AS received FROM applications WHERE job_id = $1', [num(req.params.id)]);
     if (target?.closed_at || target?.deactivated_at || target?.suspended_at) {
       await db.query('ROLLBACK');
       return res.status(409).json({ error: 'This job is closed and no longer accepting applications' });
@@ -798,7 +822,13 @@ app.post('/api/jobs/:id/apply', requireAuth('worker'), async (req, res) => {
       return res.status(409).json({ error: 'You already applied' });
     }
     const { remaining, applications } = await creditsToday(db, req.user.id);
-    const { daily_applications } = await getSettings();
+    // The job's own limit, if the employer set one, else the site-wide most.
+    const cap = Math.min(max_job_applications, target?.max_applications ?? Infinity);
+    if (target && received >= cap) { // full before this change, or the cap was lowered
+      await db.query('UPDATE jobs SET closed_at = now() WHERE id = $1', [num(req.params.id)]);
+      await db.query('COMMIT');
+      return res.status(409).json({ error: 'This job is full and no longer accepting applications' });
+    }
     if (applications >= daily_applications) {
       await db.query('ROLLBACK');
       return res.status(429).json({ error: `You can send up to ${daily_applications} applications a day. Try again after midnight.` });
@@ -815,6 +845,8 @@ app.post('/api/jobs/:id/apply', requireAuth('worker'), async (req, res) => {
        ON CONFLICT (job_id, worker_id) DO NOTHING RETURNING id, job_id, credits, resume_attached, created_at`,
       [num(req.params.id), req.user.id, cover_letter, credits, req.body.attach_resume !== false]
     );
+    // The application that fills the job closes it: it leaves search and stops taking more.
+    if (rows[0] && received + 1 >= cap) await db.query('UPDATE jobs SET closed_at = now() WHERE id = $1', [num(req.params.id)]);
     await db.query('COMMIT');
     if (rows[0]) return res.status(201).json(rows[0]);
   } catch (err) {
@@ -847,14 +879,108 @@ app.get('/api/jobs/:id/applications', requireAuth('employer'), async (req, res) 
   const limit = PLAN_LIMITS[plan].applicants;
   const { rows } = await q(
     `SELECT a.id, a.cover_letter, a.credits, a.analysis, a.analyzed_at, CASE WHEN a.resume_attached THEN p.resume_name END AS resume_name, a.created_at, u.id AS worker_id, u.name, u.email, p.title, p.skills,
-       u.deleted_at IS NOT NULL AS deleted, u.deactivated_at IS NOT NULL AS deactivated,
-       count(*) OVER ()::int AS total
+       u.deleted_at IS NOT NULL AS deleted, u.deactivated_at IS NOT NULL AS deactivated, p.hourly_rate,
+       EXISTS (SELECT 1 FROM messages m WHERE m.sender_id = $2 AND m.recipient_id = u.id) AS messaged,
+       EXISTS (SELECT 1 FROM hires h WHERE h.employer_id = $2 AND h.worker_id = u.id) AS hired,
+       EXISTS (SELECT 1 FROM saved_workers s WHERE s.employer_id = $2 AND s.worker_id = u.id) AS saved,
+       (SELECT count(*)::int FROM applications x WHERE x.job_id = a.job_id) AS total
      FROM applications a JOIN jobs j ON j.id = a.job_id
      JOIN users u ON u.id = a.worker_id LEFT JOIN worker_profiles p ON p.user_id = u.id
-     WHERE a.job_id = $1 AND j.employer_id = $2 ORDER BY a.credits DESC, a.created_at ASC, a.id LIMIT $3`,
+     WHERE a.job_id = $1 AND j.employer_id = $2 AND ($3::int IS NULL OR ${RANK} < $3) ORDER BY a.credits DESC, a.created_at ASC, a.id`,
     [num(req.params.id), req.user.id, limit]
   );
+  // Opening the list counts as seeing every applicant so far (clears this job from the 🔔).
+  await q('UPDATE jobs SET applicants_seen_at = now() WHERE id = $1 AND employer_id = $2', [num(req.params.id), req.user.id]);
   res.json({ applicants: rows.map(({ total: _, ...a }) => a), total: rows[0]?.total ?? 0, limit, plan });
+});
+
+// The dashboard's "Latest applicants": newest applications across the employer's jobs, only ones their plan
+// lets them see (the same top-N-per-job rule as the applicants page).
+app.get('/api/my/recent-applicants', requireAuth('employer'), async (req, res) => {
+  const limit = PLAN_LIMITS[await planOf(pool, req.user.id)].applicants;
+  const { rows } = await q(
+    `SELECT a.id, a.created_at, a.job_id, j.title AS job_title, u.id AS worker_id, u.name, p.title
+     FROM applications a JOIN jobs j ON j.id = a.job_id JOIN users u ON u.id = a.worker_id LEFT JOIN worker_profiles p ON p.user_id = u.id
+     WHERE j.employer_id = $1 AND u.deleted_at IS NULL AND ($2::int IS NULL OR ${RANK} < $2)
+     ORDER BY a.created_at DESC, a.id DESC LIMIT 6`, [req.user.id, limit]);
+  res.json(rows);
+});
+
+// --- Website visits (Admin › Visitors) ---
+// The site reports each page it shows; the IP and Cloudflare's country come from the request.
+const BOT_UA = /bot|crawl|spider|slurp|preview|headless|lighthouse|monitor|curl|wget|python|axios/i;
+const VISIT_DAYS = 90;
+app.post('/api/track', throttle(120, 60_000, 'a minute'), async (req, res) => {
+  const path = str(req.body?.path, 300);
+  const ua = str(req.get('user-agent'), 300);
+  if (!path.startsWith('/') || path.startsWith('/admin') || !ua || BOT_UA.test(ua)) return res.status(204).end();
+  const country = req.get('cf-ipcountry');
+  const ref = str(req.body?.referrer, 300);
+  const me = await signedInUser(req);
+  await q('INSERT INTO page_views (ip, country, path, referrer, user_id, user_agent) VALUES ($1, $2, $3, $4, $5, $6)',
+    [visitor(req), /^[A-Z]{2}$/.test(country ?? '') ? country : null, path, /^https?:\/\//.test(ref) ? ref : null, me?.id ?? null, ua]);
+  if (Math.random() < 0.01) q(`DELETE FROM page_views WHERE at < now() - interval '${VISIT_DAYS} days'`).catch((err) => console.error(err));
+  res.status(204).end();
+});
+
+// "Mobile · Chrome" from a browser's user-agent text, good enough for a glance.
+const deviceOf = (ua = '') => `${/iPad|Tablet/i.test(ua) ? 'Tablet' : /Mobi|Android|iPhone/i.test(ua) ? 'Mobile' : 'Desktop'} · ${
+  /Edg\//.test(ua) ? 'Edge' : /OPR\//.test(ua) ? 'Opera' : /SamsungBrowser/.test(ua) ? 'Samsung' : /Firefox\//.test(ua) ? 'Firefox'
+    : /Chrome\//.test(ua) ? 'Chrome' : /Safari\//.test(ua) ? 'Safari' : 'Other'}`;
+app.get('/api/admin/visitors', requireAdmin, async (req, res) => {
+  const since = (d) => `at > now() - interval '${d}'`;
+  const { rows: [totals] } = await q(`SELECT
+    count(*) FILTER (WHERE ${since('1 day')})::int AS views_24h, count(DISTINCT ip) FILTER (WHERE ${since('1 day')})::int AS visitors_24h,
+    count(*) FILTER (WHERE ${since('7 days')})::int AS views_7d, count(DISTINCT ip) FILTER (WHERE ${since('7 days')})::int AS visitors_7d,
+    count(*) FILTER (WHERE ${since('30 days')})::int AS views_30d, count(DISTINCT ip) FILTER (WHERE ${since('30 days')})::int AS visitors_30d
+    FROM page_views`);
+  const { rows: countries } = await q(`SELECT coalesce(country, '??') AS country, count(DISTINCT ip)::int AS visitors
+    FROM page_views WHERE ${since('30 days')} GROUP BY 1 ORDER BY 2 DESC LIMIT 15`);
+  const { rows: pages } = await q(`SELECT path, count(*)::int AS views, count(DISTINCT ip)::int AS visitors
+    FROM page_views WHERE ${since('7 days')} GROUP BY 1 ORDER BY 2 DESC LIMIT 15`);
+  const size = sizeOf(req);
+  const { rows } = await q(`SELECT v.id, v.at, v.ip, v.country, v.path, v.referrer, v.user_agent, u.id AS user_id, u.name AS user_name, u.role AS user_role,
+      count(*) OVER ()::int AS total
+    FROM page_views v LEFT JOIN users u ON u.id = v.user_id ORDER BY v.at DESC, v.id DESC LIMIT $1 OFFSET $2`, [size, pageOf(req) * size]);
+  res.json({
+    totals, countries, pages, keep_days: VISIT_DAYS,
+    total: rows[0]?.total ?? 0,
+    visits: rows.map(({ total: _, user_agent, ...v }) => ({ ...v, device: deviceOf(user_agent ?? '') })),
+  });
+});
+
+// The Applicants page: everyone who applied to any of this employer's jobs (only those their plan shows),
+// newest first, with where each one stands. Opening it counts as seeing them (clears the 🔔).
+app.get('/api/my/applicants', requireAuth('employer'), async (req, res) => {
+  const limit = PLAN_LIMITS[await planOf(pool, req.user.id)].applicants;
+  const { rows } = await q(
+    `SELECT a.id, a.created_at, a.credits, (a.analysis->>'score')::int AS score, a.job_id, j.title AS job_title,
+       u.id AS worker_id, u.name, p.title, p.hourly_rate, u.deleted_at IS NOT NULL AS deleted, u.deactivated_at IS NOT NULL AS deactivated,
+       a.created_at > j.applicants_seen_at AS is_new,
+       EXISTS (SELECT 1 FROM messages m WHERE m.sender_id = $1 AND m.recipient_id = u.id) AS messaged,
+       EXISTS (SELECT 1 FROM hires h WHERE h.employer_id = $1 AND h.worker_id = u.id) AS hired,
+       ${RANK} < coalesce($2::int, 2147483647) AS visible
+     FROM applications a JOIN jobs j ON j.id = a.job_id JOIN users u ON u.id = a.worker_id LEFT JOIN worker_profiles p ON p.user_id = u.id
+     WHERE j.employer_id = $1 ORDER BY a.created_at DESC, a.id DESC LIMIT 1000`, [req.user.id, limit]);
+  await q('UPDATE jobs SET applicants_seen_at = now() WHERE employer_id = $1', [req.user.id]);
+  const visible = rows.filter((r) => r.visible).map(({ visible: _, ...r }) => r);
+  res.json({ applicants: visible, hidden: rows.length - visible.length, bulk_max: BULK_MAX });
+});
+
+// Job posts used this month against the plan's limit (the dashboard shows "1 of 3 used").
+app.get('/api/my/post-usage', requireAuth('employer'), async (req, res) => {
+  const plan = await planOf(pool, req.user.id);
+  const { rows: [{ used }] } = await q(`SELECT count(*)::int AS used FROM jobs WHERE employer_id = $1 AND created_at >= ${MONTH_PH}`, [req.user.id]);
+  res.json({ used, limit: PLAN_LIMITS[plan].posts });
+});
+
+// The 🔔 in the menu bar: applications since the employer last opened each job's applicants, newest job first.
+app.get('/api/my/new-applicants', requireAuth('employer'), async (req, res) => {
+  const { rows } = await q(
+    `SELECT j.id, j.title, count(*)::int AS count, max(a.created_at) AS latest
+     FROM jobs j JOIN applications a ON a.job_id = j.id AND a.created_at > j.applicants_seen_at
+     WHERE j.employer_id = $1 GROUP BY j.id ORDER BY latest DESC LIMIT 20`, [req.user.id]);
+  res.json({ count: rows.reduce((n, j) => n + j.count, 0), jobs: rows });
 });
 
 app.get('/api/my/jobs', requireAuth('employer'), async (req, res) => {
@@ -890,8 +1016,10 @@ app.get('/api/my/applications', requireAuth('worker'), async (req, res) => {
 // --- Workers ---
 const WORKER_SELECT = `SELECT u.id, u.name, p.title, p.bio, p.skills, p.hourly_rate, p.availability, p.portfolio_url, p.linkedin_url, p.updated_at,
     p.skill_years, p.location, p.work_hours, p.hours_per_week, p.start_when, p.english, p.languages, p.internet_mbps, p.setup, p.show_resume,
+    to_char(p.birth_date, 'YYYY-MM-DD') AS birth_date, date_part('year', age(p.birth_date))::int AS age, p.gender,
     (p.resume_key IS NOT NULL AND p.show_resume) AS has_resume, u.created_at AS member_since, u.last_seen_at,
-    u.deactivated_at IS NOT NULL AS deactivated
+    u.deactivated_at IS NOT NULL AS deactivated, u.email_verified_at IS NOT NULL AS email_verified, u.photo_key IS NOT NULL AS has_photo,
+    (coalesce(p.portfolio_url, '') <> '' OR coalesce(p.linkedin_url, '') <> '') AS has_links -- trust checks; the links stay hidden from limited views
   FROM users u JOIN worker_profiles p ON p.user_id = u.id`;
 
 // A worker's surname, LinkedIn and portfolio would let an employer find them elsewhere and skip both the
@@ -926,11 +1054,19 @@ const CONTACT_RE = new RegExp([
 const PHONE = /^\+?\d[\d\s().-]{7,}\d$/;
 export const hideContacts = (text, mark = HIDDEN) => String(text ?? '').replace(CONTACT_RE,
   (m) => (PHONE.test(m) && m.replace(/\D/g, '').length < 10 ? m : mark));
-const limitWorker = (w) => ({
-  ...w, name: shortName(w.name), title: hideContacts(w.title), bio: hideContacts(w.bio),
+const limitWorker = (w, fullName = false) => ({
+  ...w, name: fullName ? w.name : shortName(w.name), name_hidden: !fullName, title: hideContacts(w.title), bio: hideContacts(w.bio),
   location: hideContacts(w.location), languages: hideContacts(w.languages),
   portfolio_url: null, linkedin_url: null, limited: true,
 });
+
+// How one employer sees these workers: in full, or limited (the admin can let Free employers see full names).
+// Never the birth date itself; the age is enough.
+async function workerViews(employerId, ids) {
+  const full = await revealFor(employerId, ids);
+  const { free_full_names } = await getSettings();
+  return ({ birth_date: _, ...w }) => (full(w.id) ? w : limitWorker(w, free_full_names));
+}
 
 // Talent isn't public: only signed-in employers can browse workers (workers can load their own profile).
 // Search title, bio and skills; filter by skills (all of them), availability, hourly rate and how recently
@@ -940,16 +1076,22 @@ const WORKER_SORTS = {
   rate: 'p.hourly_rate ASC NULLS LAST, u.last_seen_at DESC NULLS LAST',
   newest: 'u.created_at DESC',
 };
+// A search box's words as Postgres regexes: special characters taken literally, matched at word starts
+// (\m), and short words (ai, va, seo) only as whole words (\M). Up to 6 words.
+export const searchWords = (q) => [...new Set(str(q, 100).toLowerCase().split(/[\s,;/]+/).filter(Boolean))].slice(0, 6)
+  .map((w) => `${/^\w/.test(w) ? '\\m' : ''}${w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}${w.length <= 3 && /\w$/.test(w) ? '\\M' : ''}`);
 // Hire Talent's filters, shared by the page and the AI matcher. Adds its values to `params`.
 function workerFilters(query, params) {
   const add = (v) => { params.push(v); return `$${params.length}`; };
   const where = ["p.title <> ''", 'u.deactivated_at IS NULL', 'u.suspended_at IS NULL']; // paused and suspended accounts stay out of search
-  const text = str(query.q, 100);
+  // Every word must appear in the title, bio or skills (any order, any field; never the resume). Whole words,
+  // so "ai" doesn't match "email"; words of 4+ letters also match longer forms ("engineer" → "engineering").
+  const words = searchWords(query.q);
   let match = '';
-  if (text) {
-    const t = add(like(text));
-    where.push(`(p.title ILIKE ${t} OR p.bio ILIKE ${t} OR EXISTS (SELECT 1 FROM unnest(p.skills) s WHERE s ILIKE ${t}))`);
-    match = `(p.title ILIKE ${t}) DESC, `; // title matches first
+  if (words.length) {
+    const ts = words.map((w) => add(w));
+    for (const t of ts) where.push(`(p.title ~* ${t} OR p.bio ~* ${t} OR EXISTS (SELECT 1 FROM unnest(p.skills) s WHERE s ~* ${t}))`);
+    match = `(${ts.map((t) => `(p.title ~* ${t})::int`).join(' + ')}) DESC, `; // more words in the title first
   }
   const skills = skillList(query.skills ?? query.skill).slice(0, 10);
   if (skills.length) where.push(`p.skills @> ${add(skills)}::text[]`);
@@ -968,12 +1110,12 @@ app.get('/api/workers', requireAuth('employer'), async (req, res) => {
        count(*) OVER ()::int AS total FROM users u`)}
      WHERE ${where.join(' AND ')} ORDER BY ${match}${sort} LIMIT ${PAGE_SIZE} OFFSET ${add(pageOf(req) * PAGE_SIZE)}`,
     params);
-  const full = await revealFor(req.user.id, rows.map((w) => w.id));
+  const view = await workerViews(req.user.id, rows.map((w) => w.id));
   // past the last page there's no row to carry the total, so count separately
   const total = rows[0]?.total ?? (pageOf(req) ? (await q(
     `SELECT count(*)::int AS n FROM users u JOIN worker_profiles p ON p.user_id = u.id WHERE $1::int IS NOT NULL AND ${where.join(' AND ')}`,
     params.slice(0, -1))).rows[0].n : 0);
-  res.json({ workers: rows.map(({ total: _, ...w }) => (full(w.id) ? w : limitWorker(w))), total, page_size: PAGE_SIZE });
+  res.json({ workers: rows.map(({ total: _, ...w }) => view(w)), total, page_size: PAGE_SIZE });
 });
 
 app.get('/api/workers/:id', requireAuth(), async (req, res) => {
@@ -984,7 +1126,7 @@ app.get('/api/workers/:id', requireAuth(), async (req, res) => {
   const { rows: [rel] } = await q(
     `SELECT EXISTS (SELECT 1 FROM saved_workers WHERE employer_id = $1 AND worker_id = $2) AS saved,
        (SELECT created_at FROM hires WHERE employer_id = $1 AND worker_id = $2) AS hired_at`, [req.user.id, w.id]);
-  res.json({ ...((await revealFor(req.user.id, [w.id]))(w.id) ? w : limitWorker(w)), ...rel });
+  res.json({ ...(await workerViews(req.user.id, [w.id]))(w), ...rel });
 });
 
 // --- Saved workers (bookmarks) and hires ---
@@ -1005,8 +1147,7 @@ app.get('/api/saved', requireAuth('employer'), async (req, res) => {
   const { rows } = await q(
     `${WORKER_SELECT.replace(' FROM users u', ', true AS saved, s.created_at AS saved_at FROM users u')}
      JOIN saved_workers s ON s.worker_id = u.id AND s.employer_id = $1 ORDER BY s.created_at DESC LIMIT 200`, [req.user.id]);
-  const full = await revealFor(req.user.id, rows.map((w) => w.id));
-  res.json(rows.map((w) => (full(w.id) ? w : limitWorker(w))));
+  res.json(rows.map(await workerViews(req.user.id, rows.map((w) => w.id))));
 });
 
 // Mark as hired: only for someone the employer can already talk to here (applied, chatting, or a paid plan).
@@ -1076,6 +1217,7 @@ const WORK_HOURS = ['ph', 'us', 'uk', 'au', 'flexible'];
 const START_WHEN = ['now', '1w', '2w', '1m'];
 const ENGLISH = ['basic', 'conversational', 'fluent', 'native'];
 const SETUP = ['backup_power', 'backup_internet', 'own_computer', 'headset'];
+const GENDERS = ['female', 'male', 'unsaid'];
 export function bentoFields(body) {
   const out = {};
   const has = (k) => body[k] !== undefined;
@@ -1093,8 +1235,18 @@ export function bentoFields(body) {
     out[k] = n;
   };
   const err = choice('work_hours', WORK_HOURS, 'working hours') ?? choice('start_when', START_WHEN, 'start date') ?? choice('english', ENGLISH, 'English level')
-    ?? int('hours_per_week', 1, 80, 'Hours per week') ?? int('internet_mbps', 1, 10000, 'Internet speed');
+    ?? int('hours_per_week', 1, 80, 'Hours per week') ?? int('internet_mbps', 1, 10000, 'Internet speed')
+    ?? choice('gender', GENDERS, 'gender');
   if (err) return err;
+  if (has('birth_date')) {
+    if (!body.birth_date) out.birth_date = null;
+    else {
+      const d = /^\d{4}-\d{2}-\d{2}$/.test(body.birth_date) ? new Date(`${body.birth_date}T00:00:00Z`) : null;
+      const years = d && !isNaN(d) && (Date.now() - d) / (365.25 * 86_400_000);
+      if (!(years >= 18 && years < 100)) return 'Birth date must be a real date, and you must be at least 18';
+      out.birth_date = body.birth_date;
+    }
+  }
   if (has('location')) out.location = str(body.location, 80) ?? '';
   if (has('languages')) out.languages = str(body.languages, 100) ?? '';
   if (has('setup')) out.setup = SETUP.filter((x) => Array.isArray(body.setup) && body.setup.includes(x));
@@ -1138,8 +1290,8 @@ async function analyzerUsage(db, employerId) {
   return { plan, used, limit, remaining: Math.max(0, limit - used) };
 }
 const outOfAnalyses = (res, usage) => res.status(402).json(usage.limit === null
-  ? { error: `You've reached this month's fair-use limit of ${PREMIUM_FAIR_USE.toLocaleString('en-US')} AI fit scores. It resets on the 1st; email support@readytowork.ph if you need more sooner.`, usage }
-  : { error: `You've used this month's ${usage.limit} AI fit scores on the ${PLAN_LIMITS[usage.plan].name} plan. They reset on the 1st.`, upgrade: true, usage });
+  ? { error: `You've reached this month's fair-use limit of ${PREMIUM_FAIR_USE.toLocaleString('en-US')} Smart Scores. It resets on the 1st; email support@readytowork.ph if you need more sooner.`, usage }
+  : { error: `You've used this month's ${usage.limit} Smart Scores on the ${PLAN_LIMITS[usage.plan].name} plan. They reset on the 1st.`, upgrade: true, usage });
 
 app.get('/api/analyzer/usage', requireAuth('employer'), async (req, res) => {
   res.json(await analyzerUsage(pool, req.user.id));
@@ -1419,18 +1571,27 @@ const agentCard = (w) => ({
 });
 function matchTools(employerId) {
   return {
+    // Unlike the Hire Talent box (one phrase), the agent's search words each count: a worker matching any of
+    // them is found, and people matching more of them come first, like a recruiter typing keywords.
     async search({ query, skills, max_rate, availability }) {
       const params = [];
-      const { where, match } = workerFilters({ q: query, skills, rate_max: max_rate, availability }, params);
-      const { rows } = await q(`${WORKER_SELECT} WHERE ${where.join(' AND ')} ORDER BY ${match}${WORKER_SORTS.active} LIMIT 15`, params);
-      const full = await revealFor(employerId, rows.map((w) => w.id));
-      return rows.map((w) => agentCard(full(w.id) ? w : limitWorker(w)));
+      const { where, add } = workerFilters({ skills, rate_max: max_rate, availability }, params);
+      const words = [...new Set(String(query ?? '').toLowerCase().split(/[\s,;/]+/).filter((w) => w.length > 1))].slice(0, 6);
+      const hits = words.map((w) => {
+        const t = add(like(w));
+        return `(p.title ILIKE ${t} OR p.bio ILIKE ${t} OR EXISTS (SELECT 1 FROM unnest(p.skills) s WHERE s ILIKE ${t}))`;
+      });
+      if (hits.length) where.push(`(${hits.join(' OR ')})`);
+      const score = hits.length ? `(${hits.map((h) => `${h}::int`).join(' + ')}) DESC, ` : '';
+      const { rows } = await q(`${WORKER_SELECT} WHERE ${where.join(' AND ')} ORDER BY ${score}${WORKER_SORTS.active} LIMIT 15`, params);
+      const view = await workerViews(employerId, rows.map((w) => w.id));
+      return rows.map((w) => agentCard(view(w)));
     },
     async profile(id) {
       const { rows: [w] } = await q(`${WORKER_SELECT} WHERE u.id = $1 AND p.title <> '' AND u.deactivated_at IS NULL AND u.suspended_at IS NULL`, [id]);
       if (!w) return null;
       const full = (await revealFor(employerId, [id]))(id);
-      const v = full ? w : limitWorker(w);
+      const v = (await workerViews(employerId, [id]))(w);
       // The CV text, when the worker shares their CV and this employer may download it (the same rule as the CV button).
       const cv = full && w.has_resume
         ? (await q('SELECT resume_text FROM worker_profiles WHERE user_id = $1', [id])).rows[0]?.resume_text : null;
@@ -1452,8 +1613,8 @@ async function matchRunView(employerId, run, job) {
   const cap = hourlyCap(job);
   const ids = (run.shortlist ?? []).map((m) => m.worker_id);
   const { rows } = ids.length ? await q(`${WORKER_SELECT} WHERE u.id = ANY($1) AND u.suspended_at IS NULL`, [ids]) : { rows: [] };
-  const full = await revealFor(employerId, ids);
-  const workers = new Map(rows.map((w) => [w.id, full(w.id) ? w : limitWorker(w)]));
+  const view = await workerViews(employerId, ids);
+  const workers = new Map(rows.map((w) => [w.id, view(w)]));
   const { rows: hires } = await q('SELECT worker_id FROM hires WHERE employer_id = $1 AND worker_id = ANY($2)', [employerId, ids]);
   const hired = new Set(hires.map((h) => h.worker_id));
   return {
@@ -1487,7 +1648,7 @@ app.get('/api/jobs/:id/matches', requireAuth('employer'), async (req, res) => {
 app.post('/api/jobs/:id/matches', requireAuth('employer'), throttle(20, 60 * 60_000, 'an hour', perUser), async (req, res) => {
   const job = await ownJob(req.user.id, num(req.params.id));
   if (!job) return res.status(404).json({ error: 'Job not found' });
-  if (liveRuns >= MAX_LIVE_RUNS) return res.status(503).json({ error: 'The AI matcher is busy right now. Please try again in a minute.' });
+  if (liveRuns >= MAX_LIVE_RUNS) return res.status(503).json({ error: 'Smart Matching is busy right now. Please try again in a minute.' });
   await stopStaleRuns();
 
   // Check the allowance and that no other run is going, under a lock so two clicks can't both start one.
@@ -1500,8 +1661,8 @@ app.post('/api/jobs/:id/matches', requireAuth('employer'), throttle(20, 60 * 60_
     const refuse = (status, body) => db.query('ROLLBACK').then(() => res.status(status).json(body));
     if (usage.remaining === 0) {
       return await refuse(402, usage.limit === 0
-        ? { error: 'Find matches with AI is part of the Pro and Premium plans.', upgrade: true, usage }
-        : { error: `You've used this month's ${usage.limit} AI match searches on the ${PLAN_LIMITS[usage.plan].name} plan. They reset on the 1st.`, upgrade: usage.plan !== 'premium', usage });
+        ? { error: 'Smart Matching is part of the Pro and Premium plans.', upgrade: true, usage }
+        : { error: `You've used this month's ${usage.limit} Smart Matching searches on the ${PLAN_LIMITS[usage.plan].name} plan. They reset on the 1st.`, upgrade: usage.plan !== 'premium', usage });
     }
     if ((await db.query("SELECT 1 FROM match_runs WHERE employer_id = $1 AND status = 'running'", [req.user.id])).rowCount)
       return await refuse(409, { error: 'A match search is already running. It takes about a minute.' });
@@ -1518,6 +1679,8 @@ app.post('/api/jobs/:id/matches', requireAuth('employer'), throttle(20, 60 * 60_
   const send = (event) => { if (!res.writableEnded) res.write(`data: ${JSON.stringify(event)}\n\n`); };
   send({ type: 'start', run_id: run.id });
   const steps = [];
+  // Step saves run one after another and finish before the final save, so a late one can't overwrite it.
+  let saving = Promise.resolve();
   liveRuns++;
   try {
     const result = await runMatchAgent({
@@ -1528,9 +1691,11 @@ app.post('/api/jobs/:id/matches', requireAuth('employer'), throttle(20, 60 * 60_
         const saved = { ...step, at: new Date().toISOString() };
         steps.push(saved);
         send(saved);
-        q('UPDATE match_runs SET steps = $2 WHERE id = $1', [run.id, JSON.stringify(steps)]).catch((err) => console.error(err));
+        const json = JSON.stringify(steps);
+        saving = saving.then(() => q('UPDATE match_runs SET steps = $2 WHERE id = $1', [run.id, json])).catch((err) => console.error(err));
       },
     });
+    await saving;
     const { rows: [done] } = await q(
       `UPDATE match_runs SET status = 'done', steps = $2, shortlist = $3, summary = $4, input_tokens = $5, output_tokens = $6, finished_at = now()
        WHERE id = $1 RETURNING *`,
@@ -1538,9 +1703,10 @@ app.post('/api/jobs/:id/matches', requireAuth('employer'), throttle(20, 60 * 60_
     send({ type: 'result', run: await matchRunView(req.user.id, done, job), budget: payText(job), usage: await matchUsage(pool, req.user.id) });
   } catch (err) {
     console.error(err);
+    await saving;
     await q("UPDATE match_runs SET status = 'failed', steps = $2, error = $3, finished_at = now() WHERE id = $1",
-      [run.id, JSON.stringify(steps), 'The AI matcher ran into a problem']).catch((e) => console.error(e));
-    send({ type: 'error', error: 'The AI matcher ran into a problem, and this search wasn’t counted. Please try again.' });
+      [run.id, JSON.stringify(steps), 'Smart Matching ran into a problem']).catch((e) => console.error(e));
+    send({ type: 'error', error: 'Smart Matching ran into a problem, and this search wasn’t counted. Please try again.' });
   } finally {
     liveRuns--;
     res.end();
@@ -1632,6 +1798,22 @@ app.get('/api/analytics', requireAuth('employer'), async (req, res) => {
 // --- Messages ---
 
 // Inbox: one row per person you've exchanged messages with, newest first.
+// Which of this employer's jobs a worker applied to, newest first, within what their plan lets them see.
+// Shown in Messages so the employer knows what each conversation is about.
+async function appliedToMe(employerId, workerIds) {
+  const limit = PLAN_LIMITS[await planOf(pool, employerId)].applicants;
+  const { rows } = await q(
+    `SELECT a.worker_id, a.id AS application_id, a.job_id, j.title, a.created_at, a.credits, (a.analysis->>'score')::int AS score, a.created_at > now() - interval '3 days' AS recent,
+       EXISTS (SELECT 1 FROM hires h WHERE h.employer_id = $2 AND h.worker_id = a.worker_id AND h.job_id = a.job_id) AS hired,
+       EXISTS (SELECT 1 FROM messages m WHERE m.sender_id = $2 AND m.recipient_id = a.worker_id AND m.job_id = a.job_id) AS messaged
+     FROM applications a JOIN jobs j ON j.id = a.job_id
+     WHERE a.worker_id = ANY($1) AND j.employer_id = $2 AND ($3::int IS NULL OR ${RANK} < $3)
+     ORDER BY a.created_at DESC`, [workerIds, employerId, limit]);
+  const by = {};
+  for (const { worker_id, ...r } of rows) (by[worker_id] ??= []).push(r);
+  return by;
+}
+
 app.get('/api/messages', requireAuth(), async (req, res) => {
   const { rows } = await q(
     `WITH m AS (
@@ -1643,6 +1825,10 @@ app.get('/api/messages', requireAuth(), async (req, res) => {
      FROM latest l JOIN users u ON u.id = l.other ORDER BY l.created_at DESC`,
     [req.user.id]
   );
+  if (req.user.role === 'employer') {
+    const applied = await appliedToMe(req.user.id, rows.map((r) => r.user_id));
+    for (const r of rows) r.applied = applied[r.user_id] ?? [];
+  }
   res.json(rows);
 });
 
@@ -1690,8 +1876,69 @@ app.get('/api/messages/:userId', requireAuth(), async (req, res) => {
      ORDER BY m.created_at, m.id`,
     [req.user.id, other.id]
   );
-  res.json({ user: { id: other.id, name: other.name, role: other.role, status: other.status }, can_send: !other.status && await canSend(req.user, other), messages: rows });
+  // Employers see the worker's side panel: their headline, rate and every application to this employer.
+  const employerView = req.user.role === 'employer' && other.role === 'worker';
+  const applied = employerView ? (await appliedToMe(req.user.id, [other.id]))[other.id] ?? [] : undefined;
+  const profile = employerView ? (await q('SELECT title, hourly_rate FROM worker_profiles WHERE user_id = $1', [other.id])).rows[0] ?? {} : {};
+  res.json({ user: { id: other.id, name: other.name, role: other.role, status: other.status, ...profile }, can_send: !other.status && await canSend(req.user, other), messages: rows, applied });
 });
+
+// Message many applicants at once (the Applicants page): each gets the same text in their own private
+// conversation, tagged with the job they applied to. Only applicants the employer's plan lets them see.
+const BULK_MAX = 50;
+app.post('/api/messages/bulk', requireAuth('employer'), throttle(10, 60 * 60_000, 'an hour', perUser), async (req, res) => {
+  const body = str(req.body?.body, 5000);
+  const ids = [...new Set((Array.isArray(req.body?.application_ids) ? req.body.application_ids : []).map(num).filter(Number.isInteger))];
+  if (!body) return bad(res, 'Message can’t be empty');
+  if (!ids.length) return bad(res, 'Pick at least one applicant');
+  if (ids.length > BULK_MAX) return bad(res, `You can message up to ${BULK_MAX} applicants at once`);
+  const limit = PLAN_LIMITS[await planOf(pool, req.user.id)].applicants;
+  const { rows } = await q(
+    `SELECT DISTINCT ON (a.worker_id) a.worker_id, a.job_id, j.title AS job_title, u.name, u.email,
+       CASE WHEN u.deleted_at IS NOT NULL THEN 'deleted' WHEN u.suspended_at IS NOT NULL THEN 'suspended' WHEN u.deactivated_at IS NOT NULL THEN 'deactivated' END AS status
+     FROM applications a JOIN jobs j ON j.id = a.job_id JOIN users u ON u.id = a.worker_id
+     WHERE a.id = ANY($1) AND j.employer_id = $2 AND ($3::int IS NULL OR ${RANK} < $3)
+     ORDER BY a.worker_id, a.created_at DESC`, [ids, req.user.id, limit]);
+  const sent = [], skipped = [];
+  for (const r of rows) {
+    if (r.status) { skipped.push({ name: r.status === 'deleted' ? 'Deleted user' : r.name, reason: r.status === 'deactivated' ? 'paused their account' : 'can’t get messages' }); continue; }
+    await deliverMessage(req.user, { id: r.worker_id, name: r.name, email: r.email }, { id: r.job_id, title: r.job_title }, body);
+    sent.push(r.worker_id);
+  }
+  res.status(201).json({ sent: sent.length, skipped });
+});
+
+// Saves one message and emails the recipient, but only for their first unread message from this sender,
+// so a burst of messages sends one email. `job` ({ id, title }) tags the conversation, or null.
+async function deliverMessage(me, other, job, body) {
+  // Email only for the first unread message, so a burst of messages sends one email.
+  const { rowCount: alreadyUnread } = await q(
+    'SELECT 1 FROM messages WHERE sender_id = $1 AND recipient_id = $2 AND read_at IS NULL LIMIT 1',
+    [me.id, other.id]
+  );
+  const { rows } = await q(
+    `INSERT INTO messages (sender_id, recipient_id, job_id, body) VALUES ($1, $2, $3, $4)
+     RETURNING id, sender_id, body, created_at, read_at, job_id`,
+    [me.id, other.id, job?.id ?? null, body]
+  );
+  if (!alreadyUnread) {
+    const { rows: [sender] } = await q('SELECT name FROM users WHERE id = $1', [me.id]);
+    const preview = body.length > 400 ? `${body.slice(0, 400)}…` : body;
+    app.locals.sendEmail({
+      to: other.email,
+      subject: `New message from ${sender.name} on ReadyToWork.ph`,
+      ...renderEmail({
+        preheader: preview.slice(0, 120),
+        greeting: `Hi ${other.name},`,
+        intro: [`${sender.name} sent you a message on ReadyToWork.ph${job ? ` about "${job.title}"` : ''}:`],
+        quote: preview,
+        button: { label: 'Read and reply', url: `${SITE}/messages?with=${me.id}` },
+        reason: 'You’re receiving this because someone messaged you on ReadyToWork.ph. We email you once, then wait until you’ve read your messages.',
+      }),
+    }).catch((err) => console.error(err));
+  }
+  return rows[0];
+}
 
 app.post('/api/messages/:userId', requireAuth(), throttle(60, 60 * 60_000, 'an hour', perUser), async (req, res) => {
   const other = await counterpart(req.user, req.params.userId);
@@ -1710,33 +1957,8 @@ app.post('/api/messages/:userId', requireAuth(), throttle(60, 60 * 60_000, 'an h
     if (!job) return bad(res, 'That job isn’t part of this conversation');
   }
 
-  // Email only for the first unread message, so a burst of messages sends one email.
-  const { rowCount: alreadyUnread } = await q(
-    'SELECT 1 FROM messages WHERE sender_id = $1 AND recipient_id = $2 AND read_at IS NULL LIMIT 1',
-    [req.user.id, other.id]
-  );
-  const { rows } = await q(
-    `INSERT INTO messages (sender_id, recipient_id, job_id, body) VALUES ($1, $2, $3, $4)
-     RETURNING id, sender_id, body, created_at, read_at, job_id`,
-    [req.user.id, other.id, job?.id ?? null, body]
-  );
-  if (!alreadyUnread) {
-    const { rows: [me] } = await q('SELECT name FROM users WHERE id = $1', [req.user.id]);
-    const preview = body.length > 400 ? `${body.slice(0, 400)}…` : body;
-    app.locals.sendEmail({
-      to: other.email,
-      subject: `New message from ${me.name} on ReadyToWork.ph`,
-      ...renderEmail({
-        preheader: preview.slice(0, 120),
-        greeting: `Hi ${other.name},`,
-        intro: [`${me.name} sent you a message on ReadyToWork.ph${job ? ` about "${job.title}"` : ''}:`],
-        quote: preview,
-        button: { label: 'Read and reply', url: `${SITE}/messages?with=${req.user.id}` },
-        reason: 'You’re receiving this because someone messaged you on ReadyToWork.ph. We email you once, then wait until you’ve read your messages.',
-      }),
-    }).catch((err) => console.error(err));
-  }
-  res.status(201).json({ ...rows[0], job_title: job?.title ?? null });
+  const row = await deliverMessage(req.user, other, job, body);
+  res.status(201).json({ ...row, job_title: job?.title ?? null });
 });
 
 // --- Resumes (optional, PDF, private) ---

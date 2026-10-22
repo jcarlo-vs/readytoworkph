@@ -11,16 +11,16 @@ export default function PrivacyPage() {
     >
       <Section title="What we collect"><ul>
           <li><strong>Account details:</strong> your name, email address, account type (worker or employer) and password (stored only as a secure hash, never readable). If you sign in with Google, we receive your name, email and Google account ID.</li>
-          <li><strong>Worker profile:</strong> title, bio, skills, rate, availability, optional portfolio and LinkedIn links, profile photo and resume (PDF), including the text we read from it.</li>
-          <li><strong>Jobs and applications:</strong> job posts, cover letters, Credits used, and AI fit scores.</li>
+          <li><strong>Worker profile:</strong> title, bio, birth date and gender (employers see your age, never your birth date), skills, rate, availability, optional portfolio and LinkedIn links, profile photo and resume (PDF), including the text we read from it.</li>
+          <li><strong>Jobs and applications:</strong> job posts, cover letters, Credits used, Smart Scores and Smart Matching shortlists.</li>
           <li><strong>Messages</strong> between employers and workers.</li>
           <li><strong>Payments:</strong> handled by Paddle. We receive your plan and billing status, never your full card details.</li>
-          <li><strong>Technical data:</strong> IP address and basic request information, used for security and to stop abuse.</li>
+          <li><strong>Technical data:</strong> IP address, country, the pages you open, the site that sent you and your device type. We use it for security, to stop abuse and to count visits. Visit records are deleted after 90 days.</li>
         </ul></Section>
       <Section title="Why we use it"><ul>
           <li>To run ReadyToWork.ph: show jobs, deliver applications, let employers and workers message each other.</li>
           <li>To send emails you need, such as a welcome email and new-message notifications.</li>
-          <li>To produce AI fit scores when an employer asks for one.</li>
+          <li>To produce Smart Scores and Smart Matching shortlists when an employer asks for them. Both are made by AI. Smart Matching never uses age, gender, name or photo.</li>
           <li>To keep the site safe: rate limits, spam and fraud prevention.</li>
           <li>To manage paid plans for employers.</li>
         </ul></Section>
@@ -38,7 +38,7 @@ export default function PrivacyPage() {
             <li><strong>Google Cloud</strong> (Singapore): runs our servers. <strong>Google</strong> also provides optional sign-in.</li>
             <li><strong>Neon</strong> (Singapore): stores our database.</li>
             <li><strong>Cloudflare</strong>: delivers the website, protects it from attacks, stores resumes and photos privately, and provides privacy-friendly visitor statistics without cookies.</li>
-            <li><strong>Anthropic</strong>: the AI that analyzes an application when an employer requests it. Application content is sent only for that purpose.</li>
+            <li><strong>Anthropic</strong>: the AI behind Smart Scores and Smart Matching. Application and profile content is sent only when an employer asks for one, and only what that employer may already see.</li>
             <li><strong>Resend</strong>: sends our emails.</li>
             <li><strong>Paddle</strong>: processes payments as our Merchant of Record.</li>
           </ul>

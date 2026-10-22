@@ -4,6 +4,8 @@ import { Suspense } from "react";
 import { AuthProvider } from "@/lib/auth";
 import { Nav, Footer } from "@/components/ui";
 import { TopLoader } from "@/components/TopLoader";
+import { EmployerShell } from "@/components/EmployerShell";
+import { VisitTracker } from "@/components/VisitTracker";
 import "./globals.css";
 
 const geistSans = Geist({
@@ -40,15 +42,18 @@ export default function RootLayout({ children }: LayoutProps<"/">) {
       <body className="flex min-h-full flex-col bg-[#f3f7f4] font-sans text-slate-900 wrap-anywhere">
         <Suspense>
           <TopLoader />
+          <VisitTracker />
         </Suspense>
         <AuthProvider>
           {/* Nav reads the current path; the placeholder keeps the page from jumping while it loads. */}
           <Suspense fallback={<div className="h-[65px] border-b border-slate-200 bg-white" />}>
             <Nav />
           </Suspense>
-          <main className="flex-1">
-            <Suspense>{children}</Suspense>
-          </main>
+          <EmployerShell>
+            <main className="flex-1">
+              <Suspense>{children}</Suspense>
+            </main>
+          </EmployerShell>
           <Footer />
         </AuthProvider>
       </body>

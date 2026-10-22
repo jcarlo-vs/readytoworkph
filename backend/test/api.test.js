@@ -7,7 +7,7 @@ delete process.env.TURNSTILE_SECRET; // tests that need the robot check switch i
 const { pool } = await import('../src/db.js');
 const { app } = await import('../src/app.js');
 
-await pool.query('DROP TABLE IF EXISTS match_runs, blocked_emails, email_verifications, hires, saved_workers, feedback, ai_analyses, password_resets, settings, messages, applications, jobs, worker_profiles, users');
+await pool.query('DROP TABLE IF EXISTS page_views, match_runs, blocked_emails, email_verifications, hires, saved_workers, feedback, ai_analyses, password_resets, settings, messages, applications, jobs, worker_profiles, users');
 // Never send real email from tests, even if .env has a Resend key; tests read `sent` instead.
 const sent = [];
 // Email-confirmation messages go to every new email sign-up; most tests don't care, so they're left out.
@@ -24,6 +24,7 @@ app.locals.storage = {
 app.locals.relaxedLimits = true;
 // Never call the real AI from tests.
 app.locals.analyzeApplication = async () => { throw new Error('analyzer not stubbed'); };
+app.locals.matchModel = async () => { throw new Error('match model not stubbed'); };
 await pool.query(await readFile(new URL('../src/schema.sql', import.meta.url), 'utf8'));
 const server = app.listen(0);
 const base = `http://localhost:${server.address().port}/api`;
@@ -188,6 +189,23 @@ test('messages: who can write, read tracking, one email per unread batch', async
   assert.equal((await thread(maria, rival)).body.can_send, false);
 });
 
+test('messages show the employer which of their jobs the worker applied to', async () => {
+  const reg = async (email, role) => (await call('/auth/register', { email, password: 'password1', name: email, role })).body;
+  const boss = await reg('ap.boss@co.com', 'employer');
+  const rival = await reg('ap.rival@co.com', 'employer');
+  const w = await reg('ap.w@x.ph', 'worker');
+  const post = async (who, title) => (await call('/jobs', { token: who.token, title, description: 'x', job_type: 'gig' })).body;
+  const [a1, a2, other] = [await post(boss, 'Bookkeeper'), await post(boss, 'Data entry'), await post(rival, 'Rival job')];
+  for (const j of [a1, a2, other]) await call(`/jobs/${j.id}/apply`, { token: w.token, cover_letter: 'hi' });
+  await call(`/messages/${w.user.id}`, { token: boss.token, body: 'Hello', job_id: a1.id });
+
+  const thread = (await call(`/messages/${w.user.id}`, { token: boss.token }, 'GET')).body;
+  assert.deepEqual(thread.applied.map((x) => x.title), ['Data entry', 'Bookkeeper']); // newest first, never the rival's job
+  assert.deepEqual(thread.applied.map((x) => [x.messaged, x.hired, x.score]), [[false, false, null], [true, false, null]]); // messaged about Bookkeeper only
+  assert.deepEqual((await call('/messages', { token: boss.token }, 'GET')).body[0].applied.map((x) => x.job_id), [a2.id, a1.id]);
+  assert.equal((await call(`/messages/${boss.user.id}`, { token: w.token }, 'GET')).body.applied, undefined); // workers don't get it
+});
+
 test('welcome email on sign-up, tailored by role', async () => {
   sent.length = 0;
   app.locals.sendEmail = capture;
@@ -214,7 +232,7 @@ test('job page knows when the worker already applied', async () => {
   assert.equal((await call(`/jobs/${job.id}/my-application`, { token: boss }, 'GET')).status, 403);
 });
 
-test('analyzer: 10 free analyses, cached results free, premium unlimited, owner only', async () => {
+test('analyzer: 5 free analyses, cached results free, premium unlimited, owner only', async () => {
   const calls = [];
   app.locals.analyzeApplication = async ({ job, applicant }) => {
     calls.push({ job, applicant });
@@ -231,7 +249,7 @@ test('analyzer: 10 free analyses, cached results free, premium unlimited, owner 
   }
   const analyze = (token, id) => call(`/applications/${id}/analyze`, { token }, 'POST');
 
-  assert.deepEqual((await call('/analyzer/usage', { token: boss }, 'GET')).body, { plan: 'free', used: 0, limit: 10, remaining: 10 });
+  assert.deepEqual((await call('/analyzer/usage', { token: boss }, 'GET')).body, { plan: 'free', used: 0, limit: 5, remaining: 5 });
   assert.equal((await analyze(other, appIds[0])).status, 404); // not their job
   const first = await analyze(boss, appIds[0]);
   assert.equal(first.status, 200);
@@ -240,17 +258,17 @@ test('analyzer: 10 free analyses, cached results free, premium unlimited, owner 
   assert.equal(calls[0].job.title, 'Data Entry');
   assert.equal(calls[0].applicant.cover_letter, 'Letter 0');
 
-  assert.equal((await analyze(boss, appIds[0])).body.usage.remaining, 9); // cached: no extra call, no extra use
+  assert.equal((await analyze(boss, appIds[0])).body.usage.remaining, 4); // cached: no extra call, no extra use
   assert.equal(calls.length, 1);
-  for (const id of appIds.slice(1, 10)) assert.equal((await analyze(boss, id)).status, 200);
-  const blocked = await analyze(boss, appIds[10]);
+  for (const id of appIds.slice(1, 5)) assert.equal((await analyze(boss, id)).status, 200);
+  const blocked = await analyze(boss, appIds[5]);
   assert.equal(blocked.status, 402);
   assert.equal(blocked.body.upgrade, true);
-  assert.equal(calls.length, 10); // the 11th never reached the AI
+  assert.equal(calls.length, 5); // the 6th never reached the AI
   assert.equal((await analyze(boss, appIds[3])).status, 200); // re-opening an analyzed one still works
 
   const list = (await call(`/jobs/${job.id}/applications`, { token: boss }, 'GET')).body.applicants;
-  assert.equal(list.filter((a) => a.analysis).length, 10);
+  assert.equal(list.filter((a) => a.analysis).length, 5);
 
   const upgraded = async () => (await call('/stats', {}, 'GET')).body.upgraded_this_month;
   const upgradedBefore = await upgraded();
@@ -368,6 +386,49 @@ test('jobs: owner edits and closes; closed jobs leave search and refuse applicat
   assert.equal((await call(`/jobs/${job.id}/apply`, { token: w, cover_letter: 'hi' })).status, 201);
 });
 
+test("an employer's own application limit closes the job, can be raised to reopen, and is validated", async () => {
+  const reg = async (email, role) => (await call('/auth/register', { email, password: 'password1', name: email, role })).body.token;
+  const boss = await reg('lim.boss@co.com', 'employer');
+  const base = { title: 'Limited', description: 'x', job_type: 'gig' };
+  assert.equal((await call('/jobs', { token: boss, ...base, max_applications: 0 })).status, 400);
+  assert.equal((await call('/jobs', { token: boss, ...base, max_applications: 2.5 })).status, 400);
+  assert.equal((await call('/jobs', { token: boss, ...base })).body.max_applications, null); // optional
+  const job = (await call('/jobs', { token: boss, ...base, max_applications: 2 })).body;
+  assert.equal(job.max_applications, 2);
+  const [w1, w2, w3] = await Promise.all([1, 2, 3].map((i) => reg(`lim.w${i}@x.ph`, 'worker')));
+  for (const w of [w1, w2]) assert.equal((await call(`/jobs/${job.id}/apply`, { token: w, cover_letter: 'hi' })).status, 201);
+  assert.ok((await call(`/jobs/${job.id}`, {}, 'GET')).body.closed_at); // the 2nd closed it
+  assert.equal((await call(`/jobs/${job.id}/apply`, { token: w3, cover_letter: 'hi' })).status, 409);
+  assert.match((await call(`/jobs/${job.id}/closed`, { token: boss, closed: false }, 'PUT')).body.error, /your limit of 2/);
+  assert.equal((await call(`/jobs/${job.id}`, { token: boss, ...base, max_applications: 5 }, 'PUT')).status, 200); // raise it…
+  assert.equal((await call(`/jobs/${job.id}/closed`, { token: boss, closed: false }, 'PUT')).body.closed_at, null); // …then reopen
+  assert.equal((await call(`/jobs/${job.id}/apply`, { token: w3, cover_letter: 'hi' })).status, 201);
+  assert.ok((await call(`/jobs/${job.id}`, { token: boss, ...base, max_applications: 3 }, 'PUT')).body.closed_at); // lowering to what it has closes it
+  assert.equal((await call('/settings', {}, 'GET')).body.max_job_applications, 250);
+});
+
+test('a job closes itself when it reaches the most applications a job can take', async () => {
+  const reg = async (email, role) => (await call('/auth/register', { email, password: 'password1', name: email, role })).body.token;
+  await pool.query(`INSERT INTO settings (key, value) VALUES ('max_job_applications', '10')`);
+  try {
+    const boss = await reg('cap.boss@co.com', 'employer');
+    const job = (await call('/jobs', { token: boss, title: 'Cap test', description: 'x', job_type: 'gig' })).body;
+    const workers = await Promise.all(Array.from({ length: 11 }, (_, i) => reg(`cap.w${i}@x.ph`, 'worker')));
+    // Ten at once: the job lock keeps it at exactly ten.
+    const sent = await Promise.all(workers.slice(0, 10).map((token) => call(`/jobs/${job.id}/apply`, { token, cover_letter: 'hi' })));
+    assert.deepEqual(sent.map((r) => r.status), Array(10).fill(201));
+    assert.ok((await call(`/jobs/${job.id}`, {}, 'GET')).body.closed_at); // the tenth closed it
+    const late = await call(`/jobs/${job.id}/apply`, { token: workers[10], cover_letter: 'hi' });
+    assert.equal(late.status, 409);
+    assert.equal((await call('/credits', { token: workers[10] }, 'GET')).body.used, 0); // refused applies cost nothing
+    const reopen = await call(`/jobs/${job.id}/closed`, { token: boss, closed: false }, 'PUT');
+    assert.equal(reopen.status, 409); // a full job stays closed
+    assert.match(reopen.body.error, /most a job can take/);
+  } finally {
+    await pool.query(`DELETE FROM settings WHERE key = 'max_job_applications'`);
+  }
+});
+
 test('analyzer reads resume text extracted at upload, and says when it could not', async () => {
   const seen = [];
   app.locals.analyzeApplication = async ({ applicant }) => { seen.push(applicant.resume_text); return { score: 80, verdict: 'ok', strengths: [], concerns: [] }; };
@@ -430,12 +491,12 @@ test('admin: separate login, lockout, settings validated and applied', async () 
   assert.equal((await call('/admin/login', { email: 'admin@test.ph', password: 'nope' })).status, 401);
   const { token } = (await call('/admin/login', { email: 'ADMIN@test.ph', password: 'correct horse battery' })).body;
   assert.equal((await call('/me', { token }, 'GET')).status, 401); // admin tokens aren't user accounts
-  assert.deepEqual((await call('/admin/settings', { token }, 'GET')).body, { topups_enabled: false, daily_applications: 60, free_ai_analyses: 10 });
+  assert.deepEqual((await call('/admin/settings', { token }, 'GET')).body, { topups_enabled: false, daily_applications: 60, free_ai_analyses: 5, free_full_names: false, max_job_applications: 250 });
 
   assert.equal((await call('/admin/settings', { token, topups_enabled: 'yes' }, 'PUT')).status, 400);
   assert.equal((await call('/admin/settings', { token, made_up: 1 }, 'PUT')).status, 400);
   const saved = await call('/admin/settings', { token, topups_enabled: true, free_ai_analyses: 3 }, 'PUT');
-  assert.deepEqual(saved.body, { topups_enabled: true, daily_applications: 60, free_ai_analyses: 3 });
+  assert.deepEqual(saved.body, { topups_enabled: true, daily_applications: 60, free_ai_analyses: 3, free_full_names: false, max_job_applications: 250 });
   assert.equal((await call('/settings', {}, 'GET')).body.topups_enabled, true);
   const boss = (await call('/auth/register', { email: 'adm.b@co.com', password: 'password1', name: 'B', role: 'employer' })).body.token;
   assert.equal((await call('/analyzer/usage', { token: boss }, 'GET')).body.limit, 3); // setting is used live
@@ -675,14 +736,15 @@ test('plan limits: job posts per month, visible applicants, outreach, monthly AI
   await pool.query("UPDATE jobs SET created_at = now() - interval '40 days' WHERE id = $1", [jobs[0]]);
   assert.equal((await post()).status, 201);
 
-  // Everyone can apply; Free sees the top 20 (most Credits first), the rest wait behind an upgrade.
+  // Everyone can apply; Free sees the first 20 to apply (most Credits listed first), the rest wait behind an upgrade.
   const { rows: workers } = await pool.query(
     "INSERT INTO users (email, name, role) SELECT 'lw' || i || '@x.ph', 'Worker ' || i, 'worker' FROM generate_series(1, 25) i RETURNING id");
   for (const [i, w] of workers.entries())
-    await pool.query("INSERT INTO applications (job_id, worker_id, cover_letter, credits) VALUES ($1, $2, 'hi', $3)", [jobs[1], w.id, i === 24 ? 50 : 1]);
+    await pool.query("INSERT INTO applications (job_id, worker_id, cover_letter, credits) VALUES ($1, $2, 'hi', $3)", [jobs[1], w.id, i === 24 ? 50 : i === 2 ? 10 : 1]);
   const list = (await call(`/jobs/${jobs[1]}/applications`, { token: boss.token }, 'GET')).body;
   assert.deepEqual([list.applicants.length, list.total, list.limit, list.plan], [20, 25, 20, 'free']);
-  assert.equal(list.applicants[0].name, 'Worker 25'); // highest bid is seen first, even though it came last
+  assert.equal(list.applicants[0].name, 'Worker 3'); // a higher bid lists first among the visible
+  assert.ok(!list.applicants.some((a) => a.name === 'Worker 25')); // a big bid doesn't jump the line: the 25th stays hidden
   const { rows: [hidden] } = await pool.query('SELECT id FROM applications WHERE job_id = $1 AND worker_id = $2', [jobs[1], workers[23].id]);
   app.locals.analyzeApplication = async () => ({ score: 70, verdict: 'ok', strengths: [], concerns: [] });
   assert.equal((await call(`/applications/${hidden.id}/analyze`, { token: boss.token }, 'POST')).status, 402);
@@ -705,7 +767,7 @@ test('plan limits: job posts per month, visible applicants, outreach, monthly AI
 
   // AI analyses count per calendar month: last month's don't use this month's allowance.
   await setPlan('free');
-  const { rows: [first] } = await pool.query('SELECT id FROM applications WHERE job_id = $1 ORDER BY credits DESC LIMIT 1', [jobs[1]]);
+  const { rows: [first] } = await pool.query('SELECT id FROM applications WHERE job_id = $1 ORDER BY created_at, id LIMIT 1', [jobs[1]]);
   assert.equal((await call(`/applications/${first.id}/analyze`, { token: boss.token }, 'POST')).body.usage.used, 1);
   await pool.query("UPDATE ai_analyses SET created_at = now() - interval '40 days' WHERE application_id = $1", [first.id]);
   assert.equal((await call('/analyzer/usage', { token: boss.token }, 'GET')).body.used, 0);
@@ -867,6 +929,21 @@ test('worker privacy: free employers see "Maria S." and no links until they may 
   assert.equal(hideContacts('email me at @juan.cruz@gmail.com'), `email me at @${HIDDEN}`); // one email, not a handle plus a site
   assert.equal((await call('/workers?q=QuickBooks', { token: boss.token }, 'GET')).body.workers.find((x) => x.id === maria.user.id).name, 'Maria S.');
   assert.equal((await call(`/workers/${maria.user.id}`, { token: maria.token }, 'GET')).body.name, 'Maria Clara Santos'); // her own profile
+
+  // The admin can show Free employers full names; links and contact details stay hidden.
+  await pool.query(`INSERT INTO settings (key, value) VALUES ('free_full_names', 'true')`);
+  w = await view();
+  assert.deepEqual([w.name, w.name_hidden, w.linkedin_url, w.limited], ['Maria Clara Santos', false, null, true]);
+  await pool.query(`DELETE FROM settings WHERE key = 'free_full_names'`);
+
+  // Age and gender: employers see the age, never the birth date.
+  assert.equal((await call('/profile', { token: maria.token, availability: 'full-time', birth_date: '2015-01-01' }, 'PUT')).status, 400); // under 18
+  assert.equal((await call('/profile', { token: maria.token, availability: 'full-time', gender: 'robot' }, 'PUT')).status, 400);
+  const born = `${new Date().getFullYear() - 30}-01-01`;
+  await call('/profile', { token: maria.token, title: 'Bookkeeper', bio, skills: ['quickbooks'], availability: 'full-time', linkedin_url: 'linkedin.com/in/mariasantos', birth_date: born, gender: 'female' }, 'PUT');
+  w = await view();
+  assert.deepEqual([w.age, w.gender, w.birth_date], [30, 'female', undefined]);
+  assert.equal((await call(`/workers/${maria.user.id}`, { token: maria.token }, 'GET')).body.birth_date, born); // she can edit it
 
   const job = (await call('/jobs', { token: boss.token, title: 'Bookkeeper', description: 'x', job_type: 'gig' })).body;
   await call(`/jobs/${job.id}/apply`, { token: maria.token, cover_letter: 'Hi' });
@@ -1206,4 +1283,195 @@ test('admin suspends an account: signed out, can’t log in, hidden, email block
   assert.equal((await call('/auth/login', { email: 'susp.lift@co.com', password: 'password1' })).body.code, 'suspended');
   await call(`/admin/users/${other.user.id}/suspend`, { token: admin, suspended: false }, 'PUT');
   assert.equal((await call('/auth/login', { email: 'susp.lift@co.com', password: 'password1' })).status, 200);
+});
+
+test('find matches: the AI agent searches, reads profiles, shortlists only real workers; plan allowance, one run at a time, saved', async () => {
+  const reg = async (email, role, name) => (await call('/auth/register', { email, password: 'password1', name, role })).body;
+  const boss = await reg('fm.boss@co.com', 'employer', 'FM Boss');
+  const job = (await call('/jobs', { token: boss.token, title: 'Zebrashop store assistant', description: 'Shopify support, US hours',
+    skills: ['zebrashop'], job_type: 'full-time', salary_min: 5, salary_max: 8, salary_period: 'hour' })).body;
+  const mk = async (n, profile) => {
+    const w = await reg(`fm.w${n}@x.ph`, 'worker', `Fm${n} Reyes`);
+    await call('/profile', { token: w.token, bio: 'x', ...profile }, 'PUT');
+    return w.user.id;
+  };
+  const strong = await mk(1, { title: 'Zebrashop VA', skills: ['zebrashop'], hourly_rate: '12', availability: 'full-time' });
+  const ok = await mk(2, { title: 'Zebrashop helper', skills: ['zebrashop'], hourly_rate: '6', availability: 'part-time' });
+  const paused = await mk(3, { title: 'Zebrashop pro', skills: ['zebrashop'], hourly_rate: '6' });
+  await pool.query('UPDATE users SET deactivated_at = now() WHERE id = $1', [paused]);
+
+  // Streams the run (Server-Sent Events) and returns every event.
+  const run = async (token = boss.token) => {
+    const res = await fetch(`${base}/jobs/${job.id}/matches`, { method: 'POST', headers: asCookie(token) });
+    if (!res.headers.get('content-type')?.includes('event-stream')) return { status: res.status, body: await res.json() };
+    const events = (await res.text()).split('\n\n').filter(Boolean).map((e) => JSON.parse(e.replace(/^data: /, '')));
+    return { status: res.status, events };
+  };
+
+  // Free plan: upgrade first.
+  const free = await run();
+  assert.deepEqual([free.status, free.body.upgrade], [402, true]);
+  await pool.query("UPDATE users SET plan = 'pro' WHERE id = $1", [boss.user.id]);
+
+  // A scripted model: search, read two profiles (one it never found), then submit with an invented id and a reason holding an email.
+  const calls = [];
+  const reply = (...blocks) => ({ stop_reason: 'tool_use', usage: { input_tokens: 100, output_tokens: 20 }, content: blocks });
+  const use = (id, name, input) => ({ type: 'tool_use', id, name, input });
+  const script = [
+    () => reply({ type: 'text', text: 'Searching the core skill first.' }, use('t1', 'search_workers', { query: 'zebrashop' })),
+    (m) => {
+      const found = JSON.parse(m.at(-1).content[0].content).workers.map((w) => w.id);
+      assert.deepEqual(found.sort(), [strong, ok].sort()); // the paused worker isn't searchable
+      return reply(use('t2', 'get_worker_profile', { worker_id: strong }), use('t3', 'get_worker_profile', { worker_id: paused }));
+    },
+    (m) => {
+      const [profile, refused] = m.at(-1).content;
+      assert.equal(JSON.parse(profile.content).id, strong);
+      assert.equal(refused.is_error, true); // only workers a search returned
+      return reply(use('t4', 'submit_shortlist', { summary: 'Two fit.', matches: [
+        { worker_id: strong, score: 91, reason: 'Years of zebrashop; reach me at strong@x.ph' },
+        { worker_id: 424242, score: 99, reason: 'Invented person' },
+        { worker_id: ok, score: 70, reason: 'Part-time only' },
+      ] }));
+    },
+  ];
+  app.locals.matchModel = async (params) => { calls.push(params); return script[calls.length - 1](params.messages); };
+
+  const first = await run();
+  assert.equal(first.status, 200);
+  assert.deepEqual(first.events.map((e) => e.type), ['start', 'thought', 'search', 'profile', 'done', 'result']);
+  const result = first.events.at(-1);
+  assert.deepEqual(result.run.matches.map((m) => m.worker.id), [strong, ok]); // the invented id is dropped
+  assert.equal(result.run.matches[0].reason.includes('strong@x.ph'), false); // contact details never shown
+  assert.deepEqual(result.run.matches.map((m) => m.over_budget), [true, false]); // $12/hr above the $8 budget
+  assert.deepEqual([result.usage.used, result.usage.limit], [1, 3]);
+  assert.equal(calls[0].tool_choice.type, 'auto');
+
+  // Saved: coming back shows the same run and its steps.
+  const back = (await call(`/jobs/${job.id}/matches`, { token: boss.token }, 'GET')).body;
+  assert.deepEqual([back.run.id, back.run.status, back.run.matches.length, back.run.steps.length], [result.run.id, 'done', 2, 4]);
+  assert.equal(back.budget, '$5-8 per hour');
+
+  // One run at a time per employer.
+  await pool.query("INSERT INTO match_runs (job_id, employer_id) VALUES ($1, $2)", [job.id, boss.user.id]);
+  assert.equal((await run()).status, 409);
+  await pool.query("UPDATE match_runs SET created_at = now() - interval '10 minutes' WHERE status = 'running'"); // stale: interrupted, not counted
+
+  // A model that keeps searching is made to submit on the last turn; a failing model isn't counted.
+  calls.length = 0;
+  app.locals.matchModel = async (params) => {
+    calls.push(params);
+    return params.tool_choice.type === 'tool'
+      ? reply(use('s', 'submit_shortlist', { summary: 'Done.', matches: [] }))
+      : reply(use(`q${calls.length}`, 'search_workers', { query: 'zebrashop' }));
+  };
+  const capped = await run();
+  assert.equal(calls.length, 8);
+  assert.deepEqual(calls.at(-1).tool_choice, { type: 'tool', name: 'submit_shortlist' });
+  assert.equal(capped.events.at(-1).run.matches.length, 0);
+  app.locals.matchModel = async () => { throw new Error('AI down'); };
+  assert.equal((await run()).events.at(-1).type, 'error');
+  const usage = (await call(`/jobs/${job.id}/matches`, { token: boss.token }, 'GET')).body.usage;
+  assert.equal(usage.used, 2); // the interrupted and the failed runs don't count
+
+  // Pro's 3 a month: the next one finishes the allowance, then upgrade.
+  app.locals.matchModel = async () => reply(use('s', 'submit_shortlist', { summary: 'x', matches: [] }));
+  assert.equal((await run()).status, 200);
+  const out = await run();
+  assert.deepEqual([out.status, out.body.upgrade], [402, true]);
+
+  // Only the job's owner.
+  const other = await reg('fm.other@co.com', 'employer', 'Other');
+  assert.equal((await call(`/jobs/${job.id}/matches`, { token: other.token }, 'GET')).status, 404);
+  app.locals.matchModel = async () => { throw new Error('match model not stubbed'); };
+});
+
+
+test('new applicants 🔔: counts per job since the employer last opened its applicants', async () => {
+  const reg = async (email, role) => (await call('/auth/register', { email, password: 'password1', name: 'N ' + role, role })).body;
+  const boss = await reg('bell.boss@co.com', 'employer');
+  const [w1, w2] = [await reg('bell.w1@x.ph', 'worker'), await reg('bell.w2@x.ph', 'worker')];
+  const job = (await call('/jobs', { token: boss.token, title: 'Bell job', description: 'x', job_type: 'gig' })).body;
+  const bell = async () => (await call('/my/new-applicants', { token: boss.token }, 'GET')).body;
+  assert.deepEqual(await bell(), { count: 0, jobs: [] });
+
+  await call(`/jobs/${job.id}/apply`, { token: w1.token, cover_letter: 'Hi' });
+  await call(`/jobs/${job.id}/apply`, { token: w2.token, cover_letter: 'Hi' });
+  let b = await bell();
+  assert.deepEqual([b.count, b.jobs[0].id, b.jobs[0].title, b.jobs[0].count], [2, job.id, 'Bell job', 2]);
+
+  const recent = (await call('/my/recent-applicants', { token: boss.token }, 'GET')).body;
+  assert.deepEqual(recent.map((r) => [r.worker_id, r.job_title]), [[w2.user.id, 'Bell job'], [w1.user.id, 'Bell job']]); // newest first
+  await call(`/jobs/${job.id}/applications`, { token: boss.token }, 'GET'); // opened: seen
+  assert.equal((await bell()).count, 0);
+  assert.equal((await call('/my/new-applicants', { token: w1.token }, 'GET')).status, 403); // employers only
+});
+
+test('applicants page: all jobs in one list; bulk message sends one message to each, only to your own applicants', async () => {
+  const reg = async (email, role, name) => (await call('/auth/register', { email, password: 'password1', name, role })).body;
+  const boss = await reg('bulk.boss@co.com', 'employer', 'Bulk Boss');
+  const other = await reg('bulk.other@co.com', 'employer', 'Other Boss');
+  const [a, b, c] = [await reg('bulk.a@x.ph', 'worker', 'Ana A'), await reg('bulk.b@x.ph', 'worker', 'Ben B'), await reg('bulk.c@x.ph', 'worker', 'Cy C')];
+  const job1 = (await call('/jobs', { token: boss.token, title: 'Job One', description: 'x', job_type: 'gig' })).body;
+  const job2 = (await call('/jobs', { token: boss.token, title: 'Job Two', description: 'x', job_type: 'gig' })).body;
+  const theirs = (await call('/jobs', { token: other.token, title: 'Not yours', description: 'x', job_type: 'gig' })).body;
+  await call(`/jobs/${job1.id}/apply`, { token: a.token, cover_letter: 'Hi' });
+  await call(`/jobs/${job2.id}/apply`, { token: b.token, cover_letter: 'Hi' });
+  const stranger = (await call(`/jobs/${theirs.id}/apply`, { token: c.token, cover_letter: 'Hi' })).body;
+
+  assert.deepEqual((await call('/my/post-usage', { token: boss.token }, 'GET')).body, { used: 2, limit: 3 });
+  const list = (await call('/my/applicants', { token: boss.token }, 'GET')).body;
+  assert.deepEqual(list.applicants.map((r) => [r.name, r.job_title, r.is_new, r.messaged]), [['Ben B', 'Job Two', true, false], ['Ana A', 'Job One', true, false]]);
+  assert.equal((await call('/my/new-applicants', { token: boss.token }, 'GET')).body.count, 0); // opening the list clears the 🔔
+
+  const ids = [...list.applicants.map((r) => r.id), stranger.id]; // someone else's applicant is ignored
+  assert.equal((await call('/messages/bulk', { token: boss.token, application_ids: ids, body: '' })).status, 400);
+  const sent = await call('/messages/bulk', { token: boss.token, application_ids: ids, body: 'Thanks for applying! Free for a call?' });
+  assert.deepEqual([sent.status, sent.body.sent], [201, 2]);
+  const { rows } = await pool.query('SELECT recipient_id, job_id FROM messages WHERE sender_id = $1 ORDER BY recipient_id', [boss.user.id]);
+  assert.deepEqual(rows, [{ recipient_id: a.user.id, job_id: job1.id }, { recipient_id: b.user.id, job_id: job2.id }]);
+  assert.ok((await call('/my/applicants', { token: boss.token }, 'GET')).body.applicants.every((r) => r.messaged && !r.is_new));
+  assert.equal((await call('/messages/bulk', { token: a.token, application_ids: ids, body: 'x' })).status, 403); // employers only
+});
+
+test('Hire Talent search: every word must appear in title, bio or skills (any order, whole words, never the resume)', async () => {
+  const { searchWords } = await import('../src/app.js');
+  assert.deepEqual(searchWords('AI  engineer, c++'), ['\\mai\\M', '\\mengineer', '\\mc\\+\\+']);
+  const reg = async (email, role, name) => (await call('/auth/register', { email, password: 'password1', name, role })).body;
+  const boss = await reg('srch.boss@co.com', 'employer', 'Search Boss');
+  const mk = async (email, name, profile) => {
+    const w = await reg(email, 'worker', name);
+    await call('/profile', { token: w.token, availability: 'full-time', skills: [], bio: '', ...profile }, 'PUT');
+    return w.user.id;
+  };
+  const exact = await mk('srch.1@x.ph', 'Exact One', { title: 'Zqx AI Engineer' });
+  const split = await mk('srch.2@x.ph', 'Split Two', { title: 'Zqx Engineering lead', skills: ['ai'] });
+  const email = await mk('srch.3@x.ph', 'Email Three', { title: 'Zqx Email support engineer', bio: 'I maintain inboxes' }); // "ai" only inside other words
+  const half = await mk('srch.4@x.ph', 'Half Four', { title: 'Zqx AI trainer' });
+  const ids = async (q) => (await call(`/workers?q=${encodeURIComponent(q)}`, { token: boss.token }, 'GET')).body.workers.map((w) => w.id);
+  assert.deepEqual(await ids('zqx ai engineer'), [exact, split]); // title matches rank first
+  assert.ok(!(await ids('zqx ai')).includes(email));
+  assert.ok((await ids('zqx ai')).includes(half));
+  assert.deepEqual((await ids('engineer zqx')).sort(), [exact, split, email].sort()); // "engineer" also finds Engineering
+});
+
+test('visitors: the site reports page views (not admin pages, not bots); only the admin sees them', async () => {
+  const track = (body, ua = 'Mozilla/5.0 (iPhone) Safari/604.1') => fetch(`${base}/track`, {
+    method: 'POST', headers: { 'content-type': 'application/json', 'user-agent': ua, 'cf-ipcountry': 'PH' }, body: JSON.stringify(body),
+  });
+  const w = (await call('/auth/register', { email: 'visit.w@x.ph', password: 'password1', name: 'Vee Visitor', role: 'worker' })).body;
+  await track({ path: '/jobs', referrer: 'https://google.com/' });
+  await fetch(`${base}/track`, { method: 'POST', headers: { 'content-type': 'application/json', 'user-agent': 'Mozilla/5.0 (Windows) Chrome/120', 'cf-ipcountry': 'PH', ...asCookie(w.token) }, body: JSON.stringify({ path: '/profile' }) });
+  await track({ path: '/admin/users' }); // not counted
+  await track({ path: '/jobs' }, 'Googlebot/2.1'); // not counted
+  await track({ path: 'not-a-path' }); // ignored
+
+  assert.equal((await call('/admin/visitors', {}, 'GET')).status, 401);
+  const { signAdminToken } = await import('../src/auth.js');
+  const v = (await call('/admin/visitors', { token: signAdminToken() }, 'GET')).body;
+  assert.deepEqual(v.visits.map((r) => [r.path, r.country, r.device, r.user_name]), [['/profile', 'PH', 'Desktop · Chrome', 'Vee Visitor'], ['/jobs', 'PH', 'Mobile · Safari', null]]);
+  assert.equal(v.visits[1].referrer, 'https://google.com/');
+  assert.ok(v.visits[0].ip);
+  assert.deepEqual([v.totals.views_24h, v.total], [2, 2]);
+  assert.equal(v.pages.find((p) => p.path === '/jobs').views, 1);
 });

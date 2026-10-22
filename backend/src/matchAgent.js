@@ -10,13 +10,16 @@ import Anthropic from '@anthropic-ai/sdk';
 export const MAX_TURNS = 8;
 export const TIME_BUDGET_MS = 90_000;
 export const SHORTLIST_SIZE = 10;
-const MODEL = 'claude-sonnet-5-5';
+// Haiku: about $0.02 a run. It thinks by default (counted in max_tokens); the forced last turn skips thinking.
+// Sonnet 5.5 would reject that forced turn (tool_choice "tool" is a 400 there), so switching models needs care.
+const MODEL = 'claude-haiku-5-5';
 
 const SYSTEM = `You are a recruiting assistant on ReadyToWork.ph, a job board for Filipino remote workers.
 An employer wants the best ${SHORTLIST_SIZE} candidates in the talent pool for one of their job posts.
 
 How to work:
-- Search with search_workers. Start from the job's core skills; one idea per search works best.
+- Search with search_workers using a few keywords (e.g. "shopify customer support"); anyone matching any keyword is found, best matches first.
+- The skills filter is strict (every listed skill must be on the profile), so it hides good people who describe a skill differently. Prefer keywords; use skills only for a true must-have.
 - If a search finds few people, widen it (related skills, broader words, no rate limit). If it finds many weak ones, narrow it.
 - Open the most promising profiles with get_worker_profile to check real evidence: years per skill, the CV (when shared), and whether they work full-time, part-time or per project.
 - Don't filter searches by rate. A worker's rate is an asking price and is often negotiable, so a strong worker above budget still belongs on the list.
@@ -41,8 +44,8 @@ export const TOOLS = [
     input_schema: {
       type: 'object',
       properties: {
-        query: { type: 'string', description: 'Words to look for in a title, bio or skill, e.g. "shopify" or "bookkeeping". Leave empty to search by filters only.' },
-        skills: { type: 'array', items: { type: 'string' }, description: 'Skills every result must list, lowercase (e.g. ["excel"]). Strict: use only for must-haves.' },
+        query: { type: 'string', description: 'Keywords to look for in a title, bio or skills, e.g. "shopify customer support". Anyone matching any keyword is found; more matches rank higher.' },
+        skills: { type: 'array', items: { type: 'string' }, description: 'Skills every result must list exactly, lowercase (e.g. ["excel"]). Strict: leaves out people who list the skill differently, so use rarely.' },
         max_rate: { type: 'number', description: 'Highest hourly rate in USD. Rarely useful: rates are negotiable, so prefer leaving this out.' },
         availability: { type: 'string', enum: ['full-time', 'part-time', 'gig'] },
       },
@@ -90,7 +93,7 @@ let client;
 // The real model call. Swappable (app.locals.matchModel) so tests run the loop with a scripted fake.
 export const callClaude = (params) => {
   client ??= new Anthropic({ baseURL: process.env.AI_GATEWAY_URL || undefined });
-  return client.messages.create({ model: MODEL, max_tokens: 4000, ...params }, { timeout: 25_000 });
+  return client.messages.create({ model: MODEL, max_tokens: 8000, ...params }, { timeout: 25_000 });
 };
 
 const clip = (v, max) => (typeof v === 'string' ? v.trim().slice(0, max) : '');
