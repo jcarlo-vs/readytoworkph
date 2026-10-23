@@ -14,17 +14,17 @@ type Plan = {
 const PLANS: Plan[] = [
   {
     name: 'Free', monthly: 0, blurb: 'For trying ReadyToWork.ph and occasional hiring.',
-    features: ['Up to 3 job posts per month', 'See the first 20 applicants per job', 'View job applications', 'Reply to your applicants', '5 Smart Scores per month', 'Applicants sorted by interest (Credits)', NOT + 'Reach out to workers first', NOT + 'Smart Matching'],
+    features: ['Up to 3 job posts per month', 'Up to 20 applications per job', 'View job applications', 'Reply to your applicants', '5 Smart Scores per month', 'Applicants sorted by interest (Credits)', NOT + 'Reach out to workers first', NOT + 'Smart Matching'],
     cta: ['Post a job free', '/jobs/new'],
   },
   {
     name: 'Pro', monthly: 19, blurb: 'For growing teams hiring every month.',
-    features: ['Up to 5 job posts per month', 'See the first 100 applicants per job', 'View job applications', 'Reach out to any worker first', 'Smart Matching: 3 shortlists per month', '500 Smart Scores per month', 'AI reads resumes, cover letters and profiles'],
+    features: ['Up to 5 job posts per month', 'Up to 100 applications per job', 'View job applications', 'Reach out to any worker first', 'Smart Matching: 3 shortlists per month', '500 Smart Scores per month', 'AI reads resumes, cover letters and profiles'],
     cta: ['Get Pro', '/contact?subject=Upgrade%20to%20Pro'],
   },
   {
     name: 'Premium', monthly: 49, blurb: 'For agencies and high-volume hiring.', popular: true,
-    features: ['Up to 10 job posts per month', 'See every applicant (up to 250 per job)', 'View job applications', 'Reach out to any worker first', 'Smart Matching: 30 shortlists per month', 'Unlimited Smart Scores', 'Score all applicants in one click, not one by one', 'Your own hiring analytics dashboard', 'Priority support'],
+    features: ['Up to 10 job posts per month', 'Up to 250 applications per job', 'View job applications', 'Reach out to any worker first', 'Smart Matching: 30 shortlists per month', 'Unlimited Smart Scores', 'Score all applicants in one click, not one by one', 'Your own hiring analytics dashboard', 'Priority support'],
     cta: ['Get Premium', '/contact?subject=Upgrade%20to%20Premium'],
   },
 ];
@@ -39,7 +39,7 @@ const WHY = [
 
 const FAQ: [string, [string, string][]][] = [
   ['Plans and pricing', [
-    ['What does the Free plan include?', 'You can post up to 3 jobs a month, see the first 20 people who apply to each job (listed with the most interested first), read their applications and reply to them. Workers can keep applying; upgrade anytime to see everyone who applied. It’s enough to see the quality of talent before you pay anything.'],
+    ['What does the Free plan include?', 'You can post up to 3 jobs a month, receive up to 20 applications per job (listed with the most interested first), read them and reply. Need more? Pro takes up to 100 per job and Premium up to 250. It’s enough to see the quality of talent before you pay anything.'],
     ['Why can’t I message workers first on the Free plan?', 'Free accounts that could message anyone would quickly attract spammers and fake “job offers”, and workers would stop trusting messages. Keeping outreach to paid plans protects workers, keeps quality high, and keeps ReadyToWork.ph running.'],
     ['Why pay a subscription instead of a fee per hire?', 'Agencies and many freelance sites add a markup on every hour you pay, for as long as the person works for you. We charge a simple monthly price instead, so once you hire someone, every peso of their pay goes to them.'],
     ['Monthly or yearly?', `Yearly costs the same as ${YEARLY_MONTHS} months, so you get 2 months free. It suits teams that hire regularly.`],

@@ -5,7 +5,7 @@ import { useEffect } from 'react';
 import { useApi } from '@/lib/api';
 import { useAuth } from '@/lib/auth';
 import { FeedbackDialog, openFeedback } from '@/components/Feedback';
-import { ApplicantsBell, ConfirmEmailBanner, Flash, Initials, Logo, buttonGold, usesEmployerShell } from '@/components/ui';
+import { ApplicantsBell, Flash, Initials, Logo, buttonGold, usesEmployerShell } from '@/components/ui';
 
 // Signed-in employers get their own app: a dark side menu and a slim top bar instead of the site's
 // header and footer (see usesEmployerShell for where it applies).
@@ -100,7 +100,6 @@ export function EmployerShell({ children }: { children: React.ReactNode }) {
               <Link href="/account" aria-label="Account settings" className="lg:hidden"><Initials name={user.name} id={user.id} size="h-8 w-8 text-xs" /></Link>
             </div>
           </div>
-          {user.email_verified === false && <ConfirmEmailBanner email={user.email} />}
           <Flash />
         </header>
         <div data-shell className="flex-1 text-sm">{children}</div>

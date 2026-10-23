@@ -91,7 +91,7 @@ export function BandStat({ label, value, hint, href, gold = false, info }: { lab
 import { useEffect, useRef, useState, useSyncExternalStore } from 'react';
 import { usePathname, useRouter } from 'next/navigation';
 import { useAuth } from '@/lib/auth';
-import { API, api, photoStore, useApi, type User } from '@/lib/api';
+import { API, photoStore, useApi, type User } from '@/lib/api';
 import { timeAgo, fullDate } from '@/lib/time';
 
 // Relative time that re-renders every minute so "5m ago" stays accurate; hover shows the exact time.
@@ -105,6 +105,18 @@ export function TimeAgo({ date }: { date: string }) {
 }
 
 export const input = 'w-full rounded-xl border border-emerald-950/10 bg-emerald-50/40 px-3.5 py-2.5 text-sm transition focus:border-emerald-600 focus:bg-white focus:outline-none focus:ring-2 focus:ring-emerald-600/20';
+
+// The 6-digit code box (email codes). Digits only; calls onComplete as soon as the 6th digit is typed or pasted.
+export function CodeInput({ id = 'code', value, onChange, onComplete, disabled }: { id?: string; value: string; onChange: (v: string) => void; onComplete: (v: string) => void; disabled?: boolean }) {
+  return (
+    <>
+      <label htmlFor={id} className="sr-only">6-digit code</label>
+      <input id={id} autoFocus inputMode="numeric" autoComplete="one-time-code" maxLength={6} placeholder="••••••" value={value} disabled={disabled}
+        onChange={(e) => { const v = e.target.value.replace(/\D/g, '').slice(0, 6); onChange(v); if (v.length === 6) onComplete(v); }}
+        className={`${input} text-center font-mono text-3xl tracking-[0.5em]`} />
+    </>
+  );
+}
 
 export function Field({ label, children }: { label: string; children: React.ReactNode }) {
   return (
@@ -304,30 +316,6 @@ function ProfileMenu({ user, onSignOut }: { user: User; onSignOut: () => void })
   );
 }
 
-// Shown to signed-in people who haven't confirmed their email yet, with a way to get a new link.
-export function ConfirmEmailBanner({ email }: { email: string }) {
-  const [state, setState] = useState<'idle' | 'busy' | 'sent' | string>('idle');
-  async function resend() {
-    setState('busy');
-    try {
-      await api('/auth/verify/resend', { method: 'POST', quiet: true });
-      setState('sent');
-    } catch (err) {
-      setState((err as Error).message);
-    }
-  }
-  return (
-    <div className="border-t border-amber-200 bg-amber-50 text-sm text-amber-950">
-      <div className="mx-auto flex max-w-6xl flex-wrap items-center gap-x-3 gap-y-1 px-4 py-2">
-        <span>📩 Please confirm your email. We sent a link to <b>{email}</b> (check Spam too).</span>
-        {state === 'sent' ? <span className="font-semibold text-emerald-800">New link sent ✓</span>
-          : <button type="button" onClick={resend} disabled={state === 'busy'} className="font-semibold text-emerald-800 underline-offset-2 hover:underline disabled:opacity-50">{state === 'busy' ? 'Sending…' : 'Send a new link'}</button>}
-        {!['idle', 'busy', 'sent'].includes(state) && <span className="text-red-700">{state}</span>}
-      </div>
-    </div>
-  );
-}
-
 // A one-time green notice carried across a redirect in sessionStorage (e.g. "Welcome back!").
 export function Flash() {
   const [text, setText] = useState('');
@@ -468,7 +456,6 @@ export function Nav() {
           </>
         )}
       </nav>
-      {user?.email_verified === false && <ConfirmEmailBanner email={user.email} />}
       <Flash />
     </header>
   );

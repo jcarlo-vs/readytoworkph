@@ -33,13 +33,15 @@ const CONTACT = 'support@readytowork.ph'; // where people write to us
  *   button     { label, url }
  *   reason     why the person is receiving this email
  */
-export function renderEmail({ preheader, greeting, intro, quote, steps = [], button, reason }) {
+// `code` shows a one-time code in a big box; `button` is optional when there's a code instead.
+export function renderEmail({ preheader, greeting, intro, quote, code, steps = [], button, reason }) {
   const text = [
     greeting,
     ...intro,
     quote && `"${quote}"`,
+    code && `Your code: ${code}`,
     steps.length && steps.map(([title, detail], i) => `${i + 1}. ${title}\n   ${detail}`).join('\n\n'),
-    `${button.label}: ${button.url}`,
+    button && `${button.label}: ${button.url}`,
     'The ReadyToWork.ph team',
     `---\n${reason}\nQuestions? Email ${CONTACT}`,
   ].filter(Boolean).join('\n\n');
@@ -61,10 +63,11 @@ export function renderEmail({ preheader, greeting, intro, quote, steps = [], but
         <tr><td valign="top" style="padding:0 12px 14px 0"><div style="width:24px;height:24px;border-radius:12px;background:#ecfdf5;color:#047857;font-size:13px;font-weight:700;line-height:24px;text-align:center">${i + 1}</div></td>
         <td style="padding:0 0 14px;font-size:15px;line-height:1.5;color:#334155"><b style="color:#0f172a">${esc(title)}</b><br>${esc(detail)}</td></tr>`).join('')}
       </table>` : ''}
-      <table role="presentation" cellpadding="0" cellspacing="0" style="margin:8px 0 12px"><tr>
+      ${code ? `<div style="margin:0 0 24px;padding:18px;background:#ecfdf5;border-radius:10px;text-align:center;font-size:34px;font-weight:700;letter-spacing:10px;color:#022c22;font-family:Menlo,Consolas,monospace">${esc(code)}</div>` : ''}
+      ${button ? `<table role="presentation" cellpadding="0" cellspacing="0" style="margin:8px 0 12px"><tr>
         <td style="border-radius:8px;background:#022c22"><a href="${esc(button.url)}" style="display:inline-block;padding:12px 22px;font-size:15px;font-weight:600;color:#ffffff;text-decoration:none;border-radius:8px">${esc(button.label)}</a></td>
       </tr></table>
-      <p style="margin:0 0 24px;font-size:13px;line-height:1.5;color:#64748b">Or open this link: <a href="${esc(button.url)}" style="color:#047857;word-break:break-all">${esc(button.url)}</a></p>
+      <p style="margin:0 0 24px;font-size:13px;line-height:1.5;color:#64748b">Or open this link: <a href="${esc(button.url)}" style="color:#047857;word-break:break-all">${esc(button.url)}</a></p>` : ''}
       <p style="margin:0;font-size:15px;color:#334155">The ReadyToWork.ph team</p>
     </td></tr>
     <tr><td style="padding:20px 4px;font-size:12px;line-height:1.6;color:#64748b">

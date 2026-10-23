@@ -1,9 +1,9 @@
 'use client';
 import Link from 'next/link';
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { salary, useApi, PAY_PERIODS, type Job, type SalaryPeriod } from '@/lib/api';
 import { useAuth } from '@/lib/auth';
-import { Field, ErrorText, input, button, buttonGhost, card } from '@/components/ui';
+import { Field, ErrorText, input, button, buttonGhost, buttonGold, card } from '@/components/ui';
 import { Select, JOB_TYPES } from '@/components/Select';
 
 export type JobInput = {
@@ -20,8 +20,8 @@ const toInput = (j?: Job): JobInput => ({
   max_applications: j?.max_applications != null ? String(j.max_applications) : '',
 });
 
-// How many applicants each plan lets an employer see per job (null = all), as the backend's PLAN_LIMITS.
-const PLAN_SEES = { free: 20, pro: 100, premium: null } as const;
+// Most applications one job takes on each plan (null = the site-wide most), as the backend's PLAN_LIMITS.
+const PLAN_CAP = { free: 20, pro: 100, premium: null } as const;
 const PLAN_NAME = { free: 'Free', pro: 'Pro', premium: 'Premium' } as const;
 const STEPS = ['The job', 'Type and pay', 'Applicants'] as const;
 
@@ -127,77 +127,112 @@ export function JobForm({ job, heading, submitLabel, notice, onSubmit }: {
 
         {last && notice}
         <ErrorText msg={status.error} />
-        <div className="flex items-center justify-between gap-2 border-t border-slate-100 pt-4">
-          {step > 0 ? <button type="button" onClick={() => setStep(step - 1)} className={buttonGhost}>‹ Back</button> : <span />}
+        {/* Same height and width for both (the primary gets a clear border to match the outlined one). */}
+        <div className="flex items-center justify-between gap-3 border-t border-slate-100 pt-5">
+          {step > 0
+            ? <button type="button" onClick={() => setStep(step - 1)} className={`${buttonGhost} h-11 min-w-28 gap-1.5 pl-4`}><Chevron back />Back</button>
+            : <span />}
           {last
-            ? <button className={button} disabled={status.busy || !jobDone}>{status.busy ? 'Saving…' : submitLabel}</button>
-            : <button className={button} disabled={!jobDone}>Next ›</button>}
+            ? <button className={`${button} h-11 min-w-28 border border-transparent`} disabled={status.busy || !jobDone}>{status.busy ? 'Saving…' : submitLabel}</button>
+            : <button className={`${button} h-11 min-w-28 gap-1.5 border border-transparent pr-4`} disabled={!jobDone}>Next<Chevron /></button>}
         </div>
       </form>
     </div>
   );
 }
 
-// Step 3: up to how many applications the job takes before it closes itself. Employers see applicants
-// first come, first served up to their plan's limit, so a bar shows how many they'll view and how many
-// wait for an upgrade (kept, never lost).
+// Step 3: up to how many applications the job takes before it closes itself. Each plan has a ceiling
+// (Free 20, Pro 100, Premium the site-wide most), drawn true to scale on one bar; going past yours snaps back
+// and says which plan unlocks more. The API refuses anything above the plan too.
 function ApplicationLimit({ value, onChange }: { value: string; onChange: (v: string) => void }) {
   const { user } = useAuth();
   const { data: settings } = useApi<{ max_job_applications: number }>('/settings');
   const most = settings?.max_job_applications ?? 250;
   const plan = user?.plan ?? 'free';
-  const sees = PLAN_SEES[plan];
-  const limit = value ? Number(value) : most;
-  const presets = [{ v: '20', label: '20' }, { v: '50', label: '50' }, { v: '100', label: '100' }, { v: '', label: `As many as possible (${most})` }];
-  const custom = !presets.some((p) => p.v === value);
-  const visible = sees === null ? limit : Math.min(sees, limit);
-  const locked = limit - visible;
+  const capOf = (p: keyof typeof PLAN_CAP) => Math.min(most, PLAN_CAP[p] ?? most);
+  const cap = capOf(plan);
+  const current = value ? Math.min(Number(value), cap) : cap; // empty = the most the plan allows
+  const [over, setOver] = useState(false);
+  // A job saved earlier above today's plan ceiling comes down to it, or saving would be refused.
+  useEffect(() => { if (value && Number(value) > cap) onChange(String(cap)); }, [value, cap, onChange]);
+
+  const set = (v: number) => {
+    const next = Math.max(1, Math.min(most, Math.round(v)));
+    setOver(next > cap);
+    onChange(String(Math.min(next, cap)));
+  };
+  const zones = (['free', 'pro', 'premium'] as const).map((p, i, all) => ({
+    p, max: capOf(p), from: i ? capOf(all[i - 1]) : 0, locked: capOf(p) > cap,
+  }));
+  const pct = (v: number) => `${(v / most) * 100}%`;
+  const step = 'flex size-11 items-center justify-center rounded-xl border border-slate-200 bg-white text-xl font-semibold text-emerald-950 transition hover:bg-slate-50 disabled:opacity-40';
 
   return (
     <div className="space-y-5">
       <div>
-        <h2 className="text-lg font-bold text-slate-900">Up to how many applications do you want to receive?</h2>
-        <p className="mt-0.5 text-sm text-slate-500">When your job reaches this number, it stops taking applications on its own. You can change it later.</p>
+        <h2 className="text-lg font-bold text-slate-900">Up to how many applications do you want?</h2>
+        <p className="mt-0.5 text-sm text-slate-500">Your job stops taking applications when it reaches this number. You can change it later.</p>
       </div>
 
-      <div className="flex flex-wrap items-center gap-2" role="radiogroup" aria-label="Most applications">
-        {presets.map((p) => {
-          const on = p.v === value;
-          return (
-            <button key={p.label} type="button" role="radio" aria-checked={on} onClick={() => onChange(p.v)}
-              className={`rounded-full border px-4 py-2 text-sm font-semibold transition ${on ? 'border-emerald-950 bg-emerald-950 text-white' : 'border-slate-200 bg-white text-slate-700 hover:border-emerald-600'}`}>
-              {p.label}
-            </button>
-          );
-        })}
-        <label className={`flex items-center gap-2 rounded-full border py-1 pl-4 pr-1 text-sm transition ${custom && value ? 'border-emerald-950' : 'border-slate-200'}`}>
-          <span className="text-slate-500">Other</span>
-          <input type="number" min={1} max={most} inputMode="numeric" value={custom ? value : ''} placeholder="30" aria-label="Other number"
-            onChange={(e) => onChange(e.target.value === '' ? '' : String(Math.min(most, Math.max(1, Math.trunc(Number(e.target.value))))))}
-            className="w-16 rounded-full bg-slate-50 px-2 py-1 text-center font-semibold outline-none focus:bg-emerald-50" />
-        </label>
+      <div className="flex flex-wrap items-center gap-3">
+        <button type="button" className={step} onClick={() => set(current - 1)} disabled={current <= 1} aria-label="Fewer">−</button>
+        <span className="min-w-20 text-center font-display text-4xl font-extrabold leading-none text-emerald-950" aria-live="polite">{current}</span>
+        <button type="button" className={step} onClick={() => set(current + 1)} aria-label="More">+</button>
+        <span className="text-sm text-slate-500">applications, then your job closes</span>
       </div>
 
-      {/* What the employer will be able to view, first come, first served. */}
-      <div className="space-y-2 rounded-xl bg-slate-50 p-4">
-        <div className="flex h-2.5 overflow-hidden rounded-full bg-slate-200" aria-hidden="true">
-          <span className="bg-emerald-600" style={{ width: `${(visible / limit) * 100}%` }} />
-          {locked > 0 && <span className="bg-[repeating-linear-gradient(45deg,#fcd34d_0_6px,#fef3c7_6px_12px)]" style={{ width: `${(locked / limit) * 100}%` }} />}
+      <div>
+        {/* Where each plan ends, on the same 1-to-most scale as the bar. */}
+        <div className="relative mx-3.5 h-5 text-xs font-semibold" aria-hidden="true">
+          {zones.map((z) => (
+            <span key={z.p} style={{ left: pct(z.max) }}
+              className={`absolute bottom-0.5 flex items-center gap-1 whitespace-nowrap ${z.p === 'premium' ? '-translate-x-full' : '-translate-x-1/2'} ${z.locked ? 'text-slate-500' : 'text-emerald-700'}`}>
+              {z.locked && <Lock />}{PLAN_NAME[z.p]} {z.max}
+            </span>
+          ))}
         </div>
-        <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-1 text-xs">
-          <span className="font-semibold text-emerald-800">You can view the first {visible} who apply</span>
-          {locked > 0 && <span className="font-semibold text-amber-800">{locked} more saved for when you upgrade</span>}
+        <div className="relative h-11">
+          <div className="absolute inset-x-3.5 top-3.5 flex h-4 overflow-hidden rounded-full" aria-hidden="true">
+            {zones.map((z) => (
+              <span key={z.p} style={{ flex: `${z.max - z.from} 0 0` }}
+                className={`${z.p !== 'free' ? 'border-l-2 border-white' : ''} ${z.locked ? 'bg-[repeating-linear-gradient(135deg,#e2e8f0_0_6px,#f1f5f9_6px_12px)]' : 'bg-emerald-100'}`} />
+            ))}
+          </div>
+          <span className="absolute left-3.5 top-3.5 h-4 rounded-full bg-emerald-700" style={{ width: `calc((100% - 28px) * ${current / most})` }} aria-hidden="true" />
+          <input type="range" min={1} max={most} value={current} onChange={(e) => set(Number(e.target.value))}
+            aria-label="Most applications" aria-valuetext={`${current} applications`}
+            className="absolute inset-0 h-11 w-full cursor-pointer appearance-none bg-transparent focus-visible:outline-none
+              [&::-moz-range-thumb]:size-[22px] [&::-moz-range-thumb]:rounded-full [&::-moz-range-thumb]:border-[3px] [&::-moz-range-thumb]:border-emerald-950 [&::-moz-range-thumb]:bg-white [&::-moz-range-thumb]:shadow
+              [&::-webkit-slider-thumb]:size-7 [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:border-[3px] [&::-webkit-slider-thumb]:border-emerald-950 [&::-webkit-slider-thumb]:bg-white [&::-webkit-slider-thumb]:shadow
+              focus-visible:[&::-webkit-slider-thumb]:ring-4 focus-visible:[&::-webkit-slider-thumb]:ring-emerald-300 focus-visible:[&::-moz-range-thumb]:ring-4 focus-visible:[&::-moz-range-thumb]:ring-emerald-300" />
         </div>
-        {locked > 0 && (
-          <p className="flex flex-wrap items-center gap-x-2 gap-y-1 border-t border-slate-200 pt-2 text-xs text-slate-600">
-            The {PLAN_NAME[plan]} plan shows the first {sees} people to apply. Nobody is lost: upgrade any time to see the rest.
-            <Link href="/pricing" className="font-semibold text-amber-800 underline underline-offset-2 hover:text-amber-900">
-              {plan === 'free' ? 'Upgrade to Pro to see 100' : 'Upgrade to Premium to see all'}
-            </Link>
-            <button type="button" onClick={() => onChange(String(sees))} className="font-semibold text-slate-700 underline underline-offset-2 hover:text-slate-900">Set it to {sees}</button>
+      </div>
+
+      {over && plan !== 'premium' ? (
+        <div role="alert" className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-amber-300 bg-amber-50 px-4 py-3">
+          <p className="text-sm text-amber-950">
+            <b>The {PLAN_NAME[plan]} plan accepts up to {cap} applications.</b><br />
+            {plan === 'free' ? `Upgrade to Pro to accept up to ${capOf('pro')}, or Premium for up to ${most}.` : `Upgrade to Premium to accept up to ${most}.`}
           </p>
-        )}
-      </div>
+          <Link href="/pricing" className={buttonGold}>Upgrade to {plan === 'free' ? 'Pro' : 'Premium'}</Link>
+        </div>
+      ) : (
+        <p className="text-sm text-slate-500">
+          {plan === 'premium' ? `Premium accepts up to ${cap} applications per job.` : `Your ${PLAN_NAME[plan]} plan accepts up to ${cap}. The grey part unlocks when you upgrade.`}
+        </p>
+      )}
     </div>
   );
 }
+
+const Lock = () => (
+  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" aria-hidden="true">
+    <rect x="5" y="11" width="14" height="10" rx="2" /><path d="M8 11V7a4 4 0 0 1 8 0v4" />
+  </svg>
+);
+
+const Chevron = ({ back = false }: { back?: boolean }) => (
+  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+    <path d={back ? 'M15 6l-6 6 6 6' : 'M9 6l6 6-6 6'} />
+  </svg>
+);

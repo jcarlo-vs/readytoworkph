@@ -184,6 +184,13 @@ CREATE TABLE IF NOT EXISTS saved_workers (
   created_at  timestamptz NOT NULL DEFAULT now(),
   PRIMARY KEY (employer_id, worker_id)
 );
+-- People someone removed from their Messages list. Messages stay; a newer message brings the person back.
+CREATE TABLE IF NOT EXISTS hidden_conversations (
+  user_id   int NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  other_id  int NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  hidden_at timestamptz NOT NULL DEFAULT now(),
+  PRIMARY KEY (user_id, other_id)
+);
 CREATE TABLE IF NOT EXISTS hires (
   employer_id int NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   worker_id   int NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -215,15 +222,22 @@ ALTER TABLE worker_profiles ADD COLUMN IF NOT EXISTS show_resume boolean NOT NUL
 -- reset, or Google taking over an account that had a password). 'epoch' = nothing signed out yet.
 ALTER TABLE users ADD COLUMN IF NOT EXISTS sessions_valid_from timestamptz NOT NULL DEFAULT 'epoch';
 
--- Email confirmation. Google sign-ups count as confirmed (Google checked the address); email sign-ups get a
--- one-time link. Links are stored hashed, like password reset links.
+-- Email confirmation. Google sign-ups count as confirmed (Google checked the address); email sign-ups type a
+-- 6-digit code (10 minutes, 5 tries; one code per account, stored hashed). The old one-time links are gone.
 ALTER TABLE users ADD COLUMN IF NOT EXISTS email_verified_at timestamptz;
 UPDATE users SET email_verified_at = created_at WHERE google_sub IS NOT NULL AND email_verified_at IS NULL;
-CREATE TABLE IF NOT EXISTS email_verifications (
-  token_hash text PRIMARY KEY,
-  user_id    int NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+DROP TABLE IF EXISTS email_verifications;
+CREATE TABLE IF NOT EXISTS email_codes (
+  user_id    int PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+  code_hash  text NOT NULL,
+  tries      int NOT NULL DEFAULT 0,
+  sent_at    timestamptz NOT NULL DEFAULT now(),
   expires_at timestamptz NOT NULL
 );
+-- The same table holds the codes for changing a confirmed email: 'reauth' (Google-only accounts prove it's them
+-- with a code at their current email) and 'change' (the code sent to `new_email`). One code per account at a time.
+ALTER TABLE email_codes ADD COLUMN IF NOT EXISTS purpose text NOT NULL DEFAULT 'confirm' CHECK (purpose IN ('confirm', 'reauth', 'change'));
+ALTER TABLE email_codes ADD COLUMN IF NOT EXISTS new_email text;
 
 -- Deleted accounts (Data Privacy Act: right to erasure). The row stays as a blank placeholder so the other
 -- person keeps their side of a conversation ("Deleted user"); email, password, Google link, name, files,

@@ -7,11 +7,12 @@ delete process.env.TURNSTILE_SECRET; // tests that need the robot check switch i
 const { pool } = await import('../src/db.js');
 const { app } = await import('../src/app.js');
 
-await pool.query('DROP TABLE IF EXISTS page_views, match_runs, blocked_emails, email_verifications, hires, saved_workers, feedback, ai_analyses, password_resets, settings, messages, applications, jobs, worker_profiles, users');
+await pool.query('DROP TABLE IF EXISTS hidden_conversations, page_views, match_runs, blocked_emails, email_verifications, email_codes, hires, saved_workers, feedback, ai_analyses, password_resets, settings, messages, applications, jobs, worker_profiles, users');
 // Never send real email from tests, even if .env has a Resend key; tests read `sent` instead.
 const sent = [];
 // Email-confirmation messages go to every new email sign-up; most tests don't care, so they're left out.
-const capture = async (e) => { if (!/^Confirm your email/.test(e.subject)) sent.push(e); };
+const isCode = (e) => /is your ReadyToWork\.ph code$/.test(e.subject);
+const capture = async (e) => { if (!isCode(e)) sent.push(e); };
 app.locals.sendEmail = capture;
 // In-memory stand-in for R2 so tests never touch real storage.
 const files = new Map();
@@ -143,7 +144,7 @@ test('credits: daily budget, bidding order, validation', async () => {
 
 test('messages: who can write, read tracking, one email per unread batch', async () => {
   const emails = [];
-  app.locals.sendEmail = async (e) => { if (!/^(Welcome|Confirm your email)/.test(e.subject)) emails.push(e); };
+  app.locals.sendEmail = async (e) => { if (!/^(Welcome|Your job is live)/.test(e.subject) && !isCode(e)) emails.push(e); };
   const reg = async (email, role, name) => (await call('/auth/register', { email, password: 'password1', name, role })).body;
   const boss = await reg('hr@acme.ph', 'employer', 'Acme HR');
   const rival = await reg('hr@rival.ph', 'employer', 'Rival');
@@ -189,6 +190,28 @@ test('messages: who can write, read tracking, one email per unread batch', async
   assert.equal((await thread(maria, rival)).body.can_send, false);
 });
 
+test('removing people from Messages: one or many, only for me, back when a new message arrives', async () => {
+  const reg = async (email, role) => (await call('/auth/register', { email, password: 'password1', name: email, role })).body;
+  const boss = await reg('hide.boss@co.com', 'employer');
+  await pool.query("UPDATE users SET plan = 'pro' WHERE id = $1", [boss.user.id]);
+  const [a, b, c] = await Promise.all(['a', 'b', 'c'].map((x) => reg(`hide.${x}@x.ph`, 'worker')));
+  for (const w of [a, b, c]) await call(`/messages/${w.user.id}`, { token: boss.token, body: 'Hi' });
+  await call(`/messages/${boss.user.id}`, { token: a.token, body: 'Hello!' }); // unread for the boss
+  const inbox = async (t) => (await call('/messages', { token: t }, 'GET')).body.map((r) => r.user_id);
+
+  assert.equal((await call('/messages/hide', { token: boss.token, user_ids: [] })).status, 400);
+  assert.equal((await call('/messages/hide', { token: boss.token, user_ids: [a.user.id] })).status, 204); // one
+  assert.deepEqual(await inbox(boss.token), [c.user.id, b.user.id]);
+  assert.equal((await call('/messages/unread-count', { token: boss.token }, 'GET')).body.count, 0); // its unread cleared
+  assert.equal((await call('/messages/hide', { token: boss.token, user_ids: [b.user.id, c.user.id] })).status, 204); // many
+  assert.deepEqual(await inbox(boss.token), []);
+  assert.deepEqual(await inbox(a.token), [boss.user.id]); // the other side keeps the chat
+  assert.equal((await call(`/messages/${a.user.id}`, { token: boss.token }, 'GET')).body.messages.length, 2); // nothing deleted
+
+  await call(`/messages/${boss.user.id}`, { token: a.token, body: 'Still there?' });
+  assert.deepEqual(await inbox(boss.token), [a.user.id]); // a new message brings them back
+});
+
 test('messages show the employer which of their jobs the worker applied to', async () => {
   const reg = async (email, role) => (await call('/auth/register', { email, password: 'password1', name: email, role })).body;
   const boss = await reg('ap.boss@co.com', 'employer');
@@ -206,11 +229,17 @@ test('messages show the employer which of their jobs the worker applied to', asy
   assert.equal((await call(`/messages/${boss.user.id}`, { token: w.token }, 'GET')).body.applied, undefined); // workers don't get it
 });
 
-test('welcome email on sign-up, tailored by role', async () => {
+test('welcome email once the email is confirmed, tailored by role', async () => {
   sent.length = 0;
-  app.locals.sendEmail = capture;
-  await call('/auth/register', { email: 'new.worker@x.ph', password: 'password1', name: 'Rosa', role: 'worker' });
-  await call('/auth/register', { email: 'new.boss@co.com', password: 'password1', name: 'Bright Co', role: 'employer' });
+  const codes = [];
+  app.locals.sendEmail = async (e) => { if (isCode(e)) codes.push(e); else sent.push(e); };
+  const signUp = async (email, name, role) => {
+    const r = await call('/auth/register', { email, password: 'password1', name, role, unconfirmed: true });
+    assert.ok(!sent.some((e) => e.to === email)); // the code first; no welcome yet
+    await call('/auth/verify', { token: r.body.token, code: codes.at(-1).text.match(/Your code: (\d{6})/)[1] });
+  };
+  await signUp('new.worker@x.ph', 'Rosa', 'worker');
+  await signUp('new.boss@co.com', 'Bright Co', 'employer');
   await call('/auth/register', { email: 'new.boss@co.com', password: 'password1', name: 'Dup', role: 'employer' }); // 409: no email
   await call('/auth/login', { email: 'new.worker@x.ph', password: 'password1' }); // login: no email
   assert.deepEqual(sent.map((e) => e.to), ['new.worker@x.ph', 'new.boss@co.com']);
@@ -218,6 +247,32 @@ test('welcome email on sign-up, tailored by role', async () => {
   assert.match(sent[0].text, /Hi Rosa,[\s\S]*60 free Credits[\s\S]*\/profile/);
   assert.match(sent[1].subject, /start hiring/);
   assert.match(sent[1].text, /Hi Bright Co,[\s\S]*\/jobs\/new/);
+});
+
+test('employer gets a "job is live" email after posting', async () => {
+  const boss = (await call('/auth/register', { email: 'live.boss@co.com', password: 'password1', name: 'Live Co', role: 'employer' })).body.token;
+  sent.length = 0;
+  app.locals.sendEmail = capture;
+  const job = (await call('/jobs', { token: boss, title: 'Video <b>editor</b>', description: 'Edit videos', job_type: 'gig' })).body;
+  await new Promise((r) => setTimeout(r, 50)); // sent in the background
+  assert.equal(sent.length, 1);
+  assert.equal(sent[0].to, 'live.boss@co.com');
+  assert.equal(sent[0].subject, 'Your job is live: Video <b>editor</b>');
+  assert.match(sent[0].text, new RegExp(`Hi Live Co,[\\s\\S]*/dashboard/jobs/${job.id}`));
+  assert.ok(!sent[0].html.includes('<b>editor')); // title is escaped in HTML
+});
+
+test('code screen sends a code when the account has none left (old sign-ups, or after 10 minutes)', async () => {
+  const t = (await call('/auth/register', { email: 'nocode.w@x.ph', password: 'password1', name: 'N', role: 'worker', unconfirmed: true })).body.token;
+  const hash = async () => (await pool.query("SELECT code_hash FROM email_codes e JOIN users u ON u.id = e.user_id WHERE u.email = 'nocode.w@x.ph'")).rows[0]?.code_hash;
+  const before = await hash();
+  await pool.query("UPDATE email_codes SET expires_at = now() - interval '1 second', sent_at = now() - interval '11 minutes' WHERE code_hash = $1", [before]);
+  assert.equal((await call('/auth/verify/resend', { token: t, if_none: true })).body.sent, true);
+  assert.notEqual(await hash(), before);
+  await pool.query("DELETE FROM email_codes WHERE code_hash = $1", [await hash()]); // no code at all, as before codes existed
+  await pool.query("UPDATE email_codes SET sent_at = now() - interval '2 minutes'");
+  assert.equal((await call('/auth/verify/resend', { token: t, if_none: true })).body.sent, true);
+  assert.ok(await hash());
 });
 
 test('job page knows when the worker already applied', async () => {
@@ -405,6 +460,36 @@ test("an employer's own application limit closes the job, can be raised to reope
   assert.equal((await call(`/jobs/${job.id}/apply`, { token: w3, cover_letter: 'hi' })).status, 201);
   assert.ok((await call(`/jobs/${job.id}`, { token: boss, ...base, max_applications: 3 }, 'PUT')).body.closed_at); // lowering to what it has closes it
   assert.equal((await call('/settings', {}, 'GET')).body.max_job_applications, 250);
+});
+
+test('each plan caps applications per job: Free 20, Pro 100, Premium 250', async () => {
+  const reg = async (email, role) => (await call('/auth/register', { email, password: 'password1', name: email, role })).body.token;
+  const boss = await reg('plancap.boss@co.com', 'employer');
+  const base = { title: 'Capped', description: 'x', job_type: 'gig' };
+  const over = await call('/jobs', { token: boss, ...base, max_applications: 21 });
+  assert.equal(over.status, 402);
+  assert.equal(over.body.upgrade, true);
+  assert.match(over.body.error, /Free plan accepts up to 20 .* Pro to accept up to 100, or Premium for up to 250/);
+  const job = (await call('/jobs', { token: boss, ...base, max_applications: 20 })).body;
+  assert.equal(job.max_applications, 20);
+  assert.equal((await call(`/jobs/${job.id}`, { token: boss, ...base, max_applications: 50 }, 'PUT')).status, 402); // edits too
+  await pool.query("UPDATE users SET plan = 'pro' WHERE email = 'plancap.boss@co.com'");
+  assert.equal((await call(`/jobs/${job.id}`, { token: boss, ...base, max_applications: 100 }, 'PUT')).status, 200);
+  assert.match((await call(`/jobs/${job.id}`, { token: boss, ...base, max_applications: 101 }, 'PUT')).body.error, /Pro plan accepts up to 100 applications per job\. Upgrade to Premium/);
+  await pool.query("UPDATE users SET plan = 'premium' WHERE email = 'plancap.boss@co.com'");
+  assert.equal((await call(`/jobs/${job.id}`, { token: boss, ...base, max_applications: 250 }, 'PUT')).status, 200);
+  assert.equal((await call(`/jobs/${job.id}`, { token: boss, ...base, max_applications: 251 }, 'PUT')).status, 402);
+
+  // No limit set: the plan's cap still closes the job.
+  await pool.query("UPDATE users SET plan = 'free' WHERE email = 'plancap.boss@co.com'");
+  const open = (await call('/jobs', { token: boss, ...base })).body;
+  const workers = await Promise.all(Array.from({ length: 21 }, (_, i) => reg(`plancap.w${i}@x.ph`, 'worker')));
+  for (const w of workers.slice(0, 20)) assert.equal((await call(`/jobs/${open.id}/apply`, { token: w, cover_letter: 'hi' })).status, 201);
+  assert.ok((await call(`/jobs/${open.id}`, {}, 'GET')).body.closed_at); // the 20th closed it
+  assert.equal((await call(`/jobs/${open.id}/apply`, { token: workers[20], cover_letter: 'hi' })).status, 409);
+  const reopen = await call(`/jobs/${open.id}/closed`, { token: boss, closed: false }, 'PUT');
+  assert.equal(reopen.status, 402);
+  assert.match(reopen.body.error, /20 applicants\. The Free plan accepts up to 20/);
 });
 
 test('a job closes itself when it reaches the most applications a job can take', async () => {
@@ -1094,29 +1179,62 @@ test('bento profile: optional fields saved and validated, hidden contacts, CV on
   assert.equal((await call(`/workers/${w.user.id}`, { token: pro.token }, 'GET')).body.has_resume, false);
 });
 
-test('email confirmation: link on sign-up, needed to post jobs, resend, Google and reset confirm, confirmed accounts keep their password on Google link', async () => {
+test('email confirmation: 6-digit code on sign-up, required for everything, 5 tries, resend once a minute, change email, Google and reset confirm', async () => {
   const mails = [];
-  app.locals.sendEmail = async (e) => { if (/^Confirm your email/.test(e.subject)) mails.push(e); };
+  app.locals.sendEmail = async (e) => { if (/is your ReadyToWork\.ph code$/.test(e.subject) || /^Welcome/.test(e.subject)) mails.push(e); };
   const reg = (email, role) => call('/auth/register', { email, password: 'password1', name: 'Conf', role, unconfirmed: true });
-  const linkOf = (m) => m.text.match(/verify-email\?token=([\w-]+)/)[1];
-  const verify = (token) => fetch(`${base}/auth/verify`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ token }) });
+  const codeOf = (m) => m.text.match(/Your code: (\d{6})/)[1];
+  const codes = () => mails.filter((m) => /code$/.test(m.subject));
+  const allowResend = () => pool.query("UPDATE email_codes SET sent_at = now() - interval '2 minutes'");
 
   const boss = await reg('conf.boss@co.com', 'employer');
+  const t = boss.body.token;
   assert.equal(boss.body.user.email_verified, false);
-  assert.deepEqual(mails.map((m) => m.to), ['conf.boss@co.com']);
-  const job = { token: boss.body.token, title: 'VA', description: 'x', job_type: 'gig' };
-  assert.equal((await call('/jobs', job)).body.code, 'verify_email'); // unconfirmed employers can't post yet
+  assert.deepEqual(mails.map((m) => m.to), ['conf.boss@co.com']); // the code only; the welcome waits
+  assert.match(codeOf(mails[0]), /^\d{6}$/);
+  const job = { token: t, title: 'VA', description: 'x', job_type: 'gig' };
+  // Nothing works before the code is entered, except the code screen's own routes.
+  assert.equal((await call('/jobs', job)).body.code, 'verify_email');
+  assert.equal((await call('/messages', { token: t }, 'GET')).body.code, 'verify_email');
+  assert.equal((await call('/me', { token: t }, 'GET')).body.email_verified, false);
 
-  const resend = await call('/auth/verify/resend', { token: boss.body.token }, 'POST');
-  assert.equal(resend.body.verified, false);
-  assert.equal(mails.length, 2);
-  assert.equal((await verify(linkOf(mails[0]))).status, 400); // asking again replaced the first link
-  assert.equal((await verify(linkOf(mails[1]))).status, 200);
-  assert.equal((await verify(linkOf(mails[1]))).status, 400); // one use only
-  assert.equal((await call('/me', { token: boss.body.token }, 'GET')).body.email_verified, true);
+  // The code screen opening keeps a live code (no new email); with none left it sends one (below, after expiry).
+  assert.equal((await call('/auth/verify/resend', { token: t, if_none: true })).body.sent, false);
+  assert.equal(codes().length, 1);
+  // Resend: not within a minute, then a new code replaces the old one.
+  assert.equal((await call('/auth/verify/resend', { token: t }, 'POST')).status, 429);
+  await allowResend();
+  assert.equal((await call('/auth/verify/resend', { token: t }, 'POST')).body.verified, false);
+  assert.equal(codes().length, 2);
+  const [first, second] = codes().map(codeOf);
+  const verify = (code) => call('/auth/verify', { token: t, code });
+  if (first !== second) assert.equal((await verify(first)).body.code, 'wrong_code'); // the old code stopped working
+
+  // 5 tries per code, then a new one is needed.
+  const wrong = second === '000000' ? '111111' : '000000';
+  let r;
+  for (let i = codes().length === 2 && first !== second ? 1 : 0; i < 5; i++) r = await verify(wrong);
+  assert.equal(r.body.code, 'expired');
+  assert.equal((await verify(second)).body.code, 'expired'); // even the right code is too late now
+  await allowResend();
+  await call('/auth/verify/resend', { token: t }, 'POST');
+  const ok = await verify(` ${codeOf(codes().at(-1)).replace(/(\d{3})/, '$1 ')} `); // spaces are fine
+  assert.equal(ok.status, 200);
+  assert.equal(ok.body.user.email_verified, true);
+  assert.ok(mails.some((m) => /^Welcome/.test(m.subject) && m.to === 'conf.boss@co.com')); // welcome after confirming
   assert.equal((await call('/jobs', job)).status, 201);
-  assert.equal((await call('/auth/verify/resend', { token: boss.body.token }, 'POST')).body.verified, true);
-  assert.equal(mails.length, 2); // nothing to resend once confirmed
+  const before = codes().length;
+  assert.equal((await call('/auth/verify/resend', { token: t }, 'POST')).body.verified, true);
+  assert.equal(codes().length, before); // nothing to resend once confirmed
+  assert.equal((await call('/auth/email', { token: t, email: 'other@co.com' }, 'PUT')).status, 403); // only before confirming
+
+  // Change a mistyped email: the code goes to the new address; taken emails are refused.
+  const typo = await reg('conf.typo@gmial.com', 'worker');
+  assert.equal((await call('/auth/email', { token: typo.body.token, email: 'conf.boss@co.com' }, 'PUT')).status, 409);
+  const fixed = await call('/auth/email', { token: typo.body.token, email: 'Conf.Typo@gmail.com' }, 'PUT');
+  assert.equal(fixed.body.user.email, 'conf.typo@gmail.com');
+  assert.equal(codes().at(-1).to, 'conf.typo@gmail.com');
+  assert.equal((await call('/auth/verify', { token: typo.body.token, code: codeOf(codes().at(-1)) })).status, 200);
 
   // Google: confirmed on sign-up, and a confirmed account keeps its password when Google links to it.
   process.env.GOOGLE_CLIENT_ID = 'test-client';
@@ -1135,6 +1253,49 @@ test('email confirmation: link on sign-up, needed to post jobs, resend, Google a
   const done = await (await fetch(`${base}/auth/reset`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ token, password: 'password9' }) })).json();
   assert.equal(done.user.email_verified, true);
   assert.equal(w.body.user.email_verified, false);
+});
+
+test('change a confirmed email: password or a code to the old email, then a code to the new one; others signed out, old email told', async () => {
+  const mails = [];
+  app.locals.sendEmail = async (e) => { mails.push(e); };
+  const codeTo = (to) => mails.filter((m) => m.to === to && isCode(m)).at(-1).text.match(/Your code: (\d{6})/)[1];
+  const reg = await call('/auth/register', { email: 'move.w@x.ph', password: 'password1', name: 'Mover', role: 'worker' });
+  const t = reg.body.token;
+  await new Promise((r) => setTimeout(r, 1100)); // logins are stamped to the second
+  const other = (await call('/auth/login', { email: 'move.w@x.ph', password: 'password1' })).body.token; // a second device
+  await call('/auth/register', { email: 'taken@x.ph', password: 'password1', name: 'Taken', role: 'worker' });
+
+  const start = (body) => call('/me/email', { token: t, ...body });
+  assert.equal((await start({ email: 'new.w@x.ph', password: 'wrong-pass' })).body.code, 'wrong_password');
+  assert.equal((await start({ email: 'taken@x.ph', password: 'password1' })).status, 409);
+  assert.equal((await start({ email: 'move.w@x.ph', password: 'password1' })).status, 400); // same email
+  assert.equal((await call('/me/email/reauth', { token: t }, 'POST')).status, 400); // has a password: no code needed
+  assert.equal((await start({ email: 'New.W@x.ph', password: 'password1' })).body.email, 'new.w@x.ph');
+  assert.equal((await call('/me', { token: t }, 'GET')).body.email, 'move.w@x.ph'); // nothing changes until the code
+  assert.equal((await call('/me/email/resend', { token: t }, 'POST')).status, 429); // once a minute
+
+  await new Promise((r) => setTimeout(r, 1100));
+  const done = await call('/me/email/confirm', { token: t, code: codeTo('new.w@x.ph') });
+  assert.equal(done.status, 200);
+  assert.equal(done.body.user.email, 'new.w@x.ph');
+  assert.equal((await call('/me', { token: done.body.token }, 'GET')).body.email, 'new.w@x.ph'); // this device: still in
+  assert.equal((await call('/me', { token: other }, 'GET')).status, 401); // other devices: signed out
+  assert.match(mails.find((m) => m.to === 'move.w@x.ph' && /was changed/.test(m.subject)).text, /n\*\*\*@x\.ph/);
+  assert.equal((await call('/auth/login', { email: 'new.w@x.ph', password: 'password1' })).status, 200);
+  assert.equal((await call('/me/email/confirm', { token: done.body.token, code: codeTo('new.w@x.ph') })).body.code, 'expired'); // one use
+
+  // Google-only account (no password): a code to the current email proves it's them.
+  process.env.GOOGLE_CLIENT_ID = 'test-client';
+  app.locals.verifyGoogle = async () => ({ sub: 'g-move', email: 'move.g@gmail.com', email_verified: true, name: 'G Mover' });
+  const g = (await call('/auth/google', { credential: 'x', role: 'employer' })).body.token;
+  assert.equal((await call('/me/email', { token: g, email: 'move.g2@gmail.com', code: '123456' })).body.code, 'expired'); // no code asked for yet
+  assert.equal((await call('/me/email/reauth', { token: g }, 'POST')).status, 200);
+  const wrong = codeTo('move.g@gmail.com') === '000000' ? '111111' : '000000';
+  assert.equal((await call('/me/email', { token: g, email: 'move.g2@gmail.com', code: wrong })).body.code, 'wrong_code');
+  assert.equal((await call('/me/email', { token: g, email: 'move.g2@gmail.com', code: codeTo('move.g@gmail.com') })).status, 200);
+  const gDone = await call('/me/email/confirm', { token: g, code: codeTo('move.g2@gmail.com') });
+  assert.equal(gDone.body.user.email, 'move.g2@gmail.com');
+  assert.equal((await call('/auth/google', { credential: 'x' })).status, 200); // Google sign-in still finds the account
 });
 
 test('delete my account: type DELETE, data and files gone, chats kept as "Deleted user", email free again, paid plan cancelled first', async () => {

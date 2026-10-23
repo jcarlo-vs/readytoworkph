@@ -49,15 +49,19 @@ export async function signedInUser(req) {
   }
   if (token.admin) return null; // admin logins aren't user accounts
   const { rows: [u] } = await pool.query(
-    'SELECT role, floor(extract(epoch FROM sessions_valid_from))::bigint AS since FROM users WHERE id = $1', [token.id]);
+    'SELECT role, email_verified_at IS NOT NULL AS verified, floor(extract(epoch FROM sessions_valid_from))::bigint AS since FROM users WHERE id = $1', [token.id]);
   if (!u || token.iat < Number(u.since)) return null;
-  return { id: token.id, role: u.role };
+  return { id: token.id, role: u.role, verified: u.verified };
 }
 
-export function requireAuth(role) {
+// Email sign-ups enter a 6-digit code before they can do anything; only the routes the code screen needs
+// (who am I, check/resend the code, fix a mistyped email, delete or pause the account) pass `{ unconfirmed: true }`.
+export function requireAuth(role, { unconfirmed = false } = {}) {
   return async (req, res, next) => {
     req.user = await signedInUser(req);
     if (!req.user) return res.status(401).json({ error: 'Not logged in' });
+    if (!req.user.verified && !unconfirmed)
+      return res.status(403).json({ error: 'Please confirm your email first. Enter the 6-digit code we sent you.', code: 'verify_email' });
     if (role && req.user.role !== role) return res.status(403).json({ error: `Only ${role}s can do this` });
     next();
   };
