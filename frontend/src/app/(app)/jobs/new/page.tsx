@@ -38,16 +38,7 @@ export default function NewJobPage() {
 
 // Each plan includes a number of job posts a month; when they're used up, say so before the form, not after.
 function EmployerNewJob({ onPosted }: { onPosted: (job: Job) => void }) {
-  const { user } = useAuth();
   const { data: quota } = useApi<{ plan: string; remaining: number; limit: number; message: string | null }>('/my/job-quota');
-  if (user?.email_verified === false) {
-    return (
-      <div className={`${card} mx-auto max-w-xl space-y-4 p-10 text-center`}>
-        <h1 className="font-display text-2xl font-bold text-slate-900">Confirm your email to post a job</h1>
-        <p className="text-slate-600">We sent a link to <b>{user.email}</b>. Click it, then come back here. It keeps fake job posts off ReadyToWork.ph. No email? Use “Send a new link” in the yellow bar above.</p>
-      </div>
-    );
-  }
   if (quota?.message) {
     return (
       <div className={`${card} mx-auto max-w-xl space-y-4 p-10 text-center`}>

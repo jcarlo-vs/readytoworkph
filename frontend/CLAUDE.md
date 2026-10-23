@@ -6,7 +6,7 @@ Next.js 16 App Router, React 19, Tailwind 4, deployed with OpenNext (`@opennextj
 
 - `src/app/(app)/` - site pages; `src/app/admin/` - admin panel; `src/app/page.tsx` - homepage
 - `src/components/styles.ts` - shared class strings (rounded-full buttons, soft cards, `band`). Reuse them.
-- `src/components/ui.tsx` - `PageBand`, `BandStat`, `Flash`, `ConfirmEmailBanner`, etc.
+- `src/components/ui.tsx` - `PageBand`, `BandStat`, `Flash`, etc.
 - `src/lib/api.ts` (browser), `src/lib/server-api.ts` (server), `src/lib/auth.tsx` (session), `src/lib/profile.ts` (profile labels)
 
 ## Commands

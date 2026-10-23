@@ -68,7 +68,7 @@ export function JobOwnerActions({ job, onChange }: { job: Job; onChange: () => v
   );
 }
 
-function CloseJobDialog({ job, open, busy, onCancel, onConfirm }: { job: Job; open: boolean; busy: boolean; onCancel: () => void; onConfirm: () => void }) {
+export function CloseJobDialog({ job, open, busy, onCancel, onConfirm }: { job: Job; open: boolean; busy: boolean; onCancel: () => void; onConfirm: () => void }) {
   const dialog = useModal(open, onCancel);
   return (
     <dialog ref={dialog} onClose={onCancel} aria-labelledby="close-job-title"

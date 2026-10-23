@@ -2,9 +2,9 @@
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { useEffect, useState } from 'react';
-import { api, useApi, type User } from '@/lib/api';
+import { api, ApiError, useApi, type User } from '@/lib/api';
 import { useAuth } from '@/lib/auth';
-import { ErrorText, Initials, PageBand, button, buttonGhost, card, input } from '@/components/ui';
+import { CodeInput, ErrorText, Initials, PageBand, button, buttonGhost, card, input } from '@/components/ui';
 import { PhotoCard } from '@/components/PhotoCard';
 
 // Account settings: the email you sign in with, and deleting the account (Data Privacy Act: right to erasure).
@@ -13,6 +13,7 @@ export default function AccountPage() {
   const router = useRouter();
   const [open, setOpen] = useState(false);
   const [pause, setPause] = useState(false);
+  const [changing, setChanging] = useState(false);
   const { data: me } = useApi<User>(user ? '/me' : null); // fresh sign-in details (Google, password, confirmed)
 
   if (ready && !user) return <p><Link href="/login?next=/account" className="text-emerald-700 underline">Log in</Link> to see your account settings.</p>;
@@ -40,8 +41,8 @@ export default function AccountPage() {
         <ul className="divide-y divide-slate-100">
           <NameRow employer={employer} me={me} name={user.name} onSaved={(u) => signIn({ ...user, ...u })} />
           <Row icon="mail" label="Email" value={user.email}
-            badge={me?.email_verified === false ? ['Not confirmed', 'bg-amber-100 text-amber-900'] : me ? ['Confirmed', 'bg-emerald-50 text-emerald-800'] : undefined}
-            action={me?.email_verified === false ? <ResendLink /> : undefined} />
+            badge={me ? ['Confirmed', 'bg-emerald-50 text-emerald-800'] : undefined}
+            action={me && <button type="button" onClick={() => setChanging(true)} className="text-sm font-semibold text-emerald-700 hover:underline">Change</button>} />
           <Row icon="key" label="Sign-in" value={me ? [me.has_google && 'Google', me.has_password && 'Email & password'].filter(Boolean).join(' · ') || '-' : '…'} />
           <Row icon="lock" label="Password" value={me?.has_password ? '••••••••' : me ? 'Not set (you sign in with Google)' : '…'}
             action={<Link href={`/forgot-password?email=${encodeURIComponent(user.email)}`} className="text-sm font-semibold text-emerald-700 hover:underline">{me && !me.has_password ? 'Set a password' : 'Change'}</Link>} />
@@ -50,6 +51,8 @@ export default function AccountPage() {
             action={<Link href="/pricing" className="text-sm font-semibold text-emerald-700 hover:underline">Plan &amp; billing</Link>} />}
         </ul>
       </section>
+
+      {changing && me && <EmailDialog email={user.email} hasPassword={!!me.has_password} onClose={() => setChanging(false)} onChanged={(u) => signIn({ ...user, ...u })} />}
 
       {employer && <PhotoCard />}
 
@@ -241,12 +244,113 @@ function Row({ icon, label, value, badge, action }: { icon: string; label: strin
   );
 }
 
-function ResendLink() {
-  const [state, setState] = useState<'idle' | 'busy' | 'sent'>('idle');
-  if (state === 'sent') return <span className="text-sm font-semibold text-emerald-700">Link sent ✓</span>;
+// Change a confirmed email: prove it's you (password, or a code at the current email for Google-only accounts),
+// then enter the code sent to the new email. Other devices are signed out; the old email gets a notice.
+function EmailDialog({ email, hasPassword, onClose, onChanged }: { email: string; hasPassword: boolean; onClose: () => void; onChanged: (u: User) => void }) {
+  const [step, setStep] = useState<'start' | 'reauth' | 'code' | 'done'>(hasPassword ? 'start' : 'reauth');
+  const [reauthSent, setReauthSent] = useState(false);
+  const [form, setForm] = useState({ email: '', password: '', code: '' });
+  const [code, setCode] = useState('');
+  const [newEmail, setNewEmail] = useState('');
+  const [error, setError] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [wait, setWait] = useState(0);
+  useEffect(() => {
+    if (wait <= 0) return;
+    const t = setTimeout(() => setWait(wait - 1), 1000);
+    return () => clearTimeout(t);
+  }, [wait]);
+  const set = (k: keyof typeof form) => (e: React.ChangeEvent<HTMLInputElement>) => setForm({ ...form, [k]: e.target.value });
+  const link = 'font-semibold text-emerald-700 hover:underline';
+
+  async function run(fn: () => Promise<void>) {
+    setBusy(true); setError('');
+    try { await fn(); } catch (err) {
+      setError((err as Error).message);
+      const w = err instanceof ApiError ? Number(err.data?.wait) : 0;
+      if (w) setWait(w);
+    } finally { setBusy(false); }
+  }
+  const sendReauth = () => run(async () => { await api('/me/email/reauth', { method: 'POST' }); setReauthSent(true); setWait(60); });
+  const start = (e: React.FormEvent) => {
+    e.preventDefault();
+    run(async () => {
+      const r = await api<{ email: string }>('/me/email', { body: hasPassword ? { email: form.email, password: form.password } : { email: form.email, code: form.code } });
+      setNewEmail(r.email); setCode(''); setStep('code'); setWait(60);
+    });
+  };
+  const confirm = (value: string) => run(async () => {
+    try {
+      const { user } = await api<{ user: User }>('/me/email/confirm', { body: { code: value } });
+      onChanged(user); setStep('done');
+    } catch (err) { setCode(''); throw err; }
+  });
+  const resend = () => run(async () => { await api('/me/email/resend', { method: 'POST' }); setWait(60); });
+  const resendLink = wait > 0 ? <span className="text-slate-500">Send a new code in {wait}s</span>
+    : <button type="button" onClick={resend} className={link}>Send a new code</button>;
+
   return (
-    <button type="button" disabled={state === 'busy'} onClick={async () => { setState('busy'); try { await api('/auth/verify/resend', { method: 'POST', quiet: true }); setState('sent'); } catch { setState('idle'); } }}
-      className="text-sm font-semibold text-emerald-700 hover:underline disabled:opacity-50">{state === 'busy' ? 'Sending…' : 'Send link'}</button>
+    <div className="fixed inset-0 z-50 grid place-items-center bg-slate-950/50 p-4" role="dialog" aria-modal="true" aria-labelledby="email-title">
+      <div className={`${card} w-full max-w-md space-y-4`}>
+        <h2 id="email-title" className="font-display text-xl font-bold text-slate-900">{step === 'done' ? 'Email changed' : 'Change your email'}</h2>
+
+        {step === 'reauth' && !reauthSent && (
+          <>
+            <p className="text-sm text-slate-600">First, let&apos;s make sure it&apos;s you. We&apos;ll send a 6-digit code to <b className="break-all text-slate-900">{email}</b>.</p>
+            <ErrorText msg={error} />
+            <div className="flex justify-end gap-2">
+              <button type="button" onClick={onClose} className={`${buttonGhost} px-4 py-2`}>Cancel</button>
+              <button type="button" onClick={sendReauth} disabled={busy} className={`${button} px-4 py-2`}>{busy ? 'Sending…' : 'Send code'}</button>
+            </div>
+          </>
+        )}
+
+        {(step === 'start' || (step === 'reauth' && reauthSent)) && (
+          <form onSubmit={start} className="space-y-3">
+            {step === 'reauth' && (
+              <label className="block space-y-1 text-sm font-medium text-slate-700">Code we sent to {email}
+                <input className={input} required inputMode="numeric" autoComplete="one-time-code" maxLength={6} value={form.code}
+                  onChange={(e) => setForm({ ...form, code: e.target.value.replace(/\D/g, '').slice(0, 6) })} autoFocus />
+                <span className="block text-xs font-normal text-slate-500">Didn&apos;t get it? {wait > 0 ? `Send a new code in ${wait}s` : <button type="button" onClick={sendReauth} className={link}>Send a new code</button>}</span>
+              </label>
+            )}
+            <label className="block space-y-1 text-sm font-medium text-slate-700">New email
+              <input className={input} type="email" required autoComplete="email" value={form.email} onChange={set('email')} autoFocus={step === 'start'} placeholder="you@example.com" /></label>
+            {step === 'start' && (
+              <label className="block space-y-1 text-sm font-medium text-slate-700">Your current password
+                <input className={input} type="password" required autoComplete="current-password" value={form.password} onChange={set('password')} />
+                <span className="block text-xs font-normal text-slate-500">So we know it&apos;s really you.</span>
+              </label>
+            )}
+            <ErrorText msg={error} />
+            <div className="flex justify-end gap-2">
+              <button type="button" onClick={onClose} className={`${buttonGhost} px-4 py-2`}>Cancel</button>
+              <button type="submit" disabled={busy} className={`${button} px-4 py-2`}>{busy ? 'Sending…' : 'Send code to new email'}</button>
+            </div>
+          </form>
+        )}
+
+        {step === 'code' && (
+          <form onSubmit={(e) => { e.preventDefault(); if (code.length === 6) confirm(code); }} className="space-y-3">
+            <p className="text-sm text-slate-600">We sent a 6-digit code to <b className="break-all text-slate-900">{newEmail}</b>. Enter it to finish. Your email stays <b className="break-all">{email}</b> until then.</p>
+            <CodeInput value={code} onChange={setCode} onComplete={confirm} disabled={busy} />
+            <ErrorText msg={error} />
+            <p className="text-sm text-slate-600">Didn&apos;t get it? {resendLink} · <button type="button" onClick={() => { setStep(hasPassword ? 'start' : 'reauth'); setReauthSent(false); setError(''); }} className={link}>Use a different email</button></p>
+            <div className="flex justify-end gap-2">
+              <button type="button" onClick={onClose} className={`${buttonGhost} px-4 py-2`}>Cancel</button>
+              <button type="submit" disabled={busy || code.length !== 6} className={`${button} px-4 py-2`}>{busy ? 'Checking…' : 'Change email'}</button>
+            </div>
+          </form>
+        )}
+
+        {step === 'done' && (
+          <>
+            <p className="text-sm text-slate-600">You now log in and get emails at <b className="break-all text-slate-900">{newEmail}</b>. We signed you out on your other devices and let your old email know.</p>
+            <div className="flex justify-end"><button type="button" onClick={onClose} className={`${button} px-4 py-2`}>Done</button></div>
+          </>
+        )}
+      </div>
+    </div>
   );
 }
 

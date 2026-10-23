@@ -1,6 +1,6 @@
 'use client';
 import Link from 'next/link';
-import { useSearchParams } from 'next/navigation';
+import { useRouter, useSearchParams } from 'next/navigation';
 import { useEffect, useRef, useState } from 'react';
 import { api, useApi, type Applied, type Conversation, type Job, type Thread } from '@/lib/api';
 import { useAuth } from '@/lib/auth';
@@ -12,6 +12,26 @@ export default function MessagesPage() {
   const withId = params.get('with');
   const jobId = params.get('job');
   const { data: inbox, reload: reloadInbox } = useApi<Conversation[]>(user ? '/messages' : null, 15000);
+  const router = useRouter();
+  // Removing people from the list: tick one or many, then confirm. Messages themselves are never deleted.
+  const [picked, setPicked] = useState<Set<number> | null>(null); // null = not selecting
+  const [confirming, setConfirming] = useState(false);
+  const [removing, setRemoving] = useState({ busy: false, error: '' });
+  const toggle = (id: number) => setPicked((p) => { const n = new Set(p); if (n.has(id)) n.delete(id); else n.add(id); return n; });
+  const stopSelecting = () => { setPicked(null); setConfirming(false); setRemoving({ busy: false, error: '' }); };
+  async function remove() {
+    if (!picked?.size) return;
+    setRemoving({ busy: true, error: '' });
+    try {
+      await api('/messages/hide', { body: { user_ids: [...picked] } });
+      if (withId && picked.has(Number(withId))) router.push('/messages');
+      stopSelecting();
+      reloadInbox();
+      window.dispatchEvent(new Event('rp:unread-changed'));
+    } catch (err) {
+      setRemoving({ busy: false, error: (err as Error).message });
+    }
+  }
 
   if (ready && !user) return <p><Link href="/login?next=/messages" className="font-medium text-emerald-800 underline">Log in</Link> to see your messages.</p>;
   if (!user) return null;
@@ -19,7 +39,21 @@ export default function MessagesPage() {
   return (
     <div className="grid h-[calc(100vh-11rem)] min-h-[32rem] overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm md:grid-cols-[20rem_minmax(0,1fr)]">
       <aside className={`flex min-h-0 flex-col border-slate-200 md:border-r ${withId ? 'hidden md:flex' : 'flex'}`}>
-        <h1 className="border-b border-slate-200 px-5 py-4 text-lg font-bold">Messages</h1>
+        <div className="flex items-center justify-between gap-2 border-b border-slate-200 px-5 py-3">
+          <h1 className="py-1 text-lg font-bold">Messages</h1>
+          {!!inbox?.length && (picked
+            ? <button type="button" onClick={stopSelecting} className="rounded-lg px-2.5 py-1.5 text-sm font-semibold text-slate-600 hover:bg-slate-100">Cancel</button>
+            : <button type="button" onClick={() => setPicked(new Set())} className="rounded-lg px-2.5 py-1.5 text-sm font-semibold text-emerald-800 hover:bg-emerald-50">Select</button>)}
+        </div>
+        {picked && inbox && (
+          <div className="flex items-center gap-3 border-b border-slate-200 bg-slate-50 px-5 py-2 text-sm">
+            <label className="flex items-center gap-2 font-medium text-slate-700">
+              <input type="checkbox" className="size-4 accent-emerald-700" checked={picked.size === inbox.length && inbox.length > 0}
+                onChange={(e) => setPicked(new Set(e.target.checked ? inbox.map((c) => c.user_id) : []))} />
+              {picked.size ? `${picked.size} selected` : 'Select all'}
+            </label>
+          </div>
+        )}
         <ul className="min-h-0 flex-1 overflow-y-auto">
           {inbox?.length === 0 && (
             <li className="p-5 text-sm text-slate-500">
@@ -30,9 +64,14 @@ export default function MessagesPage() {
             </li>
           )}
           {inbox?.map((c) => (
-            <li key={c.user_id}>
+            <li key={c.user_id} className={picked ? 'flex items-center border-b border-slate-100 pl-5' : ''}>
+              {picked && (
+                <input type="checkbox" className="size-4 shrink-0 accent-emerald-700" checked={picked.has(c.user_id)} onChange={() => toggle(c.user_id)}
+                  aria-label={`Select ${c.name}`} />
+              )}
               <Link href={`/messages?with=${c.user_id}`}
-                className={`flex gap-3 border-b border-slate-100 px-5 py-4 transition hover:bg-slate-50 ${String(c.user_id) === withId ? 'bg-emerald-50/70' : ''}`}>
+                onClick={picked ? (e) => { e.preventDefault(); toggle(c.user_id); } : undefined}
+                className={`flex min-w-0 flex-1 gap-3 px-5 py-4 transition hover:bg-slate-50 ${picked ? 'pl-3' : 'border-b border-slate-100'} ${String(c.user_id) === withId || picked?.has(c.user_id) ? 'bg-emerald-50/70' : ''}`}>
                 <Initials name={c.name} id={c.user_id} size="h-10 w-10 text-sm" />
                 <span className="min-w-0 flex-1">
                   <span className="flex items-baseline justify-between gap-2">
@@ -57,6 +96,27 @@ export default function MessagesPage() {
             </li>
           ))}
         </ul>
+        {picked && (
+          <div className="space-y-2 border-t border-slate-200 p-4">
+            {confirming ? (
+              <>
+                <p className="text-sm text-slate-700">Remove {picked.size} {picked.size === 1 ? 'person' : 'people'} from your list? Your messages stay, and if they write again they’ll show up here again.</p>
+                <div className="flex gap-2">
+                  <button type="button" onClick={remove} disabled={removing.busy} className="flex-1 rounded-full bg-red-600 px-4 py-2 text-sm font-semibold text-white hover:bg-red-700 disabled:opacity-50">
+                    {removing.busy ? 'Removing…' : 'Remove'}
+                  </button>
+                  <button type="button" onClick={() => setConfirming(false)} className="flex-1 rounded-full border border-slate-200 px-4 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50">Keep</button>
+                </div>
+                <ErrorText msg={removing.error} />
+              </>
+            ) : (
+              <button type="button" onClick={() => setConfirming(true)} disabled={!picked.size}
+                className="w-full rounded-full border border-red-200 px-4 py-2 text-sm font-semibold text-red-700 hover:bg-red-50 disabled:opacity-40">
+                Remove from list{picked.size ? ` (${picked.size})` : ''}
+              </button>
+            )}
+          </div>
+        )}
       </aside>
 
       <section className={`min-h-0 flex-col ${withId ? 'flex' : 'hidden md:flex'}`}>

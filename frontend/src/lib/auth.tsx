@@ -1,5 +1,6 @@
 'use client';
 import { createContext, useContext, useEffect, useState } from 'react';
+import { usePathname, useRouter } from 'next/navigation';
 import { api, ApiError, type User } from './api';
 
 type Auth = {
@@ -29,6 +30,15 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       .then(setUser, (err) => { if (err instanceof ApiError && err.status === 401) flag(false); })
       .finally(() => setReady(true));
   }, []);
+
+  // Email sign-ups enter their 6-digit code before anything else (the API refuses them too). Legal pages,
+  // Contact us and the admin panel (its own login) stay open.
+  const path = usePathname();
+  const router = useRouter();
+  useEffect(() => {
+    if (user?.email_verified === false && !/^\/(verify-email|contact|privacy|terms|refunds|admin)(\/|$)/.test(path))
+      router.replace(`/verify-email?next=${encodeURIComponent(path)}`);
+  }, [user, path, router]);
 
   const signIn = (u: User) => { flag(true); setUser(u); };
   const signOut = () => { api('/auth/logout', { method: 'POST', quiet: true }).catch(() => {}); flag(false); setUser(null); };

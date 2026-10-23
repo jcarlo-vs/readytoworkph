@@ -38,6 +38,10 @@ Features we decided to build, many inspired by looking through OnlineJobs.ph (em
   - [ ] Follow-up: recreate products/prices, API key (incl. Subscriptions: Write), client token, payment link, statement text and webhook in the **live** account; set `PADDLE_*` with `PADDLE_ENV=production` in Cloud Run
   - [ ] Follow-up: point the live webhook at `https://readytowork.ph/api/billing/webhook`
 - [x] Plan limits: job posts/month, visible applicants per job, outreach, monthly AI fit scores, Premium fair use (10,000)
+- [x] Applications per job capped by plan (2026-10-23): Free 20, Pro 100, Premium 250, enforced by the API; post-a-job step 3 is a true-to-scale slider with − / +, snaps back at the plan's limit with an upgrade prompt
+- [x] "Your job is live" email to the employer after posting (2026-10-23)
+- [x] Messages: remove one or many people from your list (2026-10-23); messages stay, a new message brings them back
+- [x] My Job Posts: Close (with the same confirm as the job page) and Reopen right from the list (2026-10-23)
 - [x] AI Fit Score naming, re-score, Score all (Premium), monthly AI run log
 - [x] Hiring analytics (Premium): period and job filters, funnel, fit mix, best candidates, job table with search and pages
 - [x] Send feedback popup + admin inbox
@@ -70,13 +74,13 @@ Features we decided to build, many inspired by looking through OnlineJobs.ph (em
 - [x] Worker privacy: Free employers see "Maria S.", no links, until they can contact the worker
 - [x] Contact details in worker bios/headlines hidden (blurred "upgrade to see", clickable)
 - [x] Hide contact details for the employer side too (job post text), see 3.
-- [x] **Smart Matching** (2026-10-21; AI fit scores renamed **Smart Score**; ⓘ labels on dashboards and pricing): an AI recruiter agent (`backend/src/matchAgent.js`, Claude tool use) searches all talent for a job (Claude Haiku 5.5, about $0.002–0.02 a run), reads profiles and CVs, shortlists up to 10 with reasons; steps stream live; runs saved per job. Pro 3 / Premium 30 a month; skills ~80%, availability ~10%, rate ~10% (above-budget tag, never a filter)
+- [x] **Smart Matching** (2026-10-21; AI fit scores renamed **Smart Score**; ⓘ labels on dashboards and pricing): an AI recruiter agent (`backend/src/matchAgent.js`, Claude tool use) searches all talent for a job (Claude Haiku 5.5, about $0.002-0.02 a run), reads profiles and CVs, shortlists up to 10 with reasons; steps stream live; runs saved per job. Pro 3 / Premium 30 a month; skills ~80%, availability ~10%, rate ~10% (above-budget tag, never a filter)
   - [ ] Follow-up: move runs to a queue + worker when simultaneous runs reach the hundreds (today they run inside the request, max 20 per server)
   - [ ] Follow-up: put Smart Matching back on a job's applicants page (hidden 2026-10-21 while the page was redesigned; the component and API are still there: `useMatchFinder` in `components/MatchFinder.tsx`)
   - [ ] Follow-up (only if AI costs grow): prompt caching for the agent's system prompt and tools
   - [ ] Follow-up: skim wider at scale: 40 cards per search, up to 3 pages, about 200 cards per run; "narrow instead of paging" in the prompt
   - [ ] Follow-up: block same-job reruns until the job is edited or 7 days pass
-  - [ ] Follow-up (5,000–10,000 workers): Postgres full-text index and ranking for worker search (Hire Talent too)
+  - [ ] Follow-up (5,000-10,000 workers): Postgres full-text index and ranking for worker search (Hire Talent too)
   - [ ] Follow-up (50,000+ workers): semantic search (pgvector) to pick the best 50 before the AI reads them
 - [x] Worker age & gender (2026-10-21): birth date + gender required on the profile form (18+); employers see the age only, never the date; the AI matcher never sees either
 - [x] Admin setting "Show full names on Free" (off by default: "Maria S."); "?" next to a short name opens the upgrade popup
@@ -127,6 +131,8 @@ Features we decided to build, many inspired by looking through OnlineJobs.ph (em
   - [x] Follow-up: run `npm run db:init` on production before deploying (new `sessions_valid_from` column) (first CI/CD release, 2026-10-19)
 - [x] Email confirmation: a link on email sign-up (3 days, one use), yellow reminder bar with "Send a new link", employers confirm before posting jobs; Google sign-ups and password resets count as confirmed; Google linking keeps the password of a confirmed account
   - [x] Follow-up: production `npm run db:init` (adds the columns; existing Google accounts are marked confirmed, existing email accounts see the reminder bar) (first CI/CD release, 2026-10-19)
+- [x] Email confirmation is now a **6-digit code** (2026-10-23), replacing the link and the yellow bar: email sign-ups (workers and employers) enter it before anything else (the API refuses everything but the code screen; unconfirmed accounts see job posts like visitors); 10 minutes, 5 tries, new code once a minute, "Wrong email? Change it"; the welcome email comes after confirming. Google sign-ups skip it
+  - [ ] Follow-up: release it (the release's migrate drops the old link table on its own). Existing unconfirmed email accounts get the code screen on their next visit and tap "Send a new code"
 - [x] Admin: suspend an account (Users page): signed out everywhere, can't log in, hidden like a paused account, email blocked from signing up again (hashed); lift suspension undoes it
 - [x] Delete my account (Data Privacy Act: right to erasure): Account settings page, type DELETE; profile, files, applications, jobs, saved/hired lists removed; chats kept for the other person as "Deleted user"; paid plan cancelled at Paddle first; email free to sign up again
   - [x] Follow-up (with "Admin: suspend an account"): keep a hashed email of suspended accounts so they can't sign up again
@@ -168,7 +174,8 @@ Features we decided to build, many inspired by looking through OnlineJobs.ph (em
 
 ## 5. Worker side
 
-- [ ] Account settings: change email, change password
+- [x] Account settings: change email (2026-10-23, workers and employers): prove it's you (password, or a code at the current email for Google-only accounts), then a 6-digit code to the new email; switches only then, signs out other devices, tells the old email. Old inbox not required, since people often change email because they lost it
+- [x] Change password: Account settings → Password → Change (or Set a password), through the reset email
 - [x] "Open to work" toggle: covered by Deactivate (Account settings)
 - [ ] Bookmark jobs + Saved jobs list
 - [ ] Job alerts: pick skills, get emailed when a matching job is posted
@@ -215,7 +222,6 @@ Today: API tests (`backend/test`), typecheck and lint in CI. Nothing clicks thro
 - **Worker mentoring / coaching**: a staffing service, not software
 - **"One VA Away" course**: content marketing; free hiring guides on the site instead
 - **IQ / DISC / English test scores**: self-reported and unreliable; the AI Fit Score covers quality
-- **Age and gender on profiles**: invites hiring discrimination
 - **Full email-client inbox** (labels, archive, pinned): overkill; maybe Unread + Search (see 5.)
 - **Skill star ratings**: self-rated stars mean little; years of experience instead
 - **Artificial 2-day job approval on Free**: replaced by the AI scam check (see 3.)

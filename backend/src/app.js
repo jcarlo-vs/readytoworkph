@@ -8,7 +8,7 @@ import { analyzeApplication } from './analyzer.js';
 import { callClaude, runMatchAgent } from './matchAgent.js';
 import { extractText, getDocumentProxy } from 'unpdf';
 import { storage } from './storage.js';
-import { randomUUID, randomBytes, createHash, createHmac, timingSafeEqual } from 'node:crypto';
+import { randomUUID, randomBytes, randomInt, createHash, createHmac, timingSafeEqual } from 'node:crypto';
 
 const TYPES = ['full-time', 'part-time', 'gig'];
 const PAGE_SIZE = 20;
@@ -25,6 +25,19 @@ const PLAN_LIMITS = {
 // script (each analysis costs about $0.001-0.002, so the ceiling bounds one account at ~$10-20 a month).
 export const PREMIUM_FAIR_USE = 10_000;
 const MONTH_PH = `(date_trunc('month', now() AT TIME ZONE 'Asia/Manila') AT TIME ZONE 'Asia/Manila')`;
+// Most applications one job can take on a plan (Free 20, Pro 100, Premium the site-wide most), and what to say past it.
+const jobCap = (plan, siteMax) => Math.min(siteMax, PLAN_LIMITS[plan]?.applicants ?? Infinity);
+const capMessage = (plan, siteMax) => `The ${PLAN_LIMITS[plan].name} plan accepts up to ${jobCap(plan, siteMax)} applications per job. ` +
+  (plan === 'free' ? `Upgrade to Pro to accept up to ${jobCap('pro', siteMax)}, or Premium for up to ${siteMax}.` : `Upgrade to Premium to accept up to ${siteMax}.`);
+// A job's limit above the plan's cap is refused (402 with `upgrade`); returns true when it answered.
+async function overCap(req, res, max) {
+  if (max == null) return false;
+  const plan = await planOf(pool, req.user.id);
+  const { max_job_applications } = await getSettings();
+  if (max <= jobCap(plan, max_job_applications)) return false;
+  res.status(402).json({ error: capMessage(plan, max_job_applications), upgrade: plan !== 'premium' });
+  return true;
+}
 const planOf = async (db, userId) => (await db.query('SELECT plan FROM users WHERE id = $1', [userId])).rows[0]?.plan ?? 'free';
 // An application's place in line for its job (0 = first to apply). Employers see applicants first come,
 // first served up to their plan's limit (Free: the first 20); later ones stay hidden until they upgrade.
@@ -151,6 +164,27 @@ function welcome({ email, name, role }) {
   }).catch((err) => console.error(err));
 }
 
+// "Your job is live" email to the employer after posting; sending happens in the background.
+async function jobLive(employerId, job) {
+  const { rows: [u] } = await q('SELECT email, name FROM users WHERE id = $1', [employerId]);
+  await app.locals.sendEmail({
+    to: u.email,
+    subject: `Your job is live: ${job.title}`,
+    ...renderEmail({
+      preheader: 'Filipino remote workers can now see your job and apply.',
+      greeting: `Hi ${u.name},`,
+      intro: [`Your job "${job.title}" is now live on ReadyToWork.ph. Workers can see it and apply.`],
+      steps: [
+        ['Check your applicants', 'New applicants show up on your job’s page. The Smart Score shows how well each one fits.'],
+        ['Message the best fits', 'Ask questions, set up a call, and agree on pay directly.'],
+        ['Edit or close anytime', 'Update the details, or close the job once you’ve hired.'],
+      ],
+      button: { label: 'See your job', url: `${SITE}/dashboard/jobs/${job.id}` },
+      reason: 'You’re receiving this because you posted a job on ReadyToWork.ph.',
+    }),
+  });
+}
+
 // ponytail: in-memory counters per key (fixed windows), reset on restart and kept per server copy;
 // Cloudflare's rate limit is the outer wall. Move to a shared store (e.g. Redis) if abuse gets past both.
 function limiter(max, windowMs, strict = false) {
@@ -225,8 +259,7 @@ app.post('/api/auth/register', async (req, res) => {
   if (!rows[0]) return res.status(409).json({ error: 'This email already has an account. Log in, or use a different email to create another account.' });
   signups.hit(visitor(req));
   if (role === 'worker') await q('INSERT INTO worker_profiles (user_id) VALUES ($1)', [rows[0].id]);
-  welcome(rows[0]);
-  await sendVerification(rows[0]); // the link is saved before the account is handed back
+  await sendVerification(rows[0]); // the code is saved before the account is handed back; welcome() follows once it's entered
   startSession(req, res, rows[0]);
   res.status(201).json({ user: rows[0] });
 });
@@ -329,37 +362,166 @@ app.post('/api/auth/forgot', async (req, res) => {
 });
 
 // --- Email confirmation ---
-// A one-time link, good for 3 days. Asking again replaces the old link.
-async function sendVerification(user) {
-  const token = randomBytes(32).toString('base64url');
-  await q('DELETE FROM email_verifications WHERE user_id = $1', [user.id]);
-  await q(`INSERT INTO email_verifications (token_hash, user_id, expires_at) VALUES ($1, $2, now() + interval '3 days')`, [hashToken(token), user.id]);
+// 6-digit codes, good for 10 minutes and 5 tries; one per account at a time, so asking again replaces the old
+// one (at most once a minute). `purpose`: 'confirm' (after an email sign-up), 'reauth' and 'change' (changing a
+// confirmed email, below).
+export const CODE_TRIES = 5;
+const codeHash = (userId, code) => hashToken(`${userId}:${code}`);
+const CODE_EMAILS = {
+  confirm: () => ({ intro: 'Enter this code on ReadyToWork.ph to confirm your email address. It works for 10 minutes.',
+    reason: 'You’re receiving this because this email was used to create a ReadyToWork.ph account. If that wasn’t you, ignore this email.' }),
+  reauth: () => ({ intro: 'Enter this code on ReadyToWork.ph to confirm it’s you before changing your account’s email. It works for 10 minutes.',
+    reason: 'You’re receiving this because someone asked to change the email of your ReadyToWork.ph account. If it wasn’t you, ignore this email and nothing changes.' }),
+  change: () => ({ intro: 'Enter this code on ReadyToWork.ph to make this your new sign-in email. It works for 10 minutes.',
+    reason: 'You’re receiving this because someone asked to use this email for their ReadyToWork.ph account. If that wasn’t you, ignore this email.' }),
+};
+async function sendCode(user, purpose = 'confirm', to = user.email) {
+  const code = String(randomInt(1_000_000)).padStart(6, '0');
+  await q(`INSERT INTO email_codes (user_id, code_hash, purpose, new_email, expires_at) VALUES ($1, $2, $3, $4, now() + interval '10 minutes')
+           ON CONFLICT (user_id) DO UPDATE SET code_hash = $2, purpose = $3, new_email = $4, tries = 0, sent_at = now(), expires_at = now() + interval '10 minutes'`,
+    [user.id, codeHash(user.id, code), purpose, purpose === 'change' ? to : null]);
+  const { intro, reason } = CODE_EMAILS[purpose]();
   app.locals.sendEmail({
-    to: user.email,
-    subject: 'Confirm your email for ReadyToWork.ph',
-    ...renderEmail({
-      preheader: 'One click to confirm this is your email address.',
-      greeting: `Hi ${user.name},`,
-      intro: ['Please confirm this is your email address. It keeps your account safe and makes sure messages from employers and workers reach you. The link works for 3 days.'],
-      button: { label: 'Confirm my email', url: `${SITE}/verify-email?token=${token}` },
-      reason: 'You’re receiving this because this email was used to create a ReadyToWork.ph account. If that wasn’t you, ignore this email.',
-    }),
+    to,
+    subject: `${code} is your ReadyToWork.ph code`,
+    ...renderEmail({ preheader: `Your code is ${code}. It works for 10 minutes.`, greeting: `Hi ${user.name},`, intro: [intro], code, reason }),
   }).catch((err) => console.error(err));
 }
+const sendVerification = (user) => sendCode(user);
 
-// Opened from the email link; works whether or not the person is logged in on this device.
-app.post('/api/auth/verify', async (req, res) => {
-  const { rows: [v] } = await q(
-    'DELETE FROM email_verifications WHERE token_hash = $1 AND expires_at > now() RETURNING user_id', [hashToken(String(req.body.token ?? ''))]);
-  if (!v) return res.status(400).json({ error: 'This link has expired or was already used. Log in and ask for a new one.', code: 'invalid_link' });
-  await q('UPDATE users SET email_verified_at = coalesce(email_verified_at, now()) WHERE id = $1', [v.user_id]);
+// Checks a code for this purpose. Counts the try first, in one statement, so guesses sent all at once still get
+// only 5. Answers the request itself when the code is wrong or gone; on success returns the used row.
+async function useCode(req, res, purpose) {
+  const { rows: [c] } = await q(
+    `UPDATE email_codes SET tries = tries + 1 WHERE user_id = $1 AND purpose = $2 AND tries < $3 AND expires_at > now()
+     RETURNING code_hash, tries, new_email`, [req.user.id, purpose, CODE_TRIES]);
+  if (!c) { res.status(400).json({ error: 'This code has expired. Ask for a new one.', code: 'expired' }); return null; }
+  const code = String(req.body?.code ?? '').replace(/\D/g, '');
+  if (code.length !== 6 || codeHash(req.user.id, code) !== c.code_hash) {
+    const left = CODE_TRIES - c.tries;
+    res.status(400).json(left > 0
+      ? { error: `That code isn’t right. ${left} ${left === 1 ? 'try' : 'tries'} left.`, code: 'wrong_code', attemptsLeft: left }
+      : { error: 'Too many wrong codes. Ask for a new one.', code: 'expired' });
+    return null;
+  }
+  await q('DELETE FROM email_codes WHERE user_id = $1', [req.user.id]);
+  return c;
+}
+// Seconds until another code may be sent (0 = now).
+const codeWait = async (userId) => (await q(
+  `SELECT ceil(60 - extract(epoch FROM now() - sent_at))::int AS wait FROM email_codes WHERE user_id = $1 AND sent_at > now() - interval '1 minute'`,
+  [userId])).rows[0]?.wait ?? 0;
+const tooSoon = (res, wait) => res.status(429).json({ error: `Please wait ${wait} seconds before asking for a new code.`, wait });
+
+const USER_FIELDS = 'id, email, name, role, plan, photo_key IS NOT NULL AS has_photo, email_verified_at IS NOT NULL AS email_verified';
+app.post('/api/auth/verify', requireAuth(null, { unconfirmed: true }), async (req, res) => {
+  if (!(await useCode(req, res, 'confirm'))) return;
+  const { rows: [user] } = await q(
+    `UPDATE users SET email_verified_at = coalesce(email_verified_at, now()) WHERE id = $1 RETURNING ${USER_FIELDS}`, [req.user.id]);
+  welcome(user); // the welcome email waits until the address is confirmed
+  res.json({ user });
+});
+
+app.post('/api/auth/verify/resend', requireAuth(null, { unconfirmed: true }), throttle(6, 60 * 60_000, 'an hour', perUser), async (req, res) => {
+  const { rows: [user] } = await q('SELECT id, name, email, email_verified_at FROM users WHERE id = $1', [req.user.id]);
+  if (user.email_verified_at) return res.json({ ok: true, verified: true });
+  // `if_none`: the code screen opening. Send one only when there's no live code (accounts from before codes,
+  // or back after the 10 minutes ran out), so a reload doesn't replace the code already in their inbox.
+  if (req.body?.if_none && (await q("SELECT 1 FROM email_codes WHERE user_id = $1 AND purpose = 'confirm' AND expires_at > now() AND tries < $2", [user.id, CODE_TRIES])).rowCount)
+    return res.json({ ok: true, verified: false, sent: false });
+  const wait = await codeWait(user.id);
+  if (wait) return tooSoon(res, wait);
+  await sendVerification(user);
+  res.json({ ok: true, verified: false, sent: true });
+});
+
+// Typed the wrong email at sign-up: fix it and get a code at the new address. Only before it's confirmed.
+app.put('/api/auth/email', requireAuth(null, { unconfirmed: true }), throttle(5, 60 * 60_000, 'an hour', perUser), async (req, res) => {
+  if (req.user.verified) return res.status(403).json({ error: 'Your email is already confirmed.' });
+  const email = str(req.body?.email, 200).toLowerCase();
+  if (!/^\S+@\S+\.\S+$/.test(email)) return bad(res, 'Valid email required');
+  if (await isBlocked(email)) return res.status(403).json(BLOCKED);
+  let user;
+  try {
+    ({ rows: [user] } = await q(`UPDATE users SET email = $2 WHERE id = $1 RETURNING ${USER_FIELDS}`, [req.user.id, email]));
+  } catch (err) {
+    if (err.code === '23505') return res.status(409).json({ error: 'This email already has an account. Log in with it instead.' });
+    throw err;
+  }
+  await sendVerification(user);
+  res.json({ user });
+});
+
+// --- Change a confirmed email ---
+// 1. Prove it's you: your password, or (Google-only accounts, no password) a code sent to your current email.
+//    The old inbox isn't required otherwise: people often change email because they lost the old one.
+// 2. A code goes to the new email; the switch happens only once it's entered.
+// 3. Every other device is signed out, and the old email gets a notice.
+const changeEmailTries = throttle(10, 60 * 60_000, 'an hour', perUser);
+const maskEmail = (e) => e.replace(/^(.)[^@]*/, '$1***');
+
+app.post('/api/me/email/reauth', requireAuth(), changeEmailTries, async (req, res) => {
+  const { rows: [user] } = await q('SELECT id, name, email, password_hash FROM users WHERE id = $1', [req.user.id]);
+  if (user.password_hash) return bad(res, 'Enter your password instead');
+  const wait = await codeWait(user.id);
+  if (wait) return tooSoon(res, wait);
+  await sendCode(user, 'reauth');
   res.json({ ok: true });
 });
 
-app.post('/api/auth/verify/resend', requireAuth(), throttle(3, 60 * 60_000, 'an hour', perUser), async (req, res) => {
-  const { rows: [user] } = await q('SELECT id, name, email, email_verified_at FROM users WHERE id = $1', [req.user.id]);
-  if (!user.email_verified_at) await sendVerification(user);
-  res.json({ ok: true, verified: !!user.email_verified_at });
+app.post('/api/me/email', requireAuth(), changeEmailTries, async (req, res) => {
+  const { rows: [user] } = await q('SELECT id, name, email, password_hash FROM users WHERE id = $1', [req.user.id]);
+  const email = str(req.body?.email, 200).toLowerCase();
+  if (!/^\S+@\S+\.\S+$/.test(email)) return bad(res, 'Valid email required');
+  if (email === user.email) return bad(res, 'That’s already your email');
+  if (await isBlocked(email)) return res.status(403).json(BLOCKED);
+  if ((await q('SELECT 1 FROM users WHERE email = $1', [email])).rowCount)
+    return res.status(409).json({ error: 'This email already has an account. Use a different one.' });
+  if (user.password_hash) {
+    if (!(await verifyPassword(String(req.body?.password ?? ''), user.password_hash)))
+      return res.status(401).json({ error: 'Incorrect password.', code: 'wrong_password' });
+  } else if (!(await useCode(req, res, 'reauth'))) return;
+  await sendCode(user, 'change', email);
+  res.json({ ok: true, email });
+});
+
+app.post('/api/me/email/resend', requireAuth(), changeEmailTries, async (req, res) => {
+  const { rows: [user] } = await q('SELECT id, name, email FROM users WHERE id = $1', [req.user.id]);
+  const { rows: [c] } = await q("SELECT purpose, new_email FROM email_codes WHERE user_id = $1 AND purpose IN ('reauth', 'change')", [user.id]);
+  if (!c) return res.status(400).json({ error: 'Start again: this request has expired.', code: 'expired' });
+  const wait = await codeWait(user.id);
+  if (wait) return tooSoon(res, wait);
+  await sendCode(user, c.purpose, c.purpose === 'change' ? c.new_email : user.email);
+  res.json({ ok: true });
+});
+
+app.post('/api/me/email/confirm', requireAuth(), async (req, res) => {
+  const { rows: [before] } = await q('SELECT name, email FROM users WHERE id = $1', [req.user.id]);
+  const c = await useCode(req, res, 'change');
+  if (!c) return;
+  let user;
+  try {
+    ({ rows: [user] } = await q(
+      `UPDATE users SET email = $2, sessions_valid_from = date_trunc('second', now()) WHERE id = $1 RETURNING ${USER_FIELDS}`,
+      [req.user.id, c.new_email]));
+  } catch (err) {
+    if (err.code === '23505') return res.status(409).json({ error: 'This email was just used for another account. Use a different one.' });
+    throw err;
+  }
+  startSession(req, res, user); // this device stays signed in; the others are signed out
+  app.locals.sendEmail({
+    to: before.email,
+    subject: 'Your ReadyToWork.ph email was changed',
+    ...renderEmail({
+      preheader: `Your account now signs in with ${maskEmail(user.email)}.`,
+      greeting: `Hi ${before.name},`,
+      intro: [`The email for your ReadyToWork.ph account was changed to ${maskEmail(user.email)}. From now on, log in and get emails there. We also signed you out on your other devices.`,
+        'If this wasn’t you, contact us right away so we can lock the account and help you get it back.'],
+      button: { label: 'Contact support', url: `${SITE}/contact` },
+      reason: 'You’re receiving this because the email of your ReadyToWork.ph account was changed.',
+    }),
+  }).catch((err) => console.error(err));
+  res.json({ user });
 });
 
 // Sets the new password from a reset link and signs the person in.
@@ -459,7 +621,7 @@ app.post('/api/auth/google', throttle(30, 15 * 60_000, '15 minutes'), async (req
 // Delete my account, straight away (type DELETE to confirm). A paid plan is cancelled at Paddle first, so a
 // failure there stops everything and nothing is half-deleted. Files go, then the data in one transaction;
 // the user row becomes a blank placeholder so the other side of a conversation still reads "Deleted user".
-app.delete('/api/me', requireAuth(), throttle(5, 60 * 60_000, 'an hour', perUser), async (req, res) => {
+app.delete('/api/me', requireAuth(null, { unconfirmed: true }), throttle(5, 60 * 60_000, 'an hour', perUser), async (req, res) => {
   if (req.body?.confirm !== 'DELETE') return bad(res, 'Type DELETE to confirm');
   const id = req.user.id;
   const { rows: [u] } = await q(
@@ -486,7 +648,7 @@ app.delete('/api/me', requireAuth(), throttle(5, 60 * 60_000, 'an hour', perUser
       'DELETE FROM saved_workers WHERE employer_id = $1 OR worker_id = $1',
       'DELETE FROM hires WHERE employer_id = $1', // an employer's own list goes; a worker stays in theirs as "Deleted user"
       'DELETE FROM password_resets WHERE user_id = $1',
-      'DELETE FROM email_verifications WHERE user_id = $1',
+      'DELETE FROM email_codes WHERE user_id = $1',
       `UPDATE users SET name = 'Deleted user', first_name = '', last_name = '', email = 'deleted-' || id || '@deleted.invalid', password_hash = NULL, google_sub = NULL,
          photo_key = NULL, plan = 'free', paddle_customer_id = NULL, paddle_subscription_id = NULL, last_country = NULL,
          email_verified_at = NULL, deleted_at = now(), sessions_valid_from = now() + interval '1 second' WHERE id = $1`,
@@ -505,7 +667,7 @@ app.delete('/api/me', requireAuth(), throttle(5, 60 * 60_000, 'an hour', perUser
 
 // Pause my account: hidden from search and new messages, jobs hidden; everything is kept. It signs out every
 // device; logging in again (password or Google) reactivates it.
-app.post('/api/me/deactivate', requireAuth(), async (req, res) => {
+app.post('/api/me/deactivate', requireAuth(null, { unconfirmed: true }), async (req, res) => {
   await q(`UPDATE users SET deactivated_at = now(), sessions_valid_from = now() + interval '1 second' WHERE id = $1`, [req.user.id]);
   endSession(req, res);
   res.status(204).end();
@@ -534,7 +696,7 @@ app.put('/api/me', requireAuth(), async (req, res) => {
   res.json(u);
 });
 
-app.get('/api/me', requireAuth(), async (req, res) => {
+app.get('/api/me', requireAuth(null, { unconfirmed: true }), async (req, res) => {
   const { rows } = await q(`SELECT id, email, name, role, plan, photo_key IS NOT NULL AS has_photo, email_verified_at IS NOT NULL AS email_verified,
     google_sub IS NOT NULL AS has_google, password_hash IS NOT NULL AS has_password, first_name, last_name FROM users WHERE id = $1`, [req.user.id]);
   rows[0] ? res.json(rows[0]) : res.status(404).json({ error: 'User not found' });
@@ -556,7 +718,7 @@ app.get('/api/stats', async (req, res) => {
 // nothing to un-blur; the page shows it as "Sign up or log in to see".
 const EMAIL = /[A-Z0-9._%+-]+@[A-Z0-9-]+(?:\.[A-Z0-9-]+)*\.[A-Z]{2,}/gi;
 export const MEMBERS_ONLY = '[contact hidden, log in to see it]';
-const forViewer = async (req, jobs) => ((await signedInUser(req)) ? jobs
+const forViewer = async (req, jobs) => ((await signedInUser(req))?.verified ? jobs // unconfirmed sign-ups see what visitors see
   : jobs.map((j) => ({ ...j, title: hideContacts(j.title, MEMBERS_ONLY), description: hideContacts(j.description, MEMBERS_ONLY) })));
 
 app.get('/api/jobs', async (req, res) => {
@@ -614,7 +776,7 @@ function jobFields(body) {
   if (!title || !description) return { error: 'Title and description required' };
   if (!TYPES.includes(job_type)) return { error: 'Invalid job type' };
   if (salary_min != null && salary_max != null && salary_min > salary_max) return { error: 'Min salary is above max' };
-  // Optional cap the employer sets ("up to 50 applications"); empty means the site-wide most.
+  // Optional cap the employer sets ("up to 50 applications"); empty means the most their plan allows (jobCap).
   const max_applications = body.max_applications == null || body.max_applications === '' ? null : Number(body.max_applications);
   if (max_applications !== null && !(Number.isInteger(max_applications) && max_applications >= 1 && max_applications <= 5000))
     return { error: 'Application limit must be a whole number from 1 up' };
@@ -627,10 +789,9 @@ const postLimitMessage = (plan, max) => `You've posted ${max} jobs this month, t
   + ' until the 1st, when your limit resets.';
 
 app.post('/api/jobs', requireAuth('employer'), throttle(30, 60 * 60_000, 'an hour', perUser), async (req, res) => {
-  const { rows: [me] } = await q('SELECT email_verified_at FROM users WHERE id = $1', [req.user.id]);
-  if (!me.email_verified_at) return res.status(403).json({ error: 'Please confirm your email before posting a job. We sent you a link; check your inbox (and Spam).', code: 'verify_email' });
   const { error, values } = jobFields(req.body);
   if (error) return bad(res, error);
+  if (await overCap(req, res, values[7])) return;
   const db = await pool.connect();
   try {
     await db.query('BEGIN');
@@ -651,6 +812,7 @@ app.post('/api/jobs', requireAuth('employer'), throttle(30, 60 * 60_000, 'an hou
     );
     await db.query('COMMIT');
     res.status(201).json(rows[0]);
+    jobLive(req.user.id, rows[0]).catch((err) => console.error(err));
   } catch (err) {
     await db.query('ROLLBACK');
     throw err;
@@ -671,6 +833,7 @@ app.get('/api/my/job-quota', requireAuth('employer'), async (req, res) => {
 app.put('/api/jobs/:id', requireAuth('employer'), throttle(60, 60 * 60_000, 'an hour', perUser), async (req, res) => {
   const { error, values } = jobFields(req.body);
   if (error) return bad(res, error);
+  if (await overCap(req, res, values[7])) return;
   // Lowering the limit to (or below) the applications already in closes the job, as reaching it would.
   const { rows } = await q(
     `UPDATE jobs SET title = $3, description = $4, skills = $5, job_type = $6, salary_min = $7, salary_max = $8, salary_period = $9,
@@ -691,6 +854,8 @@ app.put('/api/jobs/:id/closed', requireAuth('employer'), async (req, res) => {
       'SELECT j.max_applications, (SELECT count(*)::int FROM applications a WHERE a.job_id = j.id) AS received FROM jobs j WHERE j.id = $1 AND j.employer_id = $2',
       [num(req.params.id), req.user.id]);
     if (n && n.received >= max_job_applications) return res.status(409).json({ error: `This job has ${n.received} applicants, the most a job can take (${max_job_applications}). Post a new job to keep hiring.` });
+    const plan = await planOf(pool, req.user.id);
+    if (n && n.received >= jobCap(plan, max_job_applications)) return res.status(402).json({ error: `This job has ${n.received} applicants. ${capMessage(plan, max_job_applications)}`, upgrade: true });
     if (n?.max_applications && n.received >= n.max_applications) return res.status(409).json({ error: `This job reached your limit of ${n.max_applications} applications. Raise the limit in Edit job to reopen it.` });
   }
   const { rows } = await q(
@@ -809,7 +974,7 @@ app.post('/api/jobs/:id/apply', requireAuth('worker'), async (req, res) => {
     // parallel applies can't push it past its cap.
     await db.query('SELECT 1 FROM users WHERE id = $1 FOR UPDATE', [req.user.id]);
     const { rows: [target] } = await db.query(
-      'SELECT j.closed_at, j.max_applications, u.deactivated_at, u.suspended_at FROM jobs j JOIN users u ON u.id = j.employer_id WHERE j.id = $1 FOR UPDATE OF j', [num(req.params.id)]);
+      'SELECT j.closed_at, j.max_applications, u.plan, u.deactivated_at, u.suspended_at FROM jobs j JOIN users u ON u.id = j.employer_id WHERE j.id = $1 FOR UPDATE OF j', [num(req.params.id)]);
     // Counted after the lock, in its own statement, so it sees applies that committed while we waited.
     const { rows: [{ received }] } = await db.query('SELECT count(*)::int AS received FROM applications WHERE job_id = $1', [num(req.params.id)]);
     if (target?.closed_at || target?.deactivated_at || target?.suspended_at) {
@@ -822,8 +987,8 @@ app.post('/api/jobs/:id/apply', requireAuth('worker'), async (req, res) => {
       return res.status(409).json({ error: 'You already applied' });
     }
     const { remaining, applications } = await creditsToday(db, req.user.id);
-    // The job's own limit, if the employer set one, else the site-wide most.
-    const cap = Math.min(max_job_applications, target?.max_applications ?? Infinity);
+    // The job's own limit, if the employer set one, within what the employer's plan allows.
+    const cap = Math.min(jobCap(target?.plan, max_job_applications), target?.max_applications ?? Infinity);
     if (target && received >= cap) { // full before this change, or the cap was lowered
       await db.query('UPDATE jobs SET closed_at = now() WHERE id = $1', [num(req.params.id)]);
       await db.query('COMMIT');
@@ -1822,7 +1987,10 @@ app.get('/api/messages', requireAuth(), async (req, res) => {
      ), latest AS (SELECT DISTINCT ON (other) * FROM m ORDER BY other, created_at DESC)
      SELECT l.other AS user_id, u.name, u.role, u.deleted_at IS NOT NULL AS deleted, u.deactivated_at IS NOT NULL AS deactivated, l.body AS last_body, l.created_at AS last_at, l.sender_id = $1 AS last_from_me,
        (SELECT count(*)::int FROM messages x WHERE x.sender_id = l.other AND x.recipient_id = $1 AND x.read_at IS NULL) AS unread
-     FROM latest l JOIN users u ON u.id = l.other ORDER BY l.created_at DESC`,
+     FROM latest l JOIN users u ON u.id = l.other
+     LEFT JOIN hidden_conversations h ON h.user_id = $1 AND h.other_id = l.other
+     WHERE h.hidden_at IS NULL OR l.created_at > h.hidden_at
+     ORDER BY l.created_at DESC`,
     [req.user.id]
   );
   if (req.user.role === 'employer') {
@@ -1830,6 +1998,18 @@ app.get('/api/messages', requireAuth(), async (req, res) => {
     for (const r of rows) r.applied = applied[r.user_id] ?? [];
   }
   res.json(rows);
+});
+
+// Remove people from my Messages list (one or many). Nothing is deleted: the other person keeps the chat,
+// and a new message from either side brings it back. Their unread messages count as read.
+app.post('/api/messages/hide', requireAuth(), async (req, res) => {
+  const ids = [...new Set((Array.isArray(req.body?.user_ids) ? req.body.user_ids : []).map(num).filter(Number.isInteger))];
+  if (!ids.length) return bad(res, 'Pick at least one conversation');
+  if (ids.length > 200) return bad(res, 'You can remove up to 200 conversations at once');
+  await q(`INSERT INTO hidden_conversations (user_id, other_id) SELECT $1, u.id FROM users u WHERE u.id = ANY($2)
+           ON CONFLICT (user_id, other_id) DO UPDATE SET hidden_at = now()`, [req.user.id, ids]);
+  await q('UPDATE messages SET read_at = now() WHERE recipient_id = $1 AND sender_id = ANY($2) AND read_at IS NULL', [req.user.id, ids]);
+  res.status(204).end();
 });
 
 app.get('/api/messages/unread-count', requireAuth(), async (req, res) => {

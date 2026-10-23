@@ -21,5 +21,5 @@ Local Postgres 17 (Homebrew), DBs `remotepinas` and `remotepinas_test`. Config i
 
 - Account states on `users`: `deleted_at` (tombstoned, never hard-deleted), `deactivated_at` (paused, login reactivates), `suspended_at` (admin; email hash goes in `blocked_emails`). Search, job lists, applying and messaging must exclude non-active accounts.
 - Job text for visitors goes through `forViewer` / `hideContacts`. Keep contact masking server-side.
-- Employers need a confirmed email to post jobs (403 `verify_email`).
+- Email sign-ups confirm with a 6-digit code before anything else: `requireAuth` answers 403 `verify_email` unless the route passes `{ unconfirmed: true }`. Unconfirmed accounts see job posts like visitors.
 - Tests: the `call()` helper auto-confirms test accounts unless `unconfirmed: true`. New tables must be added to the test DROP list.
