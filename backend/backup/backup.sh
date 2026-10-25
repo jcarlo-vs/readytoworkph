@@ -5,6 +5,8 @@ set -euo pipefail
 
 # pg_dump needs Neon's direct connection (not the "-pooler" address) and the system's certificate list.
 url="${DATABASE_URL/-pooler./.}"
+# Newer pg_dump refuses sslmode=require together with sslrootcert=system, so check the certificate fully.
+url="${url/sslmode=require/sslmode=verify-full}"
 [[ "$url" == *sslrootcert=* ]] || url="${url}$([[ "$url" == *\?* ]] && echo '&' || echo '?')sslrootcert=system"
 
 file="backups/$(date -u +%Y-%m-%d).sql.gz"

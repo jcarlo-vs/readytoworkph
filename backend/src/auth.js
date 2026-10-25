@@ -50,7 +50,7 @@ export async function signedInUser(req) {
   if (token.admin) return null; // admin logins aren't user accounts
   const { rows: [u] } = await pool.query(
     'SELECT role, email_verified_at IS NOT NULL AS verified, floor(extract(epoch FROM sessions_valid_from))::bigint AS since FROM users WHERE id = $1', [token.id]);
-  if (!u || token.iat < Number(u.since)) return null;
+  if (!u || token.iat < Number(u.since) || u.role === 'team') return null; // nobody signs in as the Team account
   return { id: token.id, role: u.role, verified: u.verified };
 }
 

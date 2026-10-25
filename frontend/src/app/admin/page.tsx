@@ -23,7 +23,7 @@ export default function Overview() {
   useEffect(() => {
     const load = () => adminApi<Stats>('/stats').then(setStats, failed(logout, setError));
     load();
-    const t = setInterval(load, 60_000);
+    const t = setInterval(() => { if (!document.hidden) load(); }, 60_000); // not while the tab is hidden
     return () => clearInterval(t);
   }, [logout]);
 

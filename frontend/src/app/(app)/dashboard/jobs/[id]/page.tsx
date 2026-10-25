@@ -18,7 +18,12 @@ type Applicant = {
   id: number; worker_id: number; name: string; email: string; title: string | null; skills: string[] | null;
   cover_letter: string; credits: number; created_at: string; analysis: Analysis | null; resume_name: string | null;
   deleted?: boolean; deactivated?: boolean; hourly_rate: string | null; messaged: boolean; hired: boolean; saved: boolean;
+  not_fit: NotFit | null;
 };
+// "Not a fit" for this job, with why. Private to the employer; the worker never sees it.
+type NotFit = 'skills' | 'no_reply' | 'suspicious' | 'other';
+const NOT_FIT: [NotFit, string][] = [['skills', 'Skills don’t match'], ['no_reply', 'Didn’t reply'], ['suspicious', 'Looks suspicious'], ['other', 'Other reason']];
+const notFitLabel = (r: NotFit) => NOT_FIT.find(([k]) => k === r)![1];
 
 
 // A small card that opens under its trigger on hover or keyboard focus (e.g. explaining Get score).
@@ -68,8 +73,10 @@ export default function Applicants() {
   const [busy, setBusy] = useState<Record<number, boolean>>({});
   const [errors, setErrors] = useState<Record<number, string>>({});
   const [sortBy, setSortBy] = useState<'credits' | 'newest' | 'score'>('credits');
-  const [filter, setFilter] = useState<'all' | 'saved'>('all');
+  const [filter, setFilter] = useState<'all' | 'saved' | 'not_fit'>('all');
   const [savedNow, setSavedNow] = useState<Record<number, boolean>>({}); // bookmarks changed on this page, by worker id
+  const [notFitNow, setNotFitNow] = useState<Record<number, NotFit | null>>({}); // "Not a fit" changed on this page, by application id
+  const [fitMenu, setFitMenu] = useState<number | null>(null); // the application whose Not a fit menu is open
   const u = usage ?? initialUsage;
   const [sel, setSel] = useState<number | null>(null); // the application open in the drawer
   const [picked, setPicked] = useState<Set<number>>(new Set()); // ticked applicants, for one message to all of them
@@ -142,11 +149,26 @@ export default function Applicants() {
     }
   }
 
-  const list = (apps ?? []).map((a) => ({ ...a, analysis: results[a.id] ?? a.analysis, messaged: a.messaged || sentNow.has(a.id) }));
+  // Not a fit: marked people stay in All, dimmed and moved to the bottom, and have their own tab.
+  async function markNotFit(a: Applicant, reason: NotFit | null) {
+    const before = a.not_fit;
+    setFitMenu(null);
+    setNotFitNow((s) => ({ ...s, [a.id]: reason }));
+    try {
+      await api(`/applications/${a.id}/not-fit`, { method: 'PUT', body: { reason }, quiet: true });
+    } catch (err) {
+      setNotFitNow((s) => ({ ...s, [a.id]: before }));
+      setErrors((e) => ({ ...e, [a.id]: (err as Error).message }));
+    }
+  }
+
+  const list = (apps ?? []).map((a) => ({ ...a, analysis: results[a.id] ?? a.analysis, messaged: a.messaged || sentNow.has(a.id), not_fit: a.id in notFitNow ? notFitNow[a.id] : a.not_fit }));
   if (sortBy === 'score') list.sort((x, y) => (y.analysis?.score ?? -1) - (x.analysis?.score ?? -1));
   if (sortBy === 'newest') list.sort((x, y) => y.created_at.localeCompare(x.created_at));
+  list.sort((x, y) => Number(!!x.not_fit) - Number(!!y.not_fit)); // stable: keeps the chosen order within each group
   const savedCount = list.filter(isSaved).length;
-  const shown = filter === 'saved' ? list.filter(isSaved) : list;
+  const notFitCount = list.filter((a) => a.not_fit).length;
+  const shown = filter === 'saved' ? list.filter(isSaved) : filter === 'not_fit' ? list.filter((a) => a.not_fit) : list;
   const unscored = list.filter((a) => !a.analysis && !a.deleted).map((a) => a.id);
   const messageable = shown.filter((a) => !a.deleted && !a.deactivated);
   const allPicked = messageable.length > 0 && messageable.every((a) => picked.has(a.id));
@@ -247,7 +269,7 @@ export default function Applicants() {
       <section className={`${card} p-0`}>{/* not tableCard: its overflow-hidden would cut off the Get score card */}
         <div className="flex flex-wrap items-center gap-x-3 gap-y-2 border-b border-slate-100 px-4 py-2.5">
           <div className="inline-flex rounded-lg bg-slate-100 p-0.5 text-xs" role="group" aria-label="Show">
-            {([['all', `All ${list.length}`], ['saved', `★ Bookmarked ${savedCount}`]] as const).map(([k, label]) => (
+            {([['all', `All ${list.length}`], ['saved', `★ Bookmarked ${savedCount}`], ['not_fit', `Not a fit ${notFitCount}`]] as const).map(([k, label]) => (
               <button key={k} type="button" onClick={() => setFilter(k)} aria-pressed={filter === k}
                 className={`rounded-md px-3 py-1.5 font-semibold transition ${filter === k ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-600 hover:text-slate-900'}`}>{label}</button>
             ))}
@@ -292,6 +314,16 @@ export default function Applicants() {
           </div>
         </div>
         <ErrorText msg={scoreError} />
+        <details className="group border-b border-slate-100 px-4 py-2 text-xs text-slate-600">
+          <summary className="flex cursor-pointer list-none items-center gap-1.5 font-semibold text-slate-500 hover:text-slate-800 [&::-webkit-details-marker]:hidden">
+            How Bookmark and Not a fit work
+            <svg viewBox="0 0 20 20" className="h-3.5 w-3.5 transition group-open:rotate-180" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M5 8l5 5 5-5" /></svg>
+          </summary>
+          <ul className="mt-2 grid gap-2 pb-1 sm:grid-cols-2">
+            <li className="rounded-lg bg-amber-50 p-3"><b className="text-amber-900">★ Bookmark</b>: remember someone you like. It saves the <i>worker</i>, so they also stay in your Saved workers for future jobs.</li>
+            <li className="rounded-lg bg-slate-50 p-3"><b className="text-slate-900">Not a fit</b>: note that someone isn’t right for <i>this job</i> and why. They move to the bottom, greyed out. Only you see it; the worker isn’t told. You can undo it any time.</li>
+          </ul>
+        </details>
 
         {page?.total === 0 ? <p className="p-6 text-center text-slate-500">No applicants yet. They&apos;ll appear here as workers apply.</p> : (
           // Scrolls sideways only on small screens; on wide ones nothing is clipped, so the Get score card shows whole.
@@ -310,12 +342,14 @@ export default function Applicants() {
               </thead>
               <tbody className="divide-y divide-slate-100">
                 {!page && !error && <tr><td colSpan={7} className="p-6 text-center text-slate-500">Loading…</td></tr>}
-                {page && !shown.length && <tr><td colSpan={7} className="p-8 text-center text-slate-500">No bookmarked applicants yet. Open someone and click <b>☆ Bookmark</b> to keep them here.</td></tr>}
+                {page && !shown.length && <tr><td colSpan={7} className="p-8 text-center text-slate-500">{filter === 'not_fit'
+                  ? <>Nobody marked yet. Open someone and choose <b>Not a fit</b> to set them aside.</>
+                  : <>No bookmarked applicants yet. Open someone and click <b>☆ Bookmark</b> to keep them here.</>}</td></tr>}
                 {shown.map((a) => {
                   const b = a.analysis && band(a.analysis.score);
                   const isSel = a.id === sel;
                   return (
-                    <tr key={a.id} data-row onClick={() => setSel(a.id)} className={`cursor-pointer align-middle transition-colors ${isSel ? 'bg-emerald-50' : 'hover:bg-slate-50'}`}>
+                    <tr key={a.id} data-row onClick={() => setSel(a.id)} className={`cursor-pointer align-middle transition-colors ${isSel ? 'bg-emerald-50' : 'hover:bg-slate-50'} ${a.not_fit && !isSel ? 'opacity-55' : ''}`}>
                       <td className="px-4 py-3" onClick={(e) => e.stopPropagation()}>{!a.deleted && !a.deactivated && messageable.length > 1 && <input type="checkbox" aria-label={`Select ${a.name}`} checked={picked.has(a.id)} onChange={() => togglePick(a.id)} className="h-4 w-4 accent-emerald-700" />}</td>
                       <td className="min-w-44 px-2 py-3">
                         <button type="button" onClick={(e) => { e.stopPropagation(); setSel(a.id); }} className="text-left font-semibold text-slate-900 hover:text-emerald-800 hover:underline">
@@ -323,6 +357,7 @@ export default function Applicants() {
                         </button>
                         <span className="block text-xs text-slate-500">{a.deactivated ? 'Paused · not taking messages' : a.title || 'No title'}</span>
                         <span className="block text-xs text-emerald-800"><TimeAgo date={a.created_at} />{a.hired ? ' · Hired' : ''}</span>
+                        {a.not_fit && <span className={`mt-1 inline-block rounded-full px-2 py-0.5 text-[10px] font-semibold ${a.not_fit === 'suspicious' ? 'bg-red-50 text-red-800' : 'bg-slate-100 text-slate-600'}`}>Not a fit · {notFitLabel(a.not_fit)}</span>}
                       </td>
                       <td className="max-w-sm px-2 py-3 text-xs leading-relaxed text-slate-600"><span className="line-clamp-2">{a.cover_letter}</span></td>
                       <td className="whitespace-nowrap px-2 py-3">
@@ -397,7 +432,35 @@ export default function Applicants() {
                     {isSaved(person) ? '★ Bookmarked' : '☆ Bookmark this worker'}
                   </button>
                 )}
+                <div className="relative">
+                  <button type="button" onClick={() => setFitMenu((o) => (o === person.id ? null : person.id))} aria-expanded={fitMenu === person.id} aria-haspopup="menu"
+                    className={`inline-flex items-center gap-1.5 rounded-lg px-3 py-2 ring-1 transition ${person.not_fit ? 'bg-slate-100 text-slate-800 ring-slate-300' : 'text-slate-700 ring-slate-200 hover:ring-slate-400'}`}>
+                    {person.not_fit ? `Not a fit · ${notFitLabel(person.not_fit)}` : 'Not a fit'}
+                    <svg viewBox="0 0 20 20" className={`h-3.5 w-3.5 transition ${fitMenu === person.id ? 'rotate-180' : ''}`} fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M5 8l5 5 5-5" /></svg>
+                  </button>
+                  {fitMenu === person.id && (
+                    <div role="menu" className="absolute right-0 z-10 mt-1 w-56 rounded-xl bg-white p-1 text-left shadow-lg ring-1 ring-slate-200">
+                      <p className="px-3 pb-1 pt-2 text-[11px] font-normal text-slate-500">Why isn’t {first(person.name)} right for this job? Only you see this.</p>
+                      {NOT_FIT.map(([k, label]) => (
+                        <button key={k} type="button" role="menuitemradio" aria-checked={person.not_fit === k} onClick={() => markNotFit(person, k)}
+                          className={`flex w-full items-center justify-between rounded-lg px-3 py-2 text-left hover:bg-slate-50 ${k === 'suspicious' ? 'text-red-700' : 'text-slate-800'}`}>
+                          {label}{person.not_fit === k && <span aria-hidden="true">✓</span>}
+                        </button>
+                      ))}
+                      {person.not_fit && (
+                        <button type="button" role="menuitem" onClick={() => markNotFit(person, null)} className="mt-1 w-full rounded-lg border-t border-slate-100 px-3 py-2 text-left text-emerald-800 hover:bg-emerald-50">
+                          Undo: still a possible fit
+                        </button>
+                      )}
+                    </div>
+                  )}
+                </div>
               </div>
+              {person.not_fit === 'suspicious' && (
+                <p className="rounded-lg bg-red-50 px-3 py-2 text-xs text-red-900">
+                  Think this is a scam or spam? <Link href="/contact" className="font-semibold underline">Tell us</Link> and we’ll look into the account.
+                </p>
+              )}
 
               {(() => {
                 const b = person.analysis && band(person.analysis.score);

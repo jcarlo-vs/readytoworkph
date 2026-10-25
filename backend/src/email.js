@@ -2,17 +2,34 @@
 // so local development works without an email account. Mail comes from EMAIL_FROM (hello@) and
 // replies go to the support inbox.
 // `replyTo` overrides where replies go (e.g. a support request: reply straight to the person who wrote).
-export async function sendEmail({ to, subject, text, html, replyTo }) {
+// `headers` adds email headers (e.g. List-Unsubscribe on announcements).
+const resendBody = ({ to, subject, text, html, replyTo, headers }) =>
+  ({ from: process.env.EMAIL_FROM, reply_to: replyTo ?? CONTACT, to, subject, text, html, ...(headers && { headers }) });
+export async function sendEmail(email) {
   if (!process.env.RESEND_API_KEY) {
-    console.log(`\n[email] To: ${to}\n[email] Subject: ${subject}\n${text}\n`);
+    console.log(`\n[email] To: ${email.to}\n[email] Subject: ${email.subject}\n${email.text}\n`);
     return;
   }
   const res = await fetch('https://api.resend.com/emails', {
     method: 'POST',
     headers: { authorization: `Bearer ${process.env.RESEND_API_KEY}`, 'content-type': 'application/json' },
-    body: JSON.stringify({ from: process.env.EMAIL_FROM, reply_to: replyTo ?? CONTACT, to, subject, text, html }),
+    body: JSON.stringify(resendBody(email)),
   });
-  if (!res.ok) throw new Error(`Email to ${to} failed: ${res.status} ${await res.text()}`);
+  if (!res.ok) throw new Error(`Email to ${email.to} failed: ${res.status} ${await res.text()}`);
+}
+
+// Up to 100 emails in one request (Resend's batch limit), for announcements. All succeed or the call throws.
+export async function sendBatch(emails) {
+  if (!process.env.RESEND_API_KEY) {
+    console.log(`\n[email batch] ${emails.length} × "${emails[0]?.subject}"\n`);
+    return;
+  }
+  const res = await fetch('https://api.resend.com/emails/batch', {
+    method: 'POST',
+    headers: { authorization: `Bearer ${process.env.RESEND_API_KEY}`, 'content-type': 'application/json' },
+    body: JSON.stringify(emails.map(resendBody)),
+  });
+  if (!res.ok) throw new Error(`Batch of ${emails.length} failed: ${res.status} ${await res.text()}`);
 }
 
 // Names, job titles and messages come from users: escape them so nobody can inject HTML or links.

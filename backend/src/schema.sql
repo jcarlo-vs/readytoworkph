@@ -283,7 +283,7 @@ CREATE TABLE IF NOT EXISTS match_runs (
 CREATE INDEX IF NOT EXISTS match_runs_job ON match_runs (job_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS match_runs_employer ON match_runs (employer_id, created_at);
 
--- Website visits (Admin › Visitors): one row per page view, sent by the site itself, so bots that don't run
+-- Website visits (Admin › Visitors): one row per visit (its first page), sent by the site itself, so bots that don't run
 -- JavaScript stay out. IP and country identify visitors; rows older than 90 days are deleted.
 CREATE TABLE IF NOT EXISTS page_views (
   id         bigserial PRIMARY KEY,
@@ -296,6 +296,71 @@ CREATE TABLE IF NOT EXISTS page_views (
   user_agent text
 );
 CREATE INDEX IF NOT EXISTS page_views_at ON page_views (at DESC);
+-- IPs left out of Visitors (the admin's own, so only real visitors are counted). IPv6 is stored as its /64
+-- network, because a home connection's IPv6 address changes often while the network stays the same.
+CREATE TABLE IF NOT EXISTS ignored_ips (
+  net      cidr PRIMARY KEY,
+  label    text,
+  added_at timestamptz NOT NULL DEFAULT now()
+);
 
 -- Optional: the employer's own cap on applications for a job (empty = the site-wide most). The job closes when reached.
 ALTER TABLE jobs ADD COLUMN IF NOT EXISTS max_applications int CHECK (max_applications BETWEEN 1 AND 5000);
+
+-- "Not a fit": the employer's private note that an applicant isn't right for this job, with why. The worker never
+-- sees it. 'suspicious' is for applications that look like scams or spam.
+ALTER TABLE applications ADD COLUMN IF NOT EXISTS not_fit text CHECK (not_fit IN ('skills', 'no_reply', 'suspicious', 'other'));
+ALTER TABLE applications ADD COLUMN IF NOT EXISTS not_fit_at timestamptz;
+
+-- What the admin did (suspend, plan change, delete, email everyone...), newest first on each user's admin page.
+CREATE TABLE IF NOT EXISTS admin_actions (
+  id      bigserial PRIMARY KEY,
+  at      timestamptz NOT NULL DEFAULT now(),
+  action  text NOT NULL,
+  user_id int REFERENCES users(id) ON DELETE SET NULL,
+  detail  text
+);
+CREATE INDEX IF NOT EXISTS admin_actions_user ON admin_actions (user_id, at DESC);
+
+-- Support conversations. A ticket is a feedback row (its first message is feedback.message); replies from us
+-- and the person's email answers follow here. `email` tickets are emails sent straight to support@.
+-- `inbound_id` is the email's Message-ID, so a redelivered email isn't added twice.
+ALTER TABLE feedback DROP CONSTRAINT IF EXISTS feedback_type_check;
+ALTER TABLE feedback ADD CONSTRAINT feedback_type_check CHECK (type IN ('idea', 'bug', 'other', 'support', 'email'));
+ALTER TABLE feedback ADD COLUMN IF NOT EXISTS inbound_id text UNIQUE;
+CREATE TABLE IF NOT EXISTS support_messages (
+  id          serial PRIMARY KEY,
+  feedback_id int NOT NULL REFERENCES feedback(id) ON DELETE CASCADE,
+  from_admin  boolean NOT NULL,
+  body        text NOT NULL,
+  inbound_id  text UNIQUE,
+  created_at  timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS support_messages_ticket ON support_messages (feedback_id, created_at);
+
+-- Emails to everyone (Admin › Announcements): what was sent, to whom, and how many went out.
+CREATE TABLE IF NOT EXISTS broadcasts (
+  id          serial PRIMARY KEY,
+  audience    text NOT NULL CHECK (audience IN ('employers', 'workers', 'everyone')),
+  subject     text NOT NULL,
+  body        text NOT NULL,
+  recipients  int NOT NULL,
+  sent        int NOT NULL DEFAULT 0,
+  failed      int NOT NULL DEFAULT 0,
+  created_at  timestamptz NOT NULL DEFAULT now(),
+  finished_at timestamptz
+);
+-- Opted out of announcements (from the link in every announcement). Account emails (codes, messages) still go.
+ALTER TABLE users ADD COLUMN IF NOT EXISTS announcements_off_at timestamptz;
+
+-- The "ReadyToWork.ph Team" account: the admin's messages to a person arrive in their Messages from it, and their
+-- replies come back to the admin panel. It has no password and no Google link, and auth refuses any session for
+-- it, so nobody can sign in as it. It's left out of counts, lists, search and announcements.
+ALTER TABLE users DROP CONSTRAINT IF EXISTS users_role_check;
+ALTER TABLE users ADD CONSTRAINT users_role_check CHECK (role IN ('worker', 'employer', 'team'));
+INSERT INTO users (email, name, role, email_verified_at) VALUES ('team@readytowork.ph', 'ReadyToWork.ph Team', 'team', now())
+  ON CONFLICT (email) DO NOTHING;
+
+-- "Email me about new messages" (Account page), on unless switched off. Account emails (codes, resets) always go.
+ALTER TABLE users ADD COLUMN IF NOT EXISTS message_emails boolean NOT NULL DEFAULT true;
+UPDATE users SET message_emails = false WHERE role = 'team' AND message_emails; -- replies to the Team show in Admin › Messages instead

@@ -4,6 +4,7 @@ import { usePathname } from 'next/navigation';
 import { useCallback, useEffect, useState } from 'react';
 import { ErrorText, Field, Logo, button, card, input } from '@/components/ui';
 import { AdminContext, adminApi } from './ui';
+import { Turnstile, robotCheckOn } from '@/components/Turnstile';
 
 // The admin is its own small app: a dark menu grouped by topic, its own login, and no public site menu.
 const ICON: Record<string, string> = {
@@ -14,6 +15,8 @@ const ICON: Record<string, string> = {
   subscriptions: 'M3 6h18v12H3zM3 10h18M7 15h3',
   feedback: 'M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2Z',
   settings: 'M4 7h10M18 7h2M4 17h4M12 17h8M14 4v6M8 14v6',
+  messages: 'M4 5h16v11H8l-4 4z',
+  announcements: 'M3 11v2a1 1 0 0 0 1 1h2l5 4V6L6 10H4a1 1 0 0 0-1 1ZM16 9a4 4 0 0 1 0 6M19 6a8 8 0 0 1 0 12',
   site: 'M7 17 17 7M8 7h9v9',
   out: 'M15 4h4v16h-4M10 8l-4 4 4 4M6 12h10',
 };
@@ -21,7 +24,7 @@ const MENU: [string, [string, string, string][]][] = [
   ['Insights', [['overview', 'Overview', '/admin']]],
   ['People', [['users', 'Users', '/admin/users'], ['jobs', 'Jobs', '/admin/jobs'], ['visitors', 'Visitors', '/admin/visitors']]],
   ['Money', [['subscriptions', 'Subscriptions', '/admin/subscriptions']]],
-  ['Support', [['feedback', 'Feedback & support', '/admin/feedback']]],
+  ['Support', [['feedback', 'Feedback & support', '/admin/feedback'], ['messages', 'Messages', '/admin/messages'], ['announcements', 'Announcements', '/admin/announcements']]],
   ['System', [['settings', 'Settings', '/admin/settings']]],
 ];
 const Icon = ({ name }: { name: string }) => (
@@ -32,16 +35,18 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
   const path = usePathname();
   const [state, setState] = useState<'checking' | 'login' | 'in'>('checking');
   const [openFeedback, setOpenFeedback] = useState(0);
+  const [teamUnread, setTeamUnread] = useState(0); // people's replies to the ReadyToWork.ph Team, unread
 
   const logout = useCallback(() => { adminApi('/logout', 'POST').catch(() => {}); setState('login'); }, []);
   const refreshCounts = useCallback(() => {
-    adminApi<{ totals: { open_feedback: number } }>('/stats').then((s) => setOpenFeedback(s.totals.open_feedback), () => {});
+    adminApi<{ totals: { open_feedback: number; team_unread: number } }>('/stats').then((s) => { setOpenFeedback(s.totals.open_feedback); setTeamUnread(s.totals.team_unread); }, () => {});
   }, []);
   useEffect(() => { adminApi('/settings').then(() => setState('in'), () => setState('login')); }, []);
   useEffect(() => {
     if (state !== 'in') return;
     refreshCounts();
-    const t = setInterval(refreshCounts, 60_000);
+    // Skips while the tab is hidden, so a forgotten admin tab doesn't call the API all day.
+    const t = setInterval(() => { if (!document.hidden) refreshCounts(); }, 60_000);
     return () => clearInterval(t);
   }, [state, refreshCounts]);
 
@@ -71,6 +76,9 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
                       <Icon name={key} />{label}
                       {key === 'feedback' && openFeedback > 0 && (
                         <span className="ml-auto rounded-full bg-amber-400 px-1.5 text-[11px] font-bold text-slate-900" aria-label={`${openFeedback} open`}>{openFeedback}</span>
+                      )}
+                      {key === 'messages' && teamUnread > 0 && (
+                        <span className="ml-auto rounded-full bg-amber-400 px-1.5 text-[11px] font-bold text-slate-900" aria-label={`${teamUnread} unread`}>{teamUnread}</span>
                       )}
                     </Link>
                   );
@@ -103,14 +111,19 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
 function AdminLogin({ onDone }: { onDone: () => void }) {
   const [form, setForm] = useState({ email: '', password: '' });
   const [status, setStatus] = useState({ busy: false, error: '' });
+  // The robot check runs on every admin sign-in; a token works once, so a failed try remounts it for a new one.
+  const [robotToken, setRobotToken] = useState('');
+  const [robotKey, setRobotKey] = useState(0);
   async function submit(e: React.FormEvent) {
     e.preventDefault();
     setStatus({ busy: true, error: '' });
     try {
-      await adminApi('/login', 'POST', form);
+      await adminApi('/login', 'POST', { ...form, turnstile: robotToken });
       onDone();
     } catch (err) {
       setStatus({ busy: false, error: (err as Error).message });
+      setRobotToken('');
+      setRobotKey((k) => k + 1);
     }
   }
   return (
@@ -121,7 +134,8 @@ function AdminLogin({ onDone }: { onDone: () => void }) {
         <Field label="Email"><input className={input} type="email" required autoComplete="username" value={form.email} onChange={(e) => setForm({ ...form, email: e.target.value })} /></Field>
         <Field label="Password"><input className={input} type="password" required autoComplete="current-password" value={form.password} onChange={(e) => setForm({ ...form, password: e.target.value })} /></Field>
         <ErrorText msg={status.error} />
-        <button className={`${button} w-full`} disabled={status.busy}>{status.busy ? 'Signing in…' : 'Sign in'}</button>
+        <Turnstile key={robotKey} onToken={setRobotToken} />
+        <button className={`${button} w-full`} disabled={status.busy || (robotCheckOn && !robotToken)}>{status.busy ? 'Signing in…' : 'Sign in'}</button>
         <Link href="/" className="block text-center text-sm text-slate-500 hover:text-slate-800">Back to the site</Link>
       </form>
     </div>

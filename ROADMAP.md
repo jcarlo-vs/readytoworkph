@@ -42,6 +42,19 @@ Features we decided to build, many inspired by looking through OnlineJobs.ph (em
 - [x] "Your job is live" email to the employer after posting (2026-10-23)
 - [x] Messages: remove one or many people from your list (2026-10-23); messages stay, a new message brings them back
 - [x] My Job Posts: Close (with the same confirm as the job page) and Reopen right from the list (2026-10-23)
+- [x] Forgot password: at most 3 reset emails per account per hour, counted in the database (2026-10-24)
+- [x] Sign-up hardening (2026-10-24): names can't hold links, emails, phones or @handles (Google names get them stripped); passwords 8 to 200 characters
+- [x] Admin login: robot check (Turnstile) on every attempt (2026-10-24)
+- [x] Admin › Visitors (2026-10-24): one row per visit (its first page) instead of every page; country now passed through the Worker; "My IPs" list: add the current IP or type any IP, name it, remove it (IPv6 by /64; hides past visits too); period filter 7 days / 30 days / 6 months (visits now kept ~6 months)
+  - [ ] Follow-up: deploy the website (worker.ts) so countries start showing; old rows stay without a country
+- [x] Applicants: "Not a fit" per application with a reason (skills, didn't reply, looks suspicious, other); dimmed at the bottom, own tab, undo; "How Bookmark and Not a fit work" explainer (2026-10-24)
+- [x] Admin user page (2026-10-24): everything about one person, and fixes: confirm email, send a new code, change plan by hand (not over Paddle), suspend, delete on request; every admin action logged in History
+- [x] Admin › Announcements (2026-10-24): site-wide notice bar (green/yellow, optional end time, closable) and email everyone / employers / workers (test copy, exact-count confirm, no double send, batches of 100, one-click unsubscribe)
+- [x] Support conversations (2026-10-24): reply by email from the admin panel; replies with [#id] come back into the ticket and reopen it; emails to support@ start tickets; Resolve / Reopen
+  - [ ] Follow-up: Cloudflare Email Routing: route support@readytowork.ph to the Worker "remotepinas"; Worker secrets INBOUND_SECRET and SUPPORT_FORWARD_TO (the inbox it goes to today); INBOUND_SECRET on Cloud Run too
+- [x] Message one person as "ReadyToWork.ph Team" (2026-10-24): from their admin user page; arrives in their Messages (marked Official) plus the usual email; replies come back to Admin › Messages (unread badge). The Team account can't be signed into and is left out of counts, lists and announcements
+- [x] Message emails (2026-10-24): still one per unread batch, now never while the person is on the site (active in the last 2 minutes), and an "Email me about new messages" switch on the Account page
+- [x] Every pop-up closes when you click outside it (admin Suspend, account Delete/Change email/Pause, profile Leave without saving) (2026-10-24)
 - [x] AI Fit Score naming, re-score, Score all (Premium), monthly AI run log
 - [x] Hiring analytics (Premium): period and job filters, funnel, fit mix, best candidates, job table with search and pages
 - [x] Send feedback popup + admin inbox

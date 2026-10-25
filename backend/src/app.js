@@ -3,11 +3,12 @@ import cors from 'cors';
 import { OAuth2Client } from 'google-auth-library';
 import { pool, q } from './db.js';
 import { hashPassword, verifyPassword, requireAuth, signedInUser, requireAdmin, startSession, endSession, startAdminSession, endAdminSession } from './auth.js';
-import { sendEmail, renderEmail } from './email.js';
+import { sendEmail, sendBatch, renderEmail } from './email.js';
 import { analyzeApplication } from './analyzer.js';
 import { callClaude, runMatchAgent } from './matchAgent.js';
 import { extractText, getDocumentProxy } from 'unpdf';
 import { storage } from './storage.js';
+import { isIP } from 'node:net';
 import { randomUUID, randomBytes, randomInt, createHash, createHmac, timingSafeEqual } from 'node:crypto';
 
 const TYPES = ['full-time', 'part-time', 'gig'];
@@ -56,6 +57,12 @@ const SETTINGS = {
   free_ai_analyses: { default: 5, valid: (v) => Number.isInteger(v) && v >= 0 && v <= 1000 },
   free_full_names: { default: false, valid: (v) => typeof v === 'boolean' }, // Free employers see "Maria Santos", not "Maria S."
   max_job_applications: { default: 250, valid: (v) => Number.isInteger(v) && v >= 10 && v <= 5000 }, // a job closes itself when full
+  homepage_design: { default: 'classic', valid: (v) => ['classic', 'hello_call', 'big_photo', 'search_first', 'two_faces'].includes(v) }, // which homepage hero visitors see
+  homepage_photo: { default: 'laughing', valid: (v) => ['laughing', 'good_news'].includes(v) }, // the Hello Call / Big Photo hero photo
+  // The site-wide notice bar ("Maintenance tonight 10pm"): plain text, a colour, and an optional end time; null = off.
+  notice: { default: null, valid: (v) => v === null || (typeof v === 'object' && !Array.isArray(v)
+    && typeof v.text === 'string' && v.text.trim().length >= 3 && v.text.length <= 200 && ['info', 'warning'].includes(v.tone)
+    && (v.ends_at == null || !Number.isNaN(Date.parse(v.ends_at))) && Object.keys(v).every((k) => ['text', 'tone', 'ends_at'].includes(k))) },
 };
 async function getSettings() {
   const { rows } = await q('SELECT key, value FROM settings');
@@ -82,8 +89,8 @@ const skillList = (v) =>
     .map((s) => String(s).trim().toLowerCase().slice(0, 50)).filter(Boolean))].slice(0, 30);
 const bad = (res, error) => res.status(400).json({ error });
 // Compares secrets in constant time, so response timing reveals nothing about them.
-// Robot check (Cloudflare Turnstile) for the forms bots abuse: sign-up, forgot password, contact, visitor
-// feedback. The page sends the widget's token; Cloudflare says whether a person earned it. Without
+// Robot check (Cloudflare Turnstile) for the forms bots abuse: sign-up, forgot password, admin login, contact,
+// visitor feedback. The page sends the widget's token; Cloudflare says whether a person earned it. Without
 // TURNSTILE_SECRET (local development, tests) the check is skipped. Swappable for tests.
 async function verifyHuman(req) {
   const secret = process.env.TURNSTILE_SECRET;
@@ -109,6 +116,7 @@ export const app = express();
 app.set('trust proxy', 1); // behind Cloud Run's load balancer: req.ip is the real visitor
 app.disable('x-powered-by');
 app.locals.sendEmail = sendEmail; // swappable so tests can capture emails
+app.locals.sendBatch = sendBatch;
 
 // In production the API is only reachable through Cloudflare: the site's Worker forwards /api requests
 // with this secret header, so calls straight to the Cloud Run address are refused. Cloudflare also
@@ -119,9 +127,12 @@ app.use((req, res, next) => {
   if (!secret) return next(); // local development
   if (!sameText(req.get('x-origin-secret') ?? '', secret)) return res.status(403).json({ error: 'Forbidden' });
   req.visitor = req.get('x-visitor-ip') || req.ip;
+  req.country = req.get('x-visitor-country'); // Cloudflare's country headers don't survive the Worker's own request
   next();
 });
 const visitor = (req) => req.visitor ?? req.ip;
+// Two-letter country (Cloudflare's guess from the IP), or null. Locally there's no Cloudflare, so none.
+const countryOf = (req) => { const c = req.country || req.get('cf-ipcountry'); return /^[A-Z]{2}$/.test(c ?? '') ? c : null; };
 // FRONTEND_ORIGIN can list several sites, comma-separated (e.g. the live domain and a test address).
 // Browsers may call the API from any of them; links in emails use the first one.
 const SITES = (process.env.FRONTEND_ORIGIN ?? '').split(',').map((s) => s.trim()).filter(Boolean);
@@ -222,13 +233,15 @@ app.use('/api', (req, res, next) => {
     const id = req.user?.id;
     if (!id || Date.now() - (lastSeen.get(id) ?? 0) < 60_000) return;
     lastSeen.set(id, Date.now());
-    const country = req.get('cf-ipcountry');
     q('UPDATE users SET last_seen_at = now(), last_country = coalesce($2, last_country) WHERE id = $1',
-      [id, /^[A-Z]{2}$/.test(country ?? '') ? country : null]).catch((err) => console.error(err));
+      [id, countryOf(req)]).catch((err) => console.error(err));
   });
   next();
 });
 
+// 8 to 200 characters (the cap keeps hashing cheap whatever someone sends). Returns the problem, or ''.
+const badPassword = (p) => (typeof p !== 'string' || p.length < 8 ? 'Password must be at least 8 characters'
+  : p.length > 200 ? 'Password must be 200 characters or fewer' : '');
 const loginFails = limiter(10, 15 * 60_000); // wrong passwords per visitor
 const signups = limiter(10, 60 * 60_000); // new accounts per visitor
 
@@ -243,11 +256,12 @@ app.post('/api/auth/register', async (req, res) => {
   if (signups.blocked(visitor(req))) return tooMany(res, 'an hour');
   if (!(await verifyHuman(req))) return notHuman(res);
   const email = str(req.body.email, 200).toLowerCase();
-  const { name, first, last } = nameOf(req.body);
+  const { name, first, last, hasContact } = nameOf(req.body);
   const { password, role } = req.body;
   if (!/^\S+@\S+\.\S+$/.test(email)) return bad(res, 'Valid email required');
   if (!name) return bad(res, 'Name required');
-  if (typeof password !== 'string' || password.length < 8) return bad(res, 'Password must be at least 8 characters');
+  if (hasContact) return bad(res, NAME_CONTACT);
+  if (badPassword(password)) return bad(res, badPassword(password));
   if (!['worker', 'employer'].includes(role)) return bad(res, 'Role must be worker or employer');
   if (await isBlocked(email)) return res.status(403).json(BLOCKED);
 
@@ -334,6 +348,7 @@ app.post('/api/auth/logout', (req, res) => {
 
 // --- Forgot password ---
 const resetRequests = limiter(5, 60 * 60_000); // reset emails per visitor per hour
+export const RESETS_PER_HOUR = 3; // reset emails per account per hour
 const hashToken = (t) => createHash('sha256').update(t).digest('hex');
 
 // Always answers the same way, so this can't be used to check which emails have accounts.
@@ -342,11 +357,16 @@ app.post('/api/auth/forgot', async (req, res) => {
   if (!(await verifyHuman(req))) return notHuman(res);
   resetRequests.hit(visitor(req));
   const email = str(req.body.email, 200).toLowerCase();
-  const { rows: [user] } = await q('SELECT id, name, email FROM users WHERE email = $1', [email]);
+  const { rows: [user] } = await q("SELECT id, name, email FROM users WHERE email = $1 AND role <> 'team'", [email]);
   if (user) {
+    // At most RESETS_PER_HOUR links per account, wherever the requests come from, so nobody can flood someone's
+    // inbox. Links live 1 hour, so the unexpired ones are exactly this hour's. Past it: same answer, no email.
     const token = randomBytes(32).toString('base64url');
-    await q(`INSERT INTO password_resets (token_hash, user_id, expires_at) VALUES ($1, $2, now() + interval '1 hour')`, [hashToken(token), user.id]);
-    app.locals.sendEmail({
+    const { rowCount } = await q(
+      `INSERT INTO password_resets (token_hash, user_id, expires_at) SELECT $1, $2, now() + interval '1 hour'
+       WHERE (SELECT count(*) FROM password_resets WHERE user_id = $2 AND expires_at > now()) < $3`,
+      [hashToken(token), user.id, RESETS_PER_HOUR]);
+    if (rowCount) app.locals.sendEmail({
       to: user.email,
       subject: 'Reset your ReadyToWork.ph password',
       ...renderEmail({
@@ -527,7 +547,7 @@ app.post('/api/me/email/confirm', requireAuth(), async (req, res) => {
 // Sets the new password from a reset link and signs the person in.
 app.post('/api/auth/reset', async (req, res) => {
   const { password } = req.body;
-  if (typeof password !== 'string' || password.length < 8) return bad(res, 'Password must be at least 8 characters');
+  if (badPassword(password)) return bad(res, badPassword(password));
   const { rows: [reset] } = await q(
     `UPDATE password_resets SET used_at = now() WHERE token_hash = $1 AND used_at IS NULL AND expires_at > now() RETURNING user_id`,
     [hashToken(String(req.body.token ?? ''))]
@@ -610,7 +630,8 @@ app.post('/api/auth/google', throttle(30, 15 * 60_000, '15 minutes'), async (req
   if (await isBlocked(email)) return res.status(403).json(BLOCKED);
   ({ rows } = await q(
     `INSERT INTO users (email, name, role, google_sub, email_verified_at, first_name, last_name) VALUES ($1, $2, $3, $4, now(), $5, $6) RETURNING id, email, name, role, plan, photo_key IS NOT NULL AS has_photo, email_verified_at IS NOT NULL AS email_verified`,
-    [email, str(g.name, 100) || email.split('@')[0], role, g.sub, str(g.given_name, 50) ?? '', str(g.family_name, 50) ?? ''] // Google sends both names
+    // Google sends both names; they're whatever the person typed there, so contact bits are dropped (NAME_CONTACT)
+    [email, withoutContacts(str(g.name, 100)) || email.split('@')[0], role, g.sub, withoutContacts(str(g.given_name, 50)), withoutContacts(str(g.family_name, 50))]
   ));
   if (role === 'worker') await q('INSERT INTO worker_profiles (user_id) VALUES ($1)', [rows[0].id]);
   welcome(rows[0]);
@@ -621,9 +642,9 @@ app.post('/api/auth/google', throttle(30, 15 * 60_000, '15 minutes'), async (req
 // Delete my account, straight away (type DELETE to confirm). A paid plan is cancelled at Paddle first, so a
 // failure there stops everything and nothing is half-deleted. Files go, then the data in one transaction;
 // the user row becomes a blank placeholder so the other side of a conversation still reads "Deleted user".
-app.delete('/api/me', requireAuth(null, { unconfirmed: true }), throttle(5, 60 * 60_000, 'an hour', perUser), async (req, res) => {
-  if (req.body?.confirm !== 'DELETE') return bad(res, 'Type DELETE to confirm');
-  const id = req.user.id;
+// Shared by "Delete my account" and the admin deleting one on request. Returns an error message when the paid plan
+// couldn't be cancelled (then nothing was deleted), or null once it's done.
+async function deleteAccount(id) {
   const { rows: [u] } = await q(
     'SELECT u.photo_key, u.paddle_subscription_id, p.resume_key FROM users u LEFT JOIN worker_profiles p ON p.user_id = u.id WHERE u.id = $1', [id]);
   if (u.paddle_subscription_id && process.env.PADDLE_API_KEY) {
@@ -632,7 +653,7 @@ app.delete('/api/me', requireAuth(null, { unconfirmed: true }), throttle(5, 60 *
     } catch (err) {
       if (err.paddle?.code !== 'subscription_locked_pending_changes' && !/canceled|cancelled/i.test(err.message)) {
         console.error(err);
-        return res.status(502).json({ error: 'We couldn’t cancel your subscription just now, so nothing was deleted. Please try again in a minute, or contact support.' });
+        return 'We couldn’t cancel the subscription at Paddle just now, so nothing was deleted. Please try again in a minute.';
       }
     }
   }
@@ -661,6 +682,12 @@ app.delete('/api/me', requireAuth(null, { unconfirmed: true }), throttle(5, 60 *
     db.release();
   }
   [u.photo_key, u.resume_key].forEach(deleteFile);
+  return null;
+}
+app.delete('/api/me', requireAuth(null, { unconfirmed: true }), throttle(5, 60 * 60_000, 'an hour', perUser), async (req, res) => {
+  if (req.body?.confirm !== 'DELETE') return bad(res, 'Type DELETE to confirm');
+  const failed = await deleteAccount(req.user.id);
+  if (failed) return res.status(502).json({ error: failed.replace('the subscription at Paddle', 'your subscription') + ' Or contact support.' });
   endSession(req, res);
   res.status(204).end();
 });
@@ -677,18 +704,23 @@ const reactivate = async (id) => (await q('UPDATE users SET deactivated_at = NUL
 
 // People give a first and last name; an employer may instead give a company name (`name`). A single
 // name (older pages) is split at the first space.
+// Names show in other people's emails ("Rosa sent you a message"), where mail apps turn web addresses into
+// links, so a name may not carry links, emails, phone numbers or @handles (the same check as job post masking).
+const NAME_CONTACT = 'Please use just your name: no links, emails, phone numbers or @handles.';
+const withoutContacts = (s) => hideContacts(s, '').replace(/\s+/g, ' ').trim();
 function nameOf(body) {
   const name = str(body?.first_name, 50) && str(body?.last_name, 50)
     ? `${str(body.first_name, 50)} ${str(body.last_name, 50)}` : str(body?.name, 100);
   const first = str(body?.first_name, 50) || name.split(' ')[0];
   const last = str(body?.first_name, 50) ? str(body?.last_name, 50) : name.split(' ').slice(1).join(' ');
-  return { name, first, last };
+  return { name, first, last, hasContact: hideContacts(name) !== name };
 }
 
 // Change your name (a worker's first and last name, or an employer's company or own name).
 app.put('/api/me', requireAuth(), async (req, res) => {
-  const { name, first, last } = nameOf(req.body);
+  const { name, first, last, hasContact } = nameOf(req.body);
   if (!name) return bad(res, 'Name required');
+  if (hasContact) return bad(res, NAME_CONTACT);
   const { rows: [u] } = await q(
     `UPDATE users SET name = $2, first_name = $3, last_name = $4 WHERE id = $1
      RETURNING id, email, name, role, plan, photo_key IS NOT NULL AS has_photo, email_verified_at IS NOT NULL AS email_verified`,
@@ -698,8 +730,15 @@ app.put('/api/me', requireAuth(), async (req, res) => {
 
 app.get('/api/me', requireAuth(null, { unconfirmed: true }), async (req, res) => {
   const { rows } = await q(`SELECT id, email, name, role, plan, photo_key IS NOT NULL AS has_photo, email_verified_at IS NOT NULL AS email_verified,
-    google_sub IS NOT NULL AS has_google, password_hash IS NOT NULL AS has_password, first_name, last_name FROM users WHERE id = $1`, [req.user.id]);
+    google_sub IS NOT NULL AS has_google, password_hash IS NOT NULL AS has_password, first_name, last_name, message_emails FROM users WHERE id = $1`, [req.user.id]);
   rows[0] ? res.json(rows[0]) : res.status(404).json({ error: 'User not found' });
+});
+
+// Email preferences (Account page). Only message emails can be switched off; account and security emails always go.
+app.put('/api/me/notifications', requireAuth(), async (req, res) => {
+  if (typeof req.body?.message_emails !== 'boolean') return bad(res, 'message_emails must be true or false');
+  await q('UPDATE users SET message_emails = $2 WHERE id = $1', [req.user.id, req.body.message_emails]);
+  res.json({ message_emails: req.body.message_emails });
 });
 
 app.get('/api/stats', async (req, res) => {
@@ -873,16 +912,18 @@ app.delete('/api/jobs/:id', requireAuth('employer'), async (req, res) => {
 // --- Settings & admin ---
 // Public: only what the site needs to render.
 app.get('/api/settings', async (req, res) => {
-  const { topups_enabled, max_job_applications } = await getSettings();
-  res.json({ topups_enabled, max_job_applications });
+  const { topups_enabled, max_job_applications, notice, homepage_design, homepage_photo } = await getSettings();
+  const live = notice && (!notice.ends_at || Date.parse(notice.ends_at) > Date.now());
+  res.json({ topups_enabled, max_job_applications, notice: live ? { text: notice.text.trim(), tone: notice.tone } : null, homepage_design, homepage_photo });
 });
 
 const adminFails = limiter(5, 15 * 60_000, true); // always strict, even in tests
 
 app.post('/api/admin/login', async (req, res) => {
+  if (!(await verifyHuman(req))) return notHuman(res); // every attempt: the admin can do the most damage
+  if (adminFails.blocked(visitor(req))) return tooMany(res, '15 minutes');
   const { ADMIN_EMAIL, ADMIN_PASSWORD } = process.env;
   if (!ADMIN_EMAIL || !ADMIN_PASSWORD) return res.status(503).json({ error: 'Admin login is not set up' });
-  if (adminFails.blocked(visitor(req))) return tooMany(res, '15 minutes');
   const ok = sameText(str(req.body.email).toLowerCase(), ADMIN_EMAIL.toLowerCase()) & sameText(req.body.password ?? '', ADMIN_PASSWORD);
   if (!ok) {
     adminFails.hit(visitor(req));
@@ -902,7 +943,7 @@ app.get('/api/admin/settings', requireAdmin, async (req, res) => res.json(await 
 
 // Numbers for the admin dashboard. "Active" means signed in and using the site.
 app.get('/api/admin/stats', requireAdmin, async (req, res) => {
-  const live = (sql) => sql.replace(/FROM users( WHERE)?/, (_, where) => `FROM users WHERE deleted_at IS NULL${where ? ' AND' : ''}`); // skip deleted accounts
+  const live = (sql) => sql.replace(/FROM users( WHERE)?/, (_, where) => `FROM users WHERE deleted_at IS NULL AND role <> 'team'${where ? ' AND' : ''}`); // skip deleted accounts and the Team account
   const count = (sql) => `(SELECT count(*)::int ${live(sql)})`;
   const since = (col, period) => `${col} > now() - interval '${period}'`;
   const { rows: [totals] } = await q(`SELECT
@@ -924,6 +965,7 @@ app.get('/api/admin/stats', requireAdmin, async (req, res) => {
     ${count("FROM ai_analyses")} AS ai_analyses,
     ${count(`FROM ai_analyses WHERE ${since('created_at', '7 days')}`)} AS ai_analyses_7d,
     ${count("FROM feedback WHERE done_at IS NULL")} AS open_feedback,
+    (SELECT count(*)::int FROM messages WHERE read_at IS NULL AND recipient_id = (SELECT id FROM users WHERE role = 'team')) AS team_unread,
     (SELECT count(DISTINCT employer_id)::int FROM jobs) AS employers_posted,
     ${count("FROM jobs")} AS jobs,
     ${count("FROM jobs WHERE closed_at IS NULL")} AS open_jobs,
@@ -935,11 +977,11 @@ app.get('/api/admin/stats', requireAdmin, async (req, res) => {
       count(u.id) FILTER (WHERE u.role = 'worker')::int AS workers,
       count(u.id) FILTER (WHERE u.role = 'employer')::int AS employers
     FROM generate_series((now() AT TIME ZONE 'Asia/Manila')::date - 29, (now() AT TIME ZONE 'Asia/Manila')::date, interval '1 day') d
-    LEFT JOIN users u ON (u.created_at AT TIME ZONE 'Asia/Manila')::date = d::date
+    LEFT JOIN users u ON (u.created_at AT TIME ZONE 'Asia/Manila')::date = d::date AND u.role <> 'team'
     GROUP BY d ORDER BY d`);
   const { rows: countries } = await q(`SELECT coalesce(last_country, '??') AS country, count(*)::int AS users
     FROM users WHERE deleted_at IS NULL AND ${since('last_seen_at', '30 days')} GROUP BY 1 ORDER BY 2 DESC LIMIT 15`);
-  const { rows: recent } = await q('SELECT id, name, role, created_at, last_seen_at, last_country FROM users WHERE deleted_at IS NULL ORDER BY created_at DESC LIMIT 10');
+  const { rows: recent } = await q("SELECT id, name, role, created_at, last_seen_at, last_country FROM users WHERE deleted_at IS NULL AND role <> 'team' ORDER BY created_at DESC LIMIT 10");
   res.json({ totals, signups, countries, recent });
 });
 
@@ -1047,7 +1089,7 @@ app.get('/api/jobs/:id/applications', requireAuth('employer'), async (req, res) 
        u.deleted_at IS NOT NULL AS deleted, u.deactivated_at IS NOT NULL AS deactivated, p.hourly_rate,
        EXISTS (SELECT 1 FROM messages m WHERE m.sender_id = $2 AND m.recipient_id = u.id) AS messaged,
        EXISTS (SELECT 1 FROM hires h WHERE h.employer_id = $2 AND h.worker_id = u.id) AS hired,
-       EXISTS (SELECT 1 FROM saved_workers s WHERE s.employer_id = $2 AND s.worker_id = u.id) AS saved,
+       EXISTS (SELECT 1 FROM saved_workers s WHERE s.employer_id = $2 AND s.worker_id = u.id) AS saved, a.not_fit,
        (SELECT count(*)::int FROM applications x WHERE x.job_id = a.job_id) AS total
      FROM applications a JOIN jobs j ON j.id = a.job_id
      JOIN users u ON u.id = a.worker_id LEFT JOIN worker_profiles p ON p.user_id = u.id
@@ -1057,6 +1099,18 @@ app.get('/api/jobs/:id/applications', requireAuth('employer'), async (req, res) 
   // Opening the list counts as seeing every applicant so far (clears this job from the 🔔).
   await q('UPDATE jobs SET applicants_seen_at = now() WHERE id = $1 AND employer_id = $2', [num(req.params.id), req.user.id]);
   res.json({ applicants: rows.map(({ total: _, ...a }) => a), total: rows[0]?.total ?? 0, limit, plan });
+});
+
+// Mark an application "Not a fit" for this job (with why), or clear it (`reason: null`). Private to the employer.
+const NOT_FIT = ['skills', 'no_reply', 'suspicious', 'other'];
+app.put('/api/applications/:id/not-fit', requireAuth('employer'), async (req, res) => {
+  const reason = req.body?.reason ?? null;
+  if (reason !== null && !NOT_FIT.includes(reason)) return bad(res, 'Pick a reason');
+  const { rows: [a] } = await q(
+    `UPDATE applications a SET not_fit = $3, not_fit_at = CASE WHEN $3::text IS NULL THEN NULL ELSE now() END
+     FROM jobs j WHERE a.id = $1 AND j.id = a.job_id AND j.employer_id = $2 RETURNING a.id, a.not_fit`,
+    [num(req.params.id), req.user.id, reason]);
+  a ? res.json(a) : res.status(404).json({ error: 'Application not found' });
 });
 
 // The dashboard's "Latest applicants": newest applications across the employer's jobs, only ones their plan
@@ -1072,18 +1126,25 @@ app.get('/api/my/recent-applicants', requireAuth('employer'), async (req, res) =
 });
 
 // --- Website visits (Admin › Visitors) ---
-// The site reports each page it shows; the IP and Cloudflare's country come from the request.
+// The site reports the first page of each visit (one row per visit, not per page; see VisitTracker); the IP
+// and country come from the request. IPs the admin chose to ignore (their own) are never recorded or shown.
+// IPv6 is matched by its /64 network: a home connection's IPv6 address changes often, its network doesn't.
+const ipNet = `network(set_masklen($1::inet, CASE WHEN family($1::inet) = 6 THEN 64 ELSE 32 END))`;
+const NOT_IGNORED = (col) => `NOT EXISTS (SELECT 1 FROM ignored_ips x WHERE ${col}::inet <<= x.net)`;
+const VISITS = `(SELECT * FROM page_views p WHERE ${NOT_IGNORED('p.ip')})`;
 const BOT_UA = /bot|crawl|spider|slurp|preview|headless|lighthouse|monitor|curl|wget|python|axios/i;
-const VISIT_DAYS = 90;
+const VISIT_DAYS = 183; // about 6 months, the longest period Visitors can show
+// The periods Visitors can filter by (countries, where visits start, the list); 30 days unless asked.
+const VISIT_RANGES = { '7d': '7 days', '30d': '30 days', '6m': '183 days' };
 app.post('/api/track', throttle(120, 60_000, 'a minute'), async (req, res) => {
   const path = str(req.body?.path, 300);
   const ua = str(req.get('user-agent'), 300);
-  if (!path.startsWith('/') || path.startsWith('/admin') || !ua || BOT_UA.test(ua)) return res.status(204).end();
-  const country = req.get('cf-ipcountry');
+  // Only homepage visits are kept, so the history stays short and readable.
+  if (path !== '/' || !ua || BOT_UA.test(ua)) return res.status(204).end();
   const ref = str(req.body?.referrer, 300);
   const me = await signedInUser(req);
-  await q('INSERT INTO page_views (ip, country, path, referrer, user_id, user_agent) VALUES ($1, $2, $3, $4, $5, $6)',
-    [visitor(req), /^[A-Z]{2}$/.test(country ?? '') ? country : null, path, /^https?:\/\//.test(ref) ? ref : null, me?.id ?? null, ua]);
+  await q(`INSERT INTO page_views (ip, country, path, referrer, user_id, user_agent) SELECT $1::text, $2, $3, $4, $5, $6 WHERE ${NOT_IGNORED('$1::text')}`,
+    [visitor(req), countryOf(req), path, /^https?:\/\//.test(ref) ? ref : null, me?.id ?? null, ua]);
   if (Math.random() < 0.01) q(`DELETE FROM page_views WHERE at < now() - interval '${VISIT_DAYS} days'`).catch((err) => console.error(err));
   res.status(204).end();
 });
@@ -1097,21 +1158,40 @@ app.get('/api/admin/visitors', requireAdmin, async (req, res) => {
   const { rows: [totals] } = await q(`SELECT
     count(*) FILTER (WHERE ${since('1 day')})::int AS views_24h, count(DISTINCT ip) FILTER (WHERE ${since('1 day')})::int AS visitors_24h,
     count(*) FILTER (WHERE ${since('7 days')})::int AS views_7d, count(DISTINCT ip) FILTER (WHERE ${since('7 days')})::int AS visitors_7d,
-    count(*) FILTER (WHERE ${since('30 days')})::int AS views_30d, count(DISTINCT ip) FILTER (WHERE ${since('30 days')})::int AS visitors_30d
-    FROM page_views`);
+    count(*) FILTER (WHERE ${since('30 days')})::int AS views_30d, count(DISTINCT ip) FILTER (WHERE ${since('30 days')})::int AS visitors_30d,
+    count(*)::int AS views_6m, count(DISTINCT ip)::int AS visitors_6m
+    FROM ${VISITS} v`);
+  const range = VISIT_RANGES[req.query.range] ? req.query.range : '30d';
+  const inRange = since(VISIT_RANGES[range]);
   const { rows: countries } = await q(`SELECT coalesce(country, '??') AS country, count(DISTINCT ip)::int AS visitors
-    FROM page_views WHERE ${since('30 days')} GROUP BY 1 ORDER BY 2 DESC LIMIT 15`);
+    FROM ${VISITS} v WHERE ${inRange} GROUP BY 1 ORDER BY 2 DESC LIMIT 15`);
   const { rows: pages } = await q(`SELECT path, count(*)::int AS views, count(DISTINCT ip)::int AS visitors
-    FROM page_views WHERE ${since('7 days')} GROUP BY 1 ORDER BY 2 DESC LIMIT 15`);
+    FROM ${VISITS} v WHERE ${inRange} GROUP BY 1 ORDER BY 2 DESC LIMIT 15`);
   const size = sizeOf(req);
   const { rows } = await q(`SELECT v.id, v.at, v.ip, v.country, v.path, v.referrer, v.user_agent, u.id AS user_id, u.name AS user_name, u.role AS user_role,
       count(*) OVER ()::int AS total
-    FROM page_views v LEFT JOIN users u ON u.id = v.user_id ORDER BY v.at DESC, v.id DESC LIMIT $1 OFFSET $2`, [size, pageOf(req) * size]);
+    FROM ${VISITS} v LEFT JOIN users u ON u.id = v.user_id WHERE v.${inRange} ORDER BY v.at DESC, v.id DESC LIMIT $1 OFFSET $2`, [size, pageOf(req) * size]);
   res.json({
-    totals, countries, pages, keep_days: VISIT_DAYS,
+    totals, countries, pages, range, keep_days: VISIT_DAYS, my_ip: visitor(req),
+    my_ip_ignored: !(await q(`SELECT ${NOT_IGNORED('$1::text')} AS counted`, [visitor(req)])).rows[0].counted,
+    ignored: (await q('SELECT net::text AS net, label, added_at FROM ignored_ips ORDER BY added_at DESC')).rows,
     total: rows[0]?.total ?? 0,
     visits: rows.map(({ total: _, user_agent, ...v }) => ({ ...v, device: deviceOf(user_agent ?? '') })),
   });
+});
+
+// Leave an IP out of Visitors (its whole IPv6 /64), e.g. the admin's own: past visits are hidden too.
+app.post('/api/admin/ignored-ips', requireAdmin, async (req, res) => {
+  const ip = str(req.body?.ip, 60) || visitor(req); // no IP given: the admin's own
+  if (!isIP(ip)) return bad(res, 'That isn’t an IP address');
+  const { rows: [row] } = await q(`INSERT INTO ignored_ips (net, label) VALUES (${ipNet}, $2)
+    ON CONFLICT (net) DO UPDATE SET label = coalesce($2, ignored_ips.label) RETURNING net::text AS net, label, added_at`,
+    [ip, str(req.body?.label, 60) || null]);
+  res.status(201).json(row);
+});
+app.delete('/api/admin/ignored-ips', requireAdmin, async (req, res) => {
+  const { rowCount } = await q('DELETE FROM ignored_ips WHERE net::text = $1', [str(req.body?.net, 60)]);
+  rowCount ? res.status(204).end() : res.status(404).json({ error: 'Not in the list' });
 });
 
 // The Applicants page: everyone who applied to any of this employer's jobs (only those their plan shows),
@@ -1591,7 +1671,9 @@ app.post('/api/contact', throttle(5, 60 * 60_000, 'an hour'), async (req, res) =
 app.get('/api/admin/feedback', requireAdmin, async (req, res) => {
   const { rows } = await q(
     `SELECT f.id, f.type, f.message, f.page, f.contact_ok, f.created_at, f.done_at, f.subject,
-       coalesce(u.email, f.email) AS email, coalesce(u.name, f.sender_name) AS name, u.role
+       coalesce(u.email, f.email) AS email, coalesce(u.name, f.sender_name) AS name, u.role,
+       (SELECT count(*)::int FROM support_messages m WHERE m.feedback_id = f.id) AS replies,
+       (SELECT NOT m.from_admin FROM support_messages m WHERE m.feedback_id = f.id ORDER BY m.created_at DESC, m.id DESC LIMIT 1) AS they_replied_last
      FROM feedback f LEFT JOIN users u ON u.id = f.user_id
      ORDER BY f.done_at IS NOT NULL, f.created_at DESC LIMIT 200`);
   res.json(rows);
@@ -1611,6 +1693,10 @@ const pageOf = (req) => Math.max(0, Math.floor(num(req.query.page) ?? 0));
 // Everyone, newest first; search by name or email, filter by role or plan.
 // Suspend (or lift it): signs them out everywhere, hides them and their jobs, and blocks their email from
 // signing up again. Lifting it removes the block; they can log in again.
+// One line in the admin's history for this action (shown on the user's admin page).
+const logAdmin = (action, userId, detail = null) =>
+  q('INSERT INTO admin_actions (action, user_id, detail) VALUES ($1, $2, $3)', [action, userId, detail]).catch((err) => console.error(err));
+
 app.put('/api/admin/users/:id/suspend', requireAdmin, async (req, res) => {
   const on = req.body?.suspended === true;
   const { rows: [u] } = await q(
@@ -1620,6 +1706,7 @@ app.put('/api/admin/users/:id/suspend', requireAdmin, async (req, res) => {
   if (!u) return res.status(404).json({ error: 'User not found' });
   if (on) await q('INSERT INTO blocked_emails (email_hash) VALUES ($1) ON CONFLICT DO NOTHING', [hashToken(u.email)]);
   else await q('DELETE FROM blocked_emails WHERE email_hash = $1', [hashToken(u.email)]);
+  logAdmin(on ? 'Suspended' : 'Lifted the suspension', num(req.params.id));
   res.json({ suspended_at: u.suspended_at });
 });
 
@@ -1632,7 +1719,7 @@ app.get('/api/admin/users', requireAdmin, async (req, res) => {
        (SELECT count(*)::int FROM applications a WHERE a.worker_id = u.id) AS applications,
        count(*) OVER ()::int AS total
      FROM users u
-     WHERE u.deleted_at IS NULL AND ($1 = '%%' OR u.name ILIKE $1 OR u.email ILIKE $1) AND ($2 = '' OR u.role = $2) AND ($3 = '' OR (u.role = 'employer' AND u.plan = $3))
+     WHERE u.deleted_at IS NULL AND u.role <> 'team' AND ($1 = '%%' OR u.name ILIKE $1 OR u.email ILIKE $1) AND ($2 = '' OR u.role = $2) AND ($3 = '' OR (u.role = 'employer' AND u.plan = $3))
      ORDER BY u.created_at DESC LIMIT $5 OFFSET $4`,
     [like(req.query.q), role, plan, pageOf(req) * sizeOf(req), sizeOf(req)]);
   res.json({ users: rows.map(({ total: _, ...u }) => u), total: rows[0]?.total ?? 0, page_size: sizeOf(req) });
@@ -1655,8 +1742,10 @@ app.get('/api/admin/jobs', requireAdmin, async (req, res) => {
 
 // Close a post (spam, scams, a job the employer forgot) or reopen it. Closing hides it from search and stops applications.
 app.put('/api/admin/jobs/:id/closed', requireAdmin, async (req, res) => {
-  const { rowCount } = await q('UPDATE jobs SET closed_at = CASE WHEN $2 THEN coalesce(closed_at, now()) END WHERE id = $1', [num(req.params.id), req.body?.closed === true]);
-  rowCount ? res.status(204).end() : res.status(404).json({ error: 'Job not found' });
+  const { rows: [j] } = await q('UPDATE jobs SET closed_at = CASE WHEN $2 THEN coalesce(closed_at, now()) END WHERE id = $1 RETURNING employer_id, title', [num(req.params.id), req.body?.closed === true]);
+  if (!j) return res.status(404).json({ error: 'Job not found' });
+  logAdmin(req.body?.closed === true ? 'Closed a job' : 'Reopened a job', j.employer_id, j.title);
+  res.status(204).end();
 });
 
 // Who pays and how much: paid employers from our database, with price, billing period, renewal and status
@@ -1700,6 +1789,265 @@ app.get('/api/admin/subscriptions', requireAdmin, async (req, res) => {
     },
     subscriptions: rows, paddle_error: paddleError,
   });
+});
+
+// --- Admin: one user's page, and fixing things for them ---
+app.get('/api/admin/users/:id', requireAdmin, async (req, res) => {
+  const id = num(req.params.id);
+  const { rows: [user] } = await q(
+    `SELECT id, email, name, role, plan, plan_changed_at, created_at, last_seen_at, last_country, google_sub IS NOT NULL AS google,
+       password_hash IS NOT NULL AS has_password, email_verified_at, suspended_at, deactivated_at, deleted_at, announcements_off_at,
+       paddle_subscription_id IS NOT NULL AS paddle
+     FROM users WHERE id = $1`, [id]);
+  if (!user) return res.status(404).json({ error: 'User not found' });
+  const [jobs, applications, messages, tickets, actions] = await Promise.all([
+    q(`SELECT j.id, j.title, j.created_at, j.closed_at, (SELECT count(*)::int FROM applications a WHERE a.job_id = j.id) AS applicants
+       FROM jobs j WHERE j.employer_id = $1 ORDER BY j.created_at DESC LIMIT 20`, [id]),
+    q(`SELECT a.id, a.created_at, a.credits, j.id AS job_id, j.title AS job_title, e.name AS employer
+       FROM applications a JOIN jobs j ON j.id = a.job_id JOIN users e ON e.id = j.employer_id WHERE a.worker_id = $1 ORDER BY a.created_at DESC LIMIT 20`, [id]),
+    q(`SELECT count(*) FILTER (WHERE sender_id = $1)::int AS sent, count(*) FILTER (WHERE recipient_id = $1)::int AS received
+       FROM messages WHERE sender_id = $1 OR recipient_id = $1`, [id]),
+    q(`SELECT id, type, coalesce(subject, left(message, 80)) AS subject, created_at, done_at FROM feedback
+       WHERE user_id = $1 OR lower(email) = lower($2) ORDER BY created_at DESC LIMIT 20`, [id, user.email]),
+    q('SELECT at, action, detail FROM admin_actions WHERE user_id = $1 ORDER BY at DESC LIMIT 30', [id]),
+  ]);
+  res.json({ user, jobs: jobs.rows, applications: applications.rows, messages: messages.rows[0], tickets: tickets.rows, actions: actions.rows });
+});
+
+// The account being fixed, or an answer saying why it can't be.
+async function adminTarget(req, res) {
+  const { rows: [u] } = await q('SELECT id, name, email, role, plan, email_verified_at, deleted_at, paddle_subscription_id FROM users WHERE id = $1', [num(req.params.id)]);
+  if (!u) { res.status(404).json({ error: 'User not found' }); return null; }
+  if (u.deleted_at) { res.status(409).json({ error: 'This account was deleted.' }); return null; }
+  return u;
+}
+
+// Someone can't get the 6-digit code (typo'd inbox, spam filter): confirm their email by hand.
+app.post('/api/admin/users/:id/confirm-email', requireAdmin, async (req, res) => {
+  const u = await adminTarget(req, res);
+  if (!u) return;
+  if (u.email_verified_at) return res.status(409).json({ error: 'This email is already confirmed.' });
+  await q('UPDATE users SET email_verified_at = now() WHERE id = $1', [u.id]);
+  await q("DELETE FROM email_codes WHERE user_id = $1 AND purpose = 'confirm'", [u.id]);
+  logAdmin('Confirmed the email by hand', u.id, u.email);
+  res.status(204).end();
+});
+
+// A fresh code now (no once-a-minute wait for the admin).
+app.post('/api/admin/users/:id/resend-code', requireAdmin, async (req, res) => {
+  const u = await adminTarget(req, res);
+  if (!u) return;
+  if (u.email_verified_at) return res.status(409).json({ error: 'This email is already confirmed.' });
+  await sendVerification(u);
+  logAdmin('Sent a new confirmation code', u.id, u.email);
+  res.status(204).end();
+});
+
+// Give or take a plan by hand (a partner, a refund, a test). Not for Paddle subscribers: Paddle's next
+// update would put their paid plan back, so that's changed in Paddle instead.
+app.put('/api/admin/users/:id/plan', requireAdmin, async (req, res) => {
+  const u = await adminTarget(req, res);
+  if (!u) return;
+  const plan = req.body?.plan;
+  if (!PLAN_LIMITS[plan]) return bad(res, 'Plan must be free, pro or premium');
+  if (u.role !== 'employer') return bad(res, 'Only employers have plans');
+  if (u.paddle_subscription_id) return res.status(409).json({ error: 'This employer pays through Paddle. Change or cancel their subscription in Paddle; it updates the plan here by itself.' });
+  if (u.plan === plan) return res.json({ plan });
+  await q('UPDATE users SET plan = $2 WHERE id = $1', [u.id, plan]);
+  logAdmin('Changed the plan', u.id, `${PLAN_LIMITS[u.plan].name} → ${PLAN_LIMITS[plan].name}`);
+  res.json({ plan });
+});
+
+// Delete an account when the person asks (Data Privacy Act), exactly as "Delete my account" does.
+app.delete('/api/admin/users/:id', requireAdmin, async (req, res) => {
+  const u = await adminTarget(req, res);
+  if (!u) return;
+  if (req.body?.confirm !== 'DELETE') return bad(res, 'Type DELETE to confirm');
+  const failed = await deleteAccount(u.id);
+  if (failed) return res.status(502).json({ error: failed });
+  logAdmin('Deleted the account', u.id, `${u.name} <${u.email}>`);
+  res.status(204).end();
+});
+
+// --- Announcements: email everyone (Admin › Announcements) ---
+// Only people we can and may email: confirmed, active, and not opted out. Every email carries a one-click
+// unsubscribe link (Gmail and Yahoo require it for bulk mail); account emails like codes still go to everyone.
+const AUDIENCES = { employers: "role = 'employer'", workers: "role = 'worker'", everyone: "role IN ('employer', 'worker')" };
+const REACHABLE = `deleted_at IS NULL AND suspended_at IS NULL AND deactivated_at IS NULL AND email_verified_at IS NOT NULL AND announcements_off_at IS NULL`;
+const unsubToken = (id) => createHmac('sha256', process.env.JWT_SECRET).update(`unsubscribe:${id}`).digest('hex').slice(0, 32);
+const announcement = (u, subject, body) => {
+  const link = `${SITE}/unsubscribe?u=${u.id}&t=${unsubToken(u.id)}`;
+  return {
+    to: u.email, subject,
+    headers: { 'List-Unsubscribe': `<${SITE}/api/unsubscribe?u=${u.id}&t=${unsubToken(u.id)}>`, 'List-Unsubscribe-Post': 'List-Unsubscribe=One-Click' },
+    ...renderEmail({
+      preheader: body.slice(0, 120), greeting: `Hi ${u.name.split(' ')[0]},`,
+      intro: body.split(/\n\s*\n/).map((p) => p.trim()).filter(Boolean),
+      reason: `You’re receiving this announcement because you have a ReadyToWork.ph account. Don’t want these? Unsubscribe: ${link}`,
+    }),
+  };
+};
+
+app.get('/api/admin/broadcasts', requireAdmin, async (req, res) => {
+  const { rows: [counts] } = await q(`SELECT count(*) FILTER (WHERE role = 'employer')::int AS employers,
+    count(*) FILTER (WHERE role = 'worker')::int AS workers, count(*) FILTER (WHERE role <> 'team')::int AS everyone FROM users WHERE ${REACHABLE}`);
+  const { rows: history } = await q('SELECT id, audience, subject, body, recipients, sent, failed, created_at, finished_at FROM broadcasts ORDER BY created_at DESC LIMIT 20');
+  res.json({ counts, history, test_to: process.env.ADMIN_EMAIL ?? null });
+});
+
+// `test: true` sends one copy to the admin. A real send must repeat the recipient count the admin was shown,
+// so a stale page or a double click can't send to people they didn't expect; the same email isn't sent twice in 10 minutes.
+// ponytail: sends inside the request (100 per call, ~1s per 1,000 people); move to a queue past ~20,000 recipients.
+app.post('/api/admin/broadcasts', requireAdmin, async (req, res) => {
+  const audience = req.body?.audience;
+  const subject = str(req.body?.subject, 150);
+  const body = str(req.body?.body, 5000);
+  if (!AUDIENCES[audience]) return bad(res, 'Choose who gets it');
+  if (!subject) return bad(res, 'Add a subject');
+  if (body.length < 10) return bad(res, 'Write the message');
+  if (req.body?.test === true) {
+    if (!process.env.ADMIN_EMAIL) return res.status(503).json({ error: 'ADMIN_EMAIL isn’t set, so there’s nowhere to send a test.' });
+    await app.locals.sendEmail(announcement({ id: 0, name: 'Admin', email: process.env.ADMIN_EMAIL }, `[Test] ${subject}`, body));
+    return res.json({ test: true, to: process.env.ADMIN_EMAIL });
+  }
+  const { rows: people } = await q(`SELECT id, name, email FROM users WHERE ${REACHABLE} AND ${AUDIENCES[audience]} ORDER BY id`);
+  if (!people.length) return bad(res, 'Nobody to send to yet');
+  if (req.body?.confirm !== people.length) return res.status(409).json({ error: `The number of people changed to ${people.length}. Check and send again.`, count: people.length });
+  if ((await q(`SELECT 1 FROM broadcasts WHERE subject = $1 AND body = $2 AND created_at > now() - interval '10 minutes'`, [subject, body])).rowCount)
+    return res.status(409).json({ error: 'This exact email was just sent. Wait 10 minutes to send it again.' });
+  const { rows: [b] } = await q('INSERT INTO broadcasts (audience, subject, body, recipients) VALUES ($1, $2, $3, $4) RETURNING id', [audience, subject, body, people.length]);
+  let sent = 0, failed = 0;
+  for (let i = 0; i < people.length; i += 100) {
+    const batch = people.slice(i, i + 100);
+    try { await app.locals.sendBatch(batch.map((u) => announcement(u, subject, body))); sent += batch.length; }
+    catch (err) { console.error(err); failed += batch.length; }
+    await q('UPDATE broadcasts SET sent = $2, failed = $3 WHERE id = $1', [b.id, sent, failed]);
+  }
+  await q('UPDATE broadcasts SET finished_at = now() WHERE id = $1', [b.id]);
+  logAdmin(`Emailed ${audience}`, null, `${subject} (${sent} sent${failed ? `, ${failed} failed` : ''})`);
+  res.status(201).json({ id: b.id, sent, failed });
+});
+
+// The unsubscribe link (and Gmail's one-click button, which POSTs to the same address). `on: true` subscribes again.
+app.post('/api/unsubscribe', async (req, res) => {
+  const id = num(req.query.u ?? req.body?.u);
+  const token = String(req.query.t ?? req.body?.t ?? '');
+  if (!Number.isInteger(id) || !sameText(token, unsubToken(id))) return res.status(400).json({ error: 'This unsubscribe link isn’t valid.' });
+  await q('UPDATE users SET announcements_off_at = CASE WHEN $2 THEN NULL ELSE coalesce(announcements_off_at, now()) END WHERE id = $1', [id, req.body?.on === true]);
+  res.json({ subscribed: req.body?.on === true });
+});
+
+// --- Support conversations (Admin › Feedback & support) ---
+// A ticket's messages in order: what they first wrote, then our replies and their email answers.
+app.get('/api/admin/feedback/:id', requireAdmin, async (req, res) => {
+  const { rows: [t] } = await q(
+    `SELECT f.id, f.type, f.subject, f.message, f.page, f.contact_ok, f.created_at, f.done_at,
+       coalesce(u.email, f.email) AS email, coalesce(u.name, f.sender_name) AS name, u.role, u.id AS user_id
+     FROM feedback f LEFT JOIN users u ON u.id = f.user_id WHERE f.id = $1`, [num(req.params.id)]);
+  if (!t) return res.status(404).json({ error: 'Not found' });
+  const { rows: messages } = await q('SELECT id, from_admin, body, created_at FROM support_messages WHERE feedback_id = $1 ORDER BY created_at, id', [t.id]);
+  res.json({ ...t, messages });
+});
+
+// Reply by email. Their answer comes back to support@ with "[#id]" in the subject and lands in this ticket.
+const ticketSubject = (t) => `Re: ${t.subject || 'Your message to ReadyToWork.ph'} [#${t.id}]`;
+app.post('/api/admin/feedback/:id/reply', requireAdmin, async (req, res) => {
+  const body = str(req.body?.body, 5000);
+  if (body.length < 2) return bad(res, 'Write a reply');
+  const { rows: [t] } = await q(
+    `SELECT f.id, f.subject, coalesce(u.email, f.email) AS email, coalesce(u.name, f.sender_name) AS name
+     FROM feedback f LEFT JOIN users u ON u.id = f.user_id WHERE f.id = $1`, [num(req.params.id)]);
+  if (!t) return res.status(404).json({ error: 'Not found' });
+  if (!t.email) return res.status(409).json({ error: 'They didn’t leave an email address, so there’s no way to reply.' });
+  await app.locals.sendEmail({
+    to: t.email, subject: ticketSubject(t),
+    ...renderEmail({
+      preheader: body.slice(0, 120), greeting: `Hi ${t.name ? t.name.split(' ')[0] : 'there'},`,
+      intro: body.split(/\n\s*\n/).map((p) => p.trim()).filter(Boolean),
+      reason: 'You’re receiving this because you contacted ReadyToWork.ph. Just reply to this email to answer us.',
+    }),
+  }); // sent before saving: a failed email shows as an error, not as a reply they never got
+  await q('INSERT INTO support_messages (feedback_id, from_admin, body) VALUES ($1, true, $2)', [t.id, body]);
+  await q('UPDATE feedback SET done_at = CASE WHEN $2 THEN now() END WHERE id = $1', [t.id, req.body?.resolve === true]);
+  res.status(201).json({ ok: true });
+});
+
+// Emails sent to support@, handed over by the site's Cloudflare Worker (its email handler) with their own secret,
+// since anyone can reach /api through the site. A reply to one of our answers ("[#12]" in the subject, from the
+// same address) joins that ticket and reopens it; anything else starts a new ticket. Mail from our own domain
+// (the copies of form submissions we send to support@) and bounces are skipped; a redelivery isn't added twice.
+const OWN_DOMAIN = /@(?:[a-z0-9-]+\.)*readytowork\.ph$/i;
+const BOUNCE = /^(mailer-daemon|postmaster|no-?reply)@/i;
+// The new part of an email reply, without the quoted conversation below it.
+export const newPart = (text) => String(text ?? '').replace(/\r\n/g, '\n')
+  .split(/\n(?:On .{5,200}wrote:|-{2,}\s*Original Message\s*-{2,}|From: .+\nSent: .+)/i)[0]
+  .split('\n').filter((l) => !l.startsWith('>')).join('\n').trim();
+app.post('/api/support/inbound', async (req, res) => {
+  const secret = process.env.INBOUND_SECRET;
+  if (!secret) return res.status(503).json({ error: 'Not set up' });
+  if (!sameText(req.get('x-inbound-secret') ?? '', secret)) return res.status(403).json({ error: 'Forbidden' });
+  const from = str(req.body?.from, 200).toLowerCase();
+  const subject = str(req.body?.subject, 150) || '(no subject)';
+  const id = str(req.body?.message_id, 300) || null;
+  const text = newPart(req.body?.text).slice(0, 5000) || '(no text: the email may have been only images or attachments)';
+  if (!/^\S+@\S+$/.test(from) || OWN_DOMAIN.test(from) || BOUNCE.test(from) || req.body?.auto === true) return res.json({ skipped: true });
+  const ticket = Number(subject.match(/\[#(\d+)\]/)?.[1]);
+  if (ticket) {
+    const { rows: [t] } = await q(
+      `SELECT f.id FROM feedback f LEFT JOIN users u ON u.id = f.user_id WHERE f.id = $1 AND lower(coalesce(u.email, f.email)) = $2`, [ticket, from]);
+    if (t) {
+      const { rowCount } = await q('INSERT INTO support_messages (feedback_id, from_admin, body, inbound_id) VALUES ($1, false, $2, $3) ON CONFLICT (inbound_id) DO NOTHING', [t.id, text, id]);
+      if (rowCount) await q('UPDATE feedback SET done_at = NULL WHERE id = $1', [t.id]); // they wrote back: open again
+      return res.json({ ticket: t.id });
+    }
+  }
+  const { rows: [u] } = await q('SELECT id FROM users WHERE lower(email) = $1 AND deleted_at IS NULL', [from]);
+  const { rows: [t] } = await q(
+    `INSERT INTO feedback (user_id, type, message, contact_ok, email, sender_name, subject, inbound_id)
+     VALUES ($1, 'email', $2, true, $3, $4, $5, $6) ON CONFLICT (inbound_id) DO NOTHING RETURNING id`,
+    [u?.id ?? null, text, from, str(req.body?.from_name, 100) || null, subject.replace(/^(re|fwd?):\s*/i, ''), id]);
+  res.status(201).json({ ticket: t?.id ?? null });
+});
+
+// --- Messages from the ReadyToWork.ph Team (admin) ---
+// The admin writes to one person; it arrives in their Messages from the Team account, with the usual "new message"
+// email, and their replies come back here. Same delivery as any message (one email per unread burst).
+const teamUser = async () => (await q("SELECT id, name FROM users WHERE role = 'team'")).rows[0];
+
+app.get('/api/admin/messages', requireAdmin, async (req, res) => {
+  const team = await teamUser();
+  const { rows } = await q(
+    `SELECT DISTINCT ON (m.other) m.other AS user_id, u.name, u.email, u.role, m.body AS last_body, m.created_at AS last_at, m.from_team,
+       (SELECT count(*)::int FROM messages x WHERE x.sender_id = m.other AND x.recipient_id = $1 AND x.read_at IS NULL) AS unread
+     FROM (SELECT CASE WHEN sender_id = $1 THEN recipient_id ELSE sender_id END AS other, body, created_at, sender_id = $1 AS from_team
+           FROM messages WHERE sender_id = $1 OR recipient_id = $1) m
+     JOIN users u ON u.id = m.other ORDER BY m.other, m.created_at DESC`, [team.id]);
+  res.json(rows.sort((a, b) => b.last_at - a.last_at));
+});
+
+// The conversation with one person; opening it marks their replies read.
+app.get('/api/admin/users/:id/messages', requireAdmin, async (req, res) => {
+  const team = await teamUser();
+  const id = num(req.params.id);
+  await q('UPDATE messages SET read_at = now() WHERE sender_id = $1 AND recipient_id = $2 AND read_at IS NULL', [id, team.id]);
+  const { rows } = await q(
+    `SELECT id, sender_id = $1 AS from_team, body, created_at, read_at FROM messages
+     WHERE (sender_id = $1 AND recipient_id = $2) OR (sender_id = $2 AND recipient_id = $1) ORDER BY created_at, id`, [team.id, id]);
+  res.json(rows);
+});
+
+app.post('/api/admin/users/:id/message', requireAdmin, async (req, res) => {
+  const u = await adminTarget(req, res);
+  if (!u) return;
+  if (!['worker', 'employer'].includes(u.role)) return bad(res, 'Only workers and employers can be messaged');
+  const { rows: [s] } = await q('SELECT suspended_at FROM users WHERE id = $1', [u.id]);
+  if (s.suspended_at) return res.status(409).json({ error: 'This account is suspended, so they can’t read messages. Email them instead.' });
+  const body = str(req.body?.body, 5000);
+  if (!body) return bad(res, 'Write a message');
+  const team = await teamUser();
+  await deliverMessage(team, { id: u.id, name: u.name, email: u.email }, null, body);
+  logAdmin('Sent a message', u.id, body.slice(0, 80));
+  res.status(201).json({ ok: true });
 });
 
 // --- Find matches: the AI recruiting agent (matchAgent.js) ---
@@ -2088,12 +2436,18 @@ app.post('/api/messages/bulk', requireAuth('employer'), throttle(10, 60 * 60_000
   res.status(201).json({ sent: sent.length, skipped });
 });
 
-// Saves one message and emails the recipient, but only for their first unread message from this sender,
-// so a burst of messages sends one email. `job` ({ id, title }) tags the conversation, or null.
+// Saves one message and emails the recipient, but only when it's worth it:
+//  - their first unread message from this sender (a burst of messages sends one email);
+//  - not while they're on the site (active in the last 2 minutes: Messages shows it within seconds, and the
+//    site stops checking once a tab is hidden or idle, so a forgotten tab doesn't count as being there);
+//  - not if they switched message emails off (Account page).
+// `job` ({ id, title }) tags the conversation, or null.
+export const ONLINE_MINUTES = 2;
 async function deliverMessage(me, other, job, body) {
-  // Email only for the first unread message, so a burst of messages sends one email.
-  const { rowCount: alreadyUnread } = await q(
-    'SELECT 1 FROM messages WHERE sender_id = $1 AND recipient_id = $2 AND read_at IS NULL LIMIT 1',
+  const { rows: [{ alreadyUnread, online, wantsEmail }] } = await q(
+    `SELECT EXISTS (SELECT 1 FROM messages WHERE sender_id = $1 AND recipient_id = $2 AND read_at IS NULL) AS "alreadyUnread",
+       coalesce(u.last_seen_at > now() - interval '${ONLINE_MINUTES} minutes', false) AS online, u.message_emails AS "wantsEmail"
+     FROM users u WHERE u.id = $2`,
     [me.id, other.id]
   );
   const { rows } = await q(
@@ -2101,7 +2455,7 @@ async function deliverMessage(me, other, job, body) {
      RETURNING id, sender_id, body, created_at, read_at, job_id`,
     [me.id, other.id, job?.id ?? null, body]
   );
-  if (!alreadyUnread) {
+  if (!alreadyUnread && !online && wantsEmail) {
     const { rows: [sender] } = await q('SELECT name FROM users WHERE id = $1', [me.id]);
     const preview = body.length > 400 ? `${body.slice(0, 400)}…` : body;
     app.locals.sendEmail({
@@ -2113,7 +2467,7 @@ async function deliverMessage(me, other, job, body) {
         intro: [`${sender.name} sent you a message on ReadyToWork.ph${job ? ` about "${job.title}"` : ''}:`],
         quote: preview,
         button: { label: 'Read and reply', url: `${SITE}/messages?with=${me.id}` },
-        reason: 'You’re receiving this because someone messaged you on ReadyToWork.ph. We email you once, then wait until you’ve read your messages.',
+        reason: 'You’re receiving this because someone messaged you on ReadyToWork.ph. We email you once, then wait until you’ve read your messages. To stop these emails, turn off message emails on your Account page.',
       }),
     }).catch((err) => console.error(err));
   }

@@ -4,10 +4,14 @@
   --font-sans: var(--font-geist-sans);
   --font-display: var(--font-jakarta);
   --animate-topload: topload 1.1s ease-in-out infinite;
+  --animate-float: float 6s ease-in-out infinite;
 
   @keyframes topload {
     from { transform: translateX(-100%); }
     to { transform: translateX(250%); }
+  }
+  @keyframes float {
+    50% { transform: translateY(-8px); }
   }
 }
 

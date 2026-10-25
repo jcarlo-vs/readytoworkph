@@ -5,7 +5,7 @@ import { useEffect, useState } from 'react';
 // (next.config.ts). The browser then sends the login cookie by itself; no token is handled in code.
 export const API = '/api';
 
-export type User = { id: number; email: string; name: string; role: 'worker' | 'employer'; has_photo?: boolean; plan?: 'free' | 'pro' | 'premium'; email_verified?: boolean; has_google?: boolean; has_password?: boolean; first_name?: string; last_name?: string };
+export type User = { id: number; email: string; name: string; role: 'worker' | 'employer'; has_photo?: boolean; plan?: 'free' | 'pro' | 'premium'; email_verified?: boolean; has_google?: boolean; has_password?: boolean; first_name?: string; last_name?: string; message_emails?: boolean };
 export type Job = {
   id: number; employer_id: number; employer_name: string; title: string; description: string;
   skills: string[]; job_type: string; salary_period: SalaryPeriod;
@@ -167,7 +167,7 @@ export function useApi<T>(path: string | null, refreshMs?: number, initial?: T) 
 }
 
 export type Conversation = {
-  user_id: number; name: string; role: User['role']; last_body: string; last_at: string; last_from_me: boolean; unread: number;
+  user_id: number; name: string; role: User['role'] | 'team'; last_body: string; last_at: string; last_from_me: boolean; unread: number;
   deleted?: boolean; deactivated?: boolean; applied?: Applied[];
 };
 // Employer view of Messages: the employer's jobs this worker applied to, newest first.
@@ -175,7 +175,7 @@ export type Applied = { application_id: number; job_id: number; title: string; c
 export type Message = {
   id: number; sender_id: number; body: string; created_at: string; read_at: string | null; job_id: number | null; job_title: string | null;
 };
-export type Thread = { user: Pick<User, 'id' | 'name' | 'role'> & { status?: 'deleted' | 'deactivated' | 'suspended' | null; title?: string | null; hourly_rate?: string | null }; can_send: boolean; messages: Message[]; applied?: Applied[] };
+export type Thread = { user: Pick<User, 'id' | 'name'> & { role: User['role'] | 'team'; status?: 'deleted' | 'deactivated' | 'suspended' | null; title?: string | null; hourly_rate?: string | null }; can_send: boolean; messages: Message[]; applied?: Applied[] };
 
 export type SalaryPeriod = 'hour' | 'month' | 'year' | 'fixed';
 export const PAY_PERIODS: { value: SalaryPeriod; label: string }[] = [
