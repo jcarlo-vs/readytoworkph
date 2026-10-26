@@ -206,7 +206,8 @@ const PARTS = {
     `Looking for ${an(title)} ${title} (${jobType.replace('-', ' ')})`, `${title} - work from home`]),
   about: ({ voice }) => (voice === 'i' ? `${pick(OWNER)} ${pick(WHY_HELP)}`
     : [pick(OPENERS), ...some(HOW_WE_WORK, chance(0.5) ? 2 : 1), pick(CULTURE)].join(' ')),
-  role: ({ title, summary, voice }) => `${summary} ${pick([`This is a work-from-home ${title} role.`, 'You can work from anywhere in the Philippines.',
+  // With a duties list in the same post, the summary is already there as duties: only the extra line.
+  role: ({ title, summary, voice, hasDuties }) => `${hasDuties ? '' : summary} ${pick([`This is a work-from-home ${title} role.`, 'You can work from anywhere in the Philippines.',
     voice === 'i' ? 'You\'ll be working directly with me.' : 'You\'ll report to our operations manager.', ''])}`.trim(),
   duties: { titles: ['Responsibilities', 'What you will do', 'Your tasks', 'Duties', 'Your day-to-day'],
     lead: ['Day to day, you will', 'Your main job will be to', 'You will'],
@@ -276,7 +277,9 @@ export function sampleDescription(job, title, skills, summary) {
   const [voice, headed, parts] = pick(STYLES);
   const ctx = { title, skills, summary, job, voice, jobType: job.job_type, tasks: tasksOf(summary), years: pick(['at least 1 year', 'at least 2 years', '3+ years', '2 or more years']) };
   const [h, bullet] = [pick(HEADINGS), pick(BULLETS)];
-  return parts.split(' ').filter((p) => !p.endsWith('?') || chance(0.5)).map((p) => p.replace('?', ''))
-    .filter((p) => !(p === 'notFor' && ctx.jobType === 'gig'))
+  const chosen = parts.split(' ').filter((p) => !p.endsWith('?') || chance(0.5)).map((p) => p.replace('?', ''))
+    .filter((p) => !(p === 'notFor' && ctx.jobType === 'gig'));
+  ctx.hasDuties = chosen.includes('duties');
+  return chosen
     .map((p) => write(p, ctx, headed, h, bullet)).filter(Boolean).join('\n\n');
 }

@@ -1998,6 +1998,13 @@ test('sample jobs: posted at random planned times by many employers, never twice
   assert.equal(new Set(filled.map((j) => roleOf(j.title, FILL_ROLES))).size, 40); // 40 different fill roles
   assert.ok(!FILL_ROLES.some(([r]) => ROLES.some(([d]) => d === r))); // none of them in the daily list
 
+  // The job board in pages of 20, each row saying how many match in all.
+  const p1 = (await call('/jobs', {}, 'GET')).body, p2 = (await call('/jobs?page=2', {}, 'GET')).body;
+  assert.equal(p1.length, 20);
+  assert.equal(p1[0].total, p2[0].total);
+  assert.ok(p1[0].total >= 40 && p2.length === Math.min(20, p1[0].total - 20));
+  assert.ok(!p2.some((j) => p1.some((k) => k.id === j.id))); // no job on both pages
+
   // Off in the morning, back on in the evening: nothing planned while it was off gets posted.
   const day2 = phDay(Date.now() + 86_400_000);
   const at2 = (hhmm) => Date.parse(`${day2}T${hhmm}:00+08:00`);
