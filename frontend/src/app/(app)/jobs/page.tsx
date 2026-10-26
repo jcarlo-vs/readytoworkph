@@ -6,7 +6,7 @@ import { useApi, salary, type Credits, type Job, type Worker } from '@/lib/api';
 import { useAuth } from '@/lib/auth';
 import { Skills, ErrorText, Initials, TimeAgo, SearchLabel, band, button, card, input } from '@/components/ui';
 import { Select, JOB_TYPES } from '@/components/Select';
-import { MembersOnlyText } from '@/components/Talent';
+import { MembersOnlyText, Pager } from '@/components/Talent';
 
 const TYPE_TAG: Record<string, string> = {
   'full-time': 'bg-emerald-100 text-emerald-800',
@@ -158,9 +158,21 @@ function Landing({ form, setForm, onSearch, searching, applied }: SearchProps) {
 }
 
 function Results({ query, selectedId, form, setForm, onSearch, searching, applied }: SearchProps & { query: string; selectedId: number | null }) {
+  const router = useRouter();
   const { data: jobs, error } = useApi<Job[]>(`/jobs?${query}`);
   const selected = jobs?.find((j) => j.id === selectedId) ?? jobs?.[0];
   const select = (id: number) => `/jobs?${query}&job=${id}`;
+  // 20 a page; the page is in the address (?page=2) so the back button and shared links keep it.
+  const searched = new URLSearchParams(query);
+  const page = Math.max(1, Number(searched.get('page')) || 1);
+  const total = jobs?.[0]?.total ?? 0;
+  const toPage = (p: number) => {
+    const next = new URLSearchParams(query);
+    if (p > 1) next.set('page', String(p)); else next.delete('page');
+    router.push(`/jobs?${next}`);
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  };
+  const pager = <Pager page={page - 1} total={total} size={20} onPage={(p) => toPage(p + 1)} noun="jobs" />;
 
   const row = (j: Job) => (
     <>
@@ -191,11 +203,13 @@ function Results({ query, selectedId, form, setForm, onSearch, searching, applie
       <ErrorText msg={error} />
       {jobs && (
         <div className="flex items-center justify-between text-sm text-slate-500">
-          <p><strong className="text-slate-900">{jobs.length === 20 ? (new URLSearchParams(query).get('q') ? 'Top 20' : '20 newest') : jobs.length} job{jobs.length === 1 ? '' : 's'}</strong>{form.q && <> for “{form.q}”</>}</p>
+          <p><strong className="text-slate-900">{total.toLocaleString('en-US')} job{total === 1 ? '' : 's'}</strong>{searched.get('q') ? <> for “{searched.get('q')}”, best match first</> : ', newest first'}</p>
           <Link href="/jobs" className="font-semibold text-emerald-700 hover:text-emerald-900">Clear search</Link>
         </div>
       )}
-      {jobs?.length === 0 && <p className={`${card} text-center text-slate-500`}>No jobs match your search yet. Try a broader keyword.</p>}
+      {jobs?.length === 0 && (page > 1
+        ? <p className={`${card} text-center text-slate-500`}>There are no more jobs on this page. <Link href={`/jobs?${(() => { const s = new URLSearchParams(query); s.delete('page'); return s; })()}`} className="font-semibold text-emerald-700">Back to page 1</Link></p>
+        : <p className={`${card} text-center text-slate-500`}>No jobs match your search yet. Try a broader keyword.</p>)}
 
       {!!jobs?.length && (
         <div className="grid items-start gap-5 lg:grid-cols-[22rem_minmax(0,1fr)]">
@@ -242,6 +256,7 @@ function Results({ query, selectedId, form, setForm, onSearch, searching, applie
           )}
         </div>
       )}
+      {!!jobs?.length && pager}
     </div>
   );
 }

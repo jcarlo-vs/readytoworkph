@@ -5,6 +5,7 @@ import { searchWords } from '../../lib/search.js';
 
 // Open jobs from active employers. `filters`: q, skill, type. Every word of q must be in the title,
 // description or skills (lib/search.js); jobs with more of the words in their title come first, then newest.
+// 20 a page (page 1 first); every row carries `total`, how many match in all, for the page numbers.
 export async function listOpen({ q, skill, type }, page) {
   const where = ['j.closed_at IS NULL', 'u.deactivated_at IS NULL', 'u.suspended_at IS NULL'];
   const params = [];
@@ -18,7 +19,7 @@ export async function listOpen({ q, skill, type }, page) {
   if (skill) add('? = ANY(j.skills)', skill);
   if (type) add('j.job_type = ?', type);
   const { rows } = await pool.query(
-    `SELECT j.*, u.name AS employer_name FROM jobs j JOIN users u ON u.id = j.employer_id
+    `SELECT j.*, u.name AS employer_name, count(*) OVER ()::int AS total FROM jobs j JOIN users u ON u.id = j.employer_id
      WHERE ${where.join(' AND ')}
      ORDER BY ${inTitle.length ? `${inTitle.join(' + ')} DESC, ` : ''}j.created_at DESC, j.id DESC LIMIT ${PAGE_SIZE} OFFSET ${(page - 1) * PAGE_SIZE}`,
     params
