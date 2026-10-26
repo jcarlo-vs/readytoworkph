@@ -10,7 +10,7 @@ export type Job = {
   id: number; employer_id: number; employer_name: string; title: string; description: string;
   skills: string[]; job_type: string; salary_period: SalaryPeriod;
   salary_min: number | string | null; salary_max: number | string | null; created_at: string;
-  updated_at: string | null; closed_at: string | null; max_applications?: number | null; // amounts arrive as strings (Postgres numeric)
+  updated_at: string | null; closed_at: string | null; max_applications?: number | null; indexed?: boolean; // amounts arrive as strings (Postgres numeric)
 };
 export type Worker = {
   id: number; name: string; title: string; bio: string; skills: string[];

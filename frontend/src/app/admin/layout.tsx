@@ -11,21 +11,23 @@ const ICON: Record<string, string> = {
   overview: 'M4 4h7v7H4zM13 4h7v4h-7zM13 10h7v10h-7zM4 13h7v7H4z',
   users: 'M16 19v-1a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v1M9 10a3 3 0 1 0 0-6 3 3 0 0 0 0 6M22 19v-1a4 4 0 0 0-3-3.9M16 4.1a3 3 0 0 1 0 5.8',
   jobs: 'M4 8h16v11H4zM9 8V5h6v3M4 13h16',
+  samples: 'M8 8h12v12H8zM4 16V4h12',
   visitors: 'M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12ZM12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6',
   subscriptions: 'M3 6h18v12H3zM3 10h18M7 15h3',
   feedback: 'M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2Z',
   settings: 'M4 7h10M18 7h2M4 17h4M12 17h8M14 4v6M8 14v6',
   messages: 'M4 5h16v11H8l-4 4z',
   announcements: 'M3 11v2a1 1 0 0 0 1 1h2l5 4V6L6 10H4a1 1 0 0 0-1 1ZM16 9a4 4 0 0 1 0 6M19 6a8 8 0 0 1 0 12',
+  testing: 'M9 3h6M10 3v6l-5 9a2 2 0 0 0 2 3h10a2 2 0 0 0 2-3l-5-9V3M7.5 14h9',
   site: 'M7 17 17 7M8 7h9v9',
   out: 'M15 4h4v16h-4M10 8l-4 4 4 4M6 12h10',
 };
 const MENU: [string, [string, string, string][]][] = [
   ['Insights', [['overview', 'Overview', '/admin']]],
-  ['People', [['users', 'Users', '/admin/users'], ['jobs', 'Jobs', '/admin/jobs'], ['visitors', 'Visitors', '/admin/visitors']]],
+  ['People', [['users', 'Users', '/admin/users'], ['jobs', 'Jobs', '/admin/jobs'], ['samples', 'Sample jobs', '/admin/sample-jobs'], ['visitors', 'Visitors', '/admin/visitors']]],
   ['Money', [['subscriptions', 'Subscriptions', '/admin/subscriptions']]],
   ['Support', [['feedback', 'Feedback & support', '/admin/feedback'], ['messages', 'Messages', '/admin/messages'], ['announcements', 'Announcements', '/admin/announcements']]],
-  ['System', [['settings', 'Settings', '/admin/settings']]],
+  ['System', [['settings', 'Settings', '/admin/settings'], ['testing', 'Testing zone', '/admin/testing']]],
 ];
 const Icon = ({ name }: { name: string }) => (
   <svg viewBox="0 0 24 24" className="h-4 w-4 shrink-0" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d={ICON[name]} /></svg>

@@ -364,3 +364,6 @@ INSERT INTO users (email, name, role, email_verified_at) VALUES ('team@readytowo
 -- "Email me about new messages" (Account page), on unless switched off. Account emails (codes, resets) always go.
 ALTER TABLE users ADD COLUMN IF NOT EXISTS message_emails boolean NOT NULL DEFAULT true;
 UPDATE users SET message_emails = false WHERE role = 'team' AND message_emails; -- replies to the Team show in Admin › Messages instead
+
+-- Sample jobs posted by the admin's autopilot (modules/sample-jobs): they stay out of Google and the sitemap.
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS is_sample boolean NOT NULL DEFAULT false;

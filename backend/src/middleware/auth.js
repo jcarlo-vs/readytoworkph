@@ -1,7 +1,7 @@
 import { scrypt, randomBytes, timingSafeEqual } from 'node:crypto';
 import { promisify } from 'node:util';
 import jwt from 'jsonwebtoken';
-import { pool } from './db.js';
+import { findForSession } from '../models/users.model.js';
 
 const scryptAsync = promisify(scrypt);
 
@@ -17,8 +17,8 @@ export async function verifyPassword(password, stored) {
   return timingSafeEqual(key, Buffer.from(hex, 'hex'));
 }
 
-const signToken = (user) =>
-  jwt.sign({ id: user.id, role: user.role }, process.env.JWT_SECRET, { expiresIn: '7d' });
+const signToken = (user, viewedByAdmin = false) =>
+  jwt.sign({ id: user.id, role: user.role, ...(viewedByAdmin && { by_admin: true }) }, process.env.JWT_SECRET, { expiresIn: viewedByAdmin ? '2h' : '7d' });
 const signAdminToken = () => jwt.sign({ admin: true }, process.env.JWT_SECRET, { expiresIn: '12h' });
 const verify = (token) => jwt.verify(token ?? '', process.env.JWT_SECRET, { algorithms: ['HS256'] });
 
@@ -32,12 +32,16 @@ const readCookie = (req, name) =>
 const options = (req, path, maxAge) => ({ httpOnly: true, secure: req.secure, sameSite: 'strict', path, maxAge });
 const DAY = 24 * 3600 * 1000;
 
-export const startSession = (req, res, user) => res.cookie(SESSION, signToken(user), options(req, '/api', 7 * DAY));
+// The admin's "Log in as": an ordinary login to that account for 2 hours, marked so it isn't counted as them being active.
+export const startAdminViewSession = (req, res, user) => res.cookie(SESSION, signToken(user, true), options(req, '/api', DAY / 12));
+// A new login (sign-in, or a fresh one after changing email or password). Inside "Log in as" it stays a 2-hour admin view.
+export const startSession = (req, res, user) => (req.user?.impersonated ? startAdminViewSession(req, res, user)
+  : res.cookie(SESSION, signToken(user), options(req, '/api', 7 * DAY)));
 export const endSession = (req, res) => res.clearCookie(SESSION, options(req, '/api'));
 export const startAdminSession = (req, res) => res.cookie(ADMIN, signAdminToken(), options(req, '/api/admin', DAY / 2));
 export const endAdminSession = (req, res) => res.clearCookie(ADMIN, options(req, '/api/admin'));
 
-// The signed-in user ({ id, role }), or null for visitors. A login stops working when it expires, when the
+// The signed-in user ({ id, role, verified, impersonated }), or null for visitors. A login stops working when it expires, when the
 // account is gone, or when the account signed everyone out after it was issued (password reset, Google
 // taking over an account), so a stolen login dies with the password.
 export async function signedInUser(req) {
@@ -48,10 +52,9 @@ export async function signedInUser(req) {
     return null;
   }
   if (token.admin) return null; // admin logins aren't user accounts
-  const { rows: [u] } = await pool.query(
-    'SELECT role, email_verified_at IS NOT NULL AS verified, floor(extract(epoch FROM sessions_valid_from))::bigint AS since FROM users WHERE id = $1', [token.id]);
+  const u = await findForSession(token.id);
   if (!u || token.iat < Number(u.since) || u.role === 'team') return null; // nobody signs in as the Team account
-  return { id: token.id, role: u.role, verified: u.verified };
+  return { id: token.id, role: u.role, verified: u.verified, impersonated: token.by_admin === true };
 }
 
 // Email sign-ups enter a 6-digit code before they can do anything; only the routes the code screen needs

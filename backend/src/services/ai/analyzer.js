@@ -30,12 +30,13 @@ const OUTPUT = betaJSONSchemaOutputFormat({
 
 let client;
 
-// Returns { score, verdict, strengths, concerns } as Claude wrote them. Throws if Claude can't produce a usable result.
-export async function analyzeApplication({ job, applicant }) {
+// Returns { score, verdict, strengths, concerns } as Claude wrote them, plus the token usage. Throws if Claude can't
+// produce a usable result. `ai` swaps the client (Admin › Testing zone passes a Vertex AI one).
+export async function analyzeApplication({ job, applicant }, ai) {
   // Reads ANTHROPIC_API_KEY. With AI_GATEWAY_URL set, calls go through Cloudflare AI Gateway
   // (https://gateway.ai.cloudflare.com/v1/<account>/<gateway>/anthropic) for usage and cost charts.
-  client ??= new Anthropic({ baseURL: process.env.AI_GATEWAY_URL || undefined });
-  const response = await client.beta.messages.parse({
+  ai ??= client ??= new Anthropic({ baseURL: process.env.AI_GATEWAY_URL || undefined });
+  const response = await ai.beta.messages.parse({
     model: 'claude-haiku-5-5', // cheapest current model; Haiku has no server-side refusal fallback
     max_tokens: 16000,
     output_config: { effort: 'medium', format: OUTPUT },
@@ -71,5 +72,5 @@ ${applicant.resume_text === null || applicant.resume_text === undefined ? 'Not a
   if (response.stop_reason === 'refusal') throw new Error(`Analysis declined (${response.stop_details?.category ?? 'no category'})`);
   const out = response.parsed_output;
   if (!out) throw new Error(`Analysis returned no usable result (stop_reason: ${response.stop_reason})`);
-  return out;
+  return { ...out, usage: response.usage };
 }

@@ -13,6 +13,21 @@ export async function adminApi<T>(path: string, method = 'GET', body?: unknown):
   return read<T>(res, 'Request failed');
 }
 
+// "Log in as": opens a worker's or employer's account in a new tab for 2 hours, no password needed. The tab opens
+// during the click, so pop-up blockers allow it. This browser's normal login becomes that person (the admin login
+// is separate and stays); log out there, or wait 2 hours, to end it.
+export async function loginAs(id: number, onError: (err: Error) => void) {
+  const tab = window.open('', '_blank');
+  try {
+    await adminApi(`/users/${id}/login-as`, 'POST');
+    try { localStorage.setItem('signedIn', '1'); } catch { /* storage unavailable */ } // lib/auth.tsx only asks "who am I?" with this set
+    if (tab) tab.location.href = '/dashboard';
+  } catch (err) {
+    tab?.close();
+    onError(err as Error);
+  }
+}
+
 // What every admin page can reach: log out (also on an expired login), and refresh the menu's counts.
 export const AdminContext = createContext<{ logout: () => void; refreshCounts: () => void }>({ logout: () => {}, refreshCounts: () => {} });
 export const useAdmin = () => useContext(AdminContext);

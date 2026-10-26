@@ -3,7 +3,7 @@ import Link from 'next/link';
 import { useEffect, useState } from 'react';
 import { ErrorText, card } from '@/components/ui';
 import { SuspendDialog } from '../SuspendDialog';
-import { PLAN_PILL, PageHeader, Pager, Search, Seg, adminApi, ago, date, failed, flag, pill, td, th, usePageSize, useAdmin } from '../ui';
+import { PLAN_PILL, PageHeader, loginAs, Pager, Search, Seg, adminApi, ago, date, failed, flag, pill, td, th, usePageSize, useAdmin } from '../ui';
 
 type User = {
   id: number; name: string; email: string; role: 'worker' | 'employer'; plan: string; created_at: string; last_seen_at: string | null;
@@ -66,7 +66,9 @@ export default function Users() {
                 <td className={`${td} whitespace-nowrap text-slate-600`}>{date(u.created_at)}</td>
                 <td className={`${td} text-slate-600`}>{ago(u.last_seen_at)}</td>
                 <td className={`${td} text-slate-600`}>{u.last_country ? `${flag(u.last_country)} ${u.last_country}` : '-'}</td>
-                <td className={`${td} text-right`}>
+                <td className={`${td} whitespace-nowrap text-right`}>
+                  <button type="button" onClick={() => loginAs(u.id, failed(logout, setError))}
+                    className="mr-2 rounded-lg border border-emerald-200 bg-white px-3 py-1.5 text-xs font-semibold text-emerald-800 hover:bg-emerald-50">Log in as ↗</button>
                   <button type="button" onClick={() => setConfirming(u)}
                     className={`rounded-lg border px-3 py-1.5 text-xs font-semibold ${u.suspended_at ? 'border-slate-300 bg-white text-slate-700 hover:bg-slate-50' : 'border-red-200 bg-white text-red-700 hover:bg-red-50'}`}>
                     {u.suspended_at ? 'Lift suspension' : 'Suspend'}

@@ -104,7 +104,10 @@ export default function SettingsPage() {
   async function save(e: React.FormEvent) {
     e.preventDefault();
     try {
-      const s = await adminApi<Settings>('/settings', 'PUT', form);
+      // Only this page's settings: others (like sample jobs per day) are saved on their own pages.
+      const mine: Record<string, unknown> = { ...form };
+      delete mine.sample_jobs_per_day;
+      const s = await adminApi<Settings>('/settings', 'PUT', mine);
       setForm(s); setSaved(s);
       setMsg({ ok: 'Saved. The changes apply right away.', error: '' });
     } catch (err) {

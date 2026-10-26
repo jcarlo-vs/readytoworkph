@@ -27,7 +27,7 @@ export async function generateMetadata({ params }: PageProps<'/jobs/[id]'>): Pro
     // (setting openGraph here replaces the site-wide one, so the preview image is repeated)
     openGraph: { title, description, url: `/jobs/${job.id}`, type: 'article', siteName: 'ReadyToWork.ph', images: ['/og.png'] },
     // Closed jobs stay viewable for applicants but drop out of search results.
-    robots: job.closed_at ? { index: false } : undefined,
+    robots: job.closed_at || job.indexed === false ? { index: false } : undefined,
   };
 }
 
@@ -70,7 +70,7 @@ export default async function JobPage({ params }: PageProps<'/jobs/[id]'>) {
   if (!job) notFound();
   return (
     <>
-      {!job.closed_at && (
+      {!job.closed_at && job.indexed !== false && (
         <script type="application/ld+json"
           // "<" is escaped so text in a job post can never close this script tag.
           dangerouslySetInnerHTML={{ __html: JSON.stringify(jobPosting(job)).replace(/</g, '\\u003c') }} />

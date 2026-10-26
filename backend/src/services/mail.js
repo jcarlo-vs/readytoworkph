@@ -5,7 +5,11 @@
 // `headers` adds email headers (e.g. List-Unsubscribe on announcements).
 const resendBody = ({ to, subject, text, html, replyTo, headers }) =>
   ({ from: process.env.EMAIL_FROM, reply_to: replyTo ?? CONTACT, to, subject, text, html, ...(headers && { headers }) });
+// Sample employers have made-up …@seed.test addresses; .test can never receive mail, so don't send (it would only bounce).
+const deliverable = (email) => !/\.test$/i.test(email.to);
+
 export async function sendEmail(email) {
+  if (!deliverable(email)) return;
   if (!process.env.RESEND_API_KEY) {
     console.log(`\n[email] To: ${email.to}\n[email] Subject: ${email.subject}\n${email.text}\n`);
     return;
@@ -20,6 +24,8 @@ export async function sendEmail(email) {
 
 // Up to 100 emails in one request (Resend's batch limit), for announcements. All succeed or the call throws.
 export async function sendBatch(emails) {
+  emails = emails.filter(deliverable);
+  if (!emails.length) return;
   if (!process.env.RESEND_API_KEY) {
     console.log(`\n[email batch] ${emails.length} × "${emails[0]?.subject}"\n`);
     return;

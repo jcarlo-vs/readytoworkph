@@ -2,10 +2,24 @@
 
 Node 24, ES modules, Express 5, `pg`. No ORM, no migration tool.
 
-- `src/app.js` - all routes
-- `src/auth.js` - JWT sessions; `signedInUser`/`requireAuth` are async and check `users.sessions_valid_from` (bumping it signs out every device)
-- `src/schema.sql` - the whole schema, **idempotent** (`create ... if not exists`, `add column if not exists`). Schema changes go here; `npm run migrate` re-runs it on prod during release.
-- `src/db.js`, `email.js` (Resend; prints to console without a key), `storage.js` (R2), `analyzer.js` (AI applicant analysis)
+Feature modules (`src/modules/<feature>/`), each with:
+- `<feature>.routes.js` - URL → middleware → handler
+- `<feature>.controller.js` - request in, response out (checks input, applies rules, answers)
+- `<feature>.model.js` - the SQL, as named functions; the only place that queries the database
+- `<feature>.service.js` - when it has rules other modules share
+
+Admin pages live in `modules/admin/` (one controller per page, one `admin.routes.js`, one `admin.model.js`).
+Queries on `users` shared by many features are in `src/models/users.model.js`; settings in `src/models/settings.model.js`.
+Model functions that can run inside a transaction take its connection (`db`) as the last argument; transactions
+(`BEGIN`/`COMMIT`) stay in the controller or service that needs them.
+
+- `src/app.js` - global middleware, then every module's routes (all mounted at `/api`; route paths omit it)
+- `src/config.js` - plan limits, credits, job types, the site address
+- `src/db/` - `index.js` (the pool), `schema.sql` (the whole schema, **idempotent**: `create ... if not exists`, `add column if not exists`; schema changes go here, `npm run migrate` re-runs it on prod during release), `migrate.js`
+- `src/middleware/` - `auth.js` (JWT sessions; `signedInUser`/`requireAuth` are async and check `users.sessions_valid_from`, bumping it signs out every device), rate limits, robot check, origin check, activity, errors
+- `src/lib/` - small pure helpers (input checks, contact masking, paging, PDF text)
+- `src/services/` - shared by several modules: `hooks.js` (email, Google, AI, storage; tests swap them via `app.locals`, which is this object), `mail.js` (Resend; prints to console without a key), `storage.js` (R2), `settings.js`, `plans.js`, `ai/` (Smart Score, Smart Matching agent)
+- `src/scripts/seed-jobs.js` - fake jobs for a local database
 - `test/api.test.js` - all API tests (`node --test`)
 - `backup/` - DB backup job to R2 (`backups/` expires after 30 days)
 

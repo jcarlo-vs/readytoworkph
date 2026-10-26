@@ -191,7 +191,7 @@ function Results({ query, selectedId, form, setForm, onSearch, searching, applie
       <ErrorText msg={error} />
       {jobs && (
         <div className="flex items-center justify-between text-sm text-slate-500">
-          <p><strong className="text-slate-900">{jobs.length === 20 ? '20 newest' : jobs.length} job{jobs.length === 1 ? '' : 's'}</strong>{form.q && <> for “{form.q}”</>}</p>
+          <p><strong className="text-slate-900">{jobs.length === 20 ? (new URLSearchParams(query).get('q') ? 'Top 20' : '20 newest') : jobs.length} job{jobs.length === 1 ? '' : 's'}</strong>{form.q && <> for “{form.q}”</>}</p>
           <Link href="/jobs" className="font-semibold text-emerald-700 hover:text-emerald-900">Clear search</Link>
         </div>
       )}

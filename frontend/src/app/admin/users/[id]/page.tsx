@@ -3,7 +3,7 @@ import Link from 'next/link';
 import { useParams } from 'next/navigation';
 import { useCallback, useEffect, useState } from 'react';
 import { ErrorText, card } from '@/components/ui';
-import { PLAN_PILL, adminApi, ago, countryName, date, failed, flag, pill, useAdmin } from '../../ui';
+import { PLAN_PILL, adminApi, ago, countryName, date, failed, flag, loginAs, pill, useAdmin } from '../../ui';
 import { SuspendDialog } from '../../SuspendDialog';
 
 type Detail = {
@@ -77,6 +77,8 @@ export default function UserPage() {
         <section className={`${card} space-y-3`}>
           <h2 className="text-sm font-semibold text-slate-900">Fix things</h2>
           <div className="flex flex-wrap items-center gap-2">
+            <button type="button" className={action} title="Opens their account in a new tab for 2 hours"
+              onClick={() => loginAs(u.id, failed(logout, setError))}>Log in as {u.name.split(' ')[0]} ↗</button>
             {!u.email_verified_at && <>
               <button type="button" disabled={busy} className={action} onClick={() => run('/confirm-email', 'POST', undefined, 'Email confirmed. They can use the site now.')}>Confirm their email</button>
               <button type="button" disabled={busy} className={action} onClick={() => run('/resend-code', 'POST', undefined, `A new code was sent to ${u.email}.`)}>Send a new code</button>
