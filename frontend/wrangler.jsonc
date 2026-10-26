@@ -18,6 +18,8 @@
 		{ "pattern": "remotepinas.com", "custom_domain": true },
 		{ "pattern": "www.remotepinas.com", "custom_domain": true }
 	],
+	// Keep request logs and errors (Observability tab). Free plan: 200k events a day, sampled beyond that.
+	"observability": { "enabled": true },
 	"assets": {
 		"directory": ".open-next/assets",
 		"binding": "ASSETS"

@@ -208,7 +208,7 @@ function ProfileEditor({ initial }: { initial: Worker }) {
       )}
 
       {leaving && (
-        <div className="fixed inset-0 z-50 grid place-items-center bg-slate-950/50 p-4" role="dialog" aria-modal="true" aria-labelledby="leave-title">
+        <div className="fixed inset-0 z-50 grid place-items-center bg-slate-950/50 p-4" role="dialog" onMouseDown={(e) => { if (e.target === e.currentTarget) setLeaving(null); }} aria-modal="true" aria-labelledby="leave-title">
           <div className={`${card} w-full max-w-md space-y-4`}>
             <h2 id="leave-title" className="font-display text-xl font-bold">Leave without saving?</h2>
             <p className="text-slate-600">You have unsaved changes to your profile. If you leave now, they&apos;ll be lost.</p>

@@ -2,6 +2,8 @@ import { cache } from 'react';
 import { headers } from 'next/headers';
 import { getCloudflareContext } from '@opennextjs/cloudflare';
 import type { Job } from './api';
+import type { HomePhoto } from '@/app/(home)/HelloCall';
+import type { HomeDesign } from '@/app/(home)/Heroes';
 
 // Calls the backend from the server, for pages search engines read. On the live site it goes straight
 // to Cloud Run with the origin secret (like the Worker does); in development, to the local backend.
@@ -22,3 +24,4 @@ async function serverApi<T>(path: string): Promise<T | null> {
 // cache(): the job page and its <title> share one request.
 export const getJob = cache((id: string) => (/^\d+$/.test(id) ? serverApi<Job>(`/jobs/${id}`) : Promise.resolve(null)));
 export const getSitemapJobs = () => serverApi<{ id: number; updated_at: string }[]>('/jobs/sitemap');
+export const getHomepage = () => serverApi<{ homepage_design: HomeDesign; homepage_photo: HomePhoto }>('/settings');

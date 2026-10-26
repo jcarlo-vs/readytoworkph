@@ -1,10 +1,10 @@
 'use client';
 import { useEffect, useState } from 'react';
 import { ErrorText, card } from '@/components/ui';
-import { PLAN_PILL, PageHeader, Pager, Search, Seg, adminApi, date, failed, pill, td, th, usePageSize, useAdmin } from '../ui';
+import { PLAN_PILL, loginAs, PageHeader, Pager, Search, Seg, adminApi, date, failed, pill, td, th, usePageSize, useAdmin } from '../ui';
 
 type Job = {
-  id: number; title: string; job_type: string; created_at: string; closed_at: string | null;
+  id: number; title: string; job_type: string; created_at: string; closed_at: string | null; is_sample: boolean;
   employer_id: number; employer_name: string; employer_email: string; plan: string; applicants: number;
 };
 
@@ -59,7 +59,7 @@ export default function Jobs() {
               <tr key={j.id} className="hover:bg-slate-50">
                 <td className={`${td} max-w-sm`}>
                   <a href={`/jobs/${j.id}`} target="_blank" rel="noopener noreferrer" className="block font-medium text-emerald-800 hover:underline">{j.title} ↗</a>
-                  <span className="block text-xs capitalize text-slate-500">{j.job_type}</span>
+                  <span className="block text-xs capitalize text-slate-500">{j.job_type}{j.is_sample && <span className={`${pill} ml-2 bg-amber-100 text-amber-900`}>sample</span>}</span>
                 </td>
                 <td className={`${td} min-w-56`}>
                   <span className="block whitespace-nowrap text-slate-900">{j.employer_name} <span className={`${pill} ${PLAN_PILL[j.plan]}`}>{j.plan}</span></span>
@@ -68,7 +68,9 @@ export default function Jobs() {
                 <td className={`${td} tabular-nums text-slate-700`}>{j.applicants}</td>
                 <td className={`${td} whitespace-nowrap text-slate-600`}>{date(j.created_at)}</td>
                 <td className={td}><span className={`${pill} ${j.closed_at ? 'bg-slate-800 text-white' : 'bg-emerald-50 text-emerald-800'}`}>{j.closed_at ? 'Closed' : 'Open'}</span></td>
-                <td className={`${td} text-right`}>
+                <td className={`${td} whitespace-nowrap text-right`}>
+                  <button type="button" onClick={() => loginAs(j.employer_id, failed(logout, setError))} title={`Log in as ${j.employer_name}`}
+                    className="mr-2 rounded-lg border border-emerald-200 bg-white px-3 py-1.5 text-xs font-semibold text-emerald-800 hover:bg-emerald-50">Log in as ↗</button>
                   <button type="button" disabled={busy === j.id} onClick={() => setClosed(j, !j.closed_at)}
                     className={`whitespace-nowrap rounded-lg border px-3 py-1.5 text-xs font-semibold disabled:opacity-50 ${j.closed_at ? 'border-slate-300 bg-white text-slate-700 hover:bg-slate-50' : 'border-red-200 bg-white text-red-700 hover:bg-red-50'}`}>
                     {busy === j.id ? 'Saving…' : j.closed_at ? 'Reopen' : 'Close post'}

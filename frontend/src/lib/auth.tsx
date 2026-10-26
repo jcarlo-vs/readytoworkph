@@ -36,7 +36,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const path = usePathname();
   const router = useRouter();
   useEffect(() => {
-    if (user?.email_verified === false && !/^\/(verify-email|contact|privacy|terms|refunds|admin)(\/|$)/.test(path))
+    if (user?.email_verified === false && !/^\/(verify-email|contact|privacy|terms|refunds|unsubscribe|admin)(\/|$)/.test(path))
       router.replace(`/verify-email?next=${encodeURIComponent(path)}`);
   }, [user, path, router]);
 

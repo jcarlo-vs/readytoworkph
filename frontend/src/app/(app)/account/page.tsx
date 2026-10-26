@@ -54,6 +54,8 @@ export default function AccountPage() {
 
       {changing && me && <EmailDialog email={user.email} hasPassword={!!me.has_password} onClose={() => setChanging(false)} onChanged={(u) => signIn({ ...user, ...u })} />}
 
+      {me && <EmailSettings initial={me.message_emails !== false} />}
+
       {employer && <PhotoCard />}
 
       <section className={`${card} flex flex-wrap items-center gap-4 p-5`}>
@@ -79,6 +81,34 @@ export default function AccountPage() {
 }
 
 const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+// "Email me about new messages": on by default. We already email only once per unread batch and never while
+// they're on the site; this turns those emails off entirely. Account emails (codes, password resets) still go.
+function EmailSettings({ initial }: { initial: boolean }) {
+  const [on, setOn] = useState(initial);
+  const [error, setError] = useState('');
+  async function toggle() {
+    const next = !on;
+    setOn(next); setError('');
+    try { await api('/me/notifications', { method: 'PUT', body: { message_emails: next }, quiet: true }); }
+    catch (err) { setOn(!next); setError((err as Error).message); }
+  }
+  return (
+    <section className={`${card} space-y-2 p-5`}>
+      <h2 className="font-display text-base font-bold">Email notifications</h2>
+      <label className="flex cursor-pointer items-start gap-4">
+        <span className="min-w-0 flex-1">
+          <span className="block text-sm font-semibold text-slate-900">Email me about new messages</span>
+          <span className="block text-sm text-slate-600">One email when someone writes to you, then nothing more until you’ve read it. Never while you’re on the site.</span>
+        </span>
+        <input type="checkbox" role="switch" checked={on} onChange={toggle} className="peer sr-only" />
+        <span aria-hidden="true" className="relative mt-1 h-6 w-11 shrink-0 rounded-full bg-slate-300 transition peer-checked:bg-emerald-600 peer-focus-visible:ring-2 peer-focus-visible:ring-emerald-500 peer-focus-visible:ring-offset-2 after:absolute after:left-0.5 after:top-0.5 after:h-5 after:w-5 after:rounded-full after:bg-white after:shadow after:transition peer-checked:after:translate-x-5" />
+      </label>
+      <p className="text-xs text-slate-500">Emails about your account, like sign-in codes and password resets, always come.</p>
+      {error && <p className="text-sm text-red-700" role="alert">{error}</p>}
+    </section>
+  );
+}
 
 // Confirm, then show each step as it happens, then a clear "deleted" before signing out. The steps are paced
 // (about a second each) so people can follow what's happening; the real work is one request in the background.
@@ -112,7 +142,7 @@ function DeleteDialog({ gone, paid, onClose, onPause, onDeleted }: { gone: strin
   }, [phase, left, onDeleted]);
 
   return (
-    <div className="fixed inset-0 z-50 grid place-items-center bg-slate-950/50 p-4" role="dialog" aria-modal="true" aria-labelledby="del-title">
+    <div className="fixed inset-0 z-50 grid place-items-center bg-slate-950/50 p-4" role="dialog" onMouseDown={(e) => { if (e.target === e.currentTarget && phase === 'confirm') onClose(); }} aria-modal="true" aria-labelledby="del-title">
       <div className={`${card} w-full max-w-md space-y-4`}>
         {phase === 'confirm' && (
           <>
@@ -290,7 +320,7 @@ function EmailDialog({ email, hasPassword, onClose, onChanged }: { email: string
     : <button type="button" onClick={resend} className={link}>Send a new code</button>;
 
   return (
-    <div className="fixed inset-0 z-50 grid place-items-center bg-slate-950/50 p-4" role="dialog" aria-modal="true" aria-labelledby="email-title">
+    <div className="fixed inset-0 z-50 grid place-items-center bg-slate-950/50 p-4" role="dialog" onMouseDown={(e) => { if (e.target === e.currentTarget && !busy) onClose(); }} aria-modal="true" aria-labelledby="email-title">
       <div className={`${card} w-full max-w-md space-y-4`}>
         <h2 id="email-title" className="font-display text-xl font-bold text-slate-900">{step === 'done' ? 'Email changed' : 'Change your email'}</h2>
 
@@ -374,7 +404,7 @@ function PauseDialog({ employer, onClose, onDone }: { employer: boolean; onClose
   }, [phase, left, onDone]);
 
   return (
-    <div className="fixed inset-0 z-50 grid place-items-center bg-slate-950/50 p-4" role="dialog" aria-modal="true" aria-labelledby="pause-title">
+    <div className="fixed inset-0 z-50 grid place-items-center bg-slate-950/50 p-4" role="dialog" onMouseDown={(e) => { if (e.target === e.currentTarget && phase === 'confirm') onClose(); }} aria-modal="true" aria-labelledby="pause-title">
       <div className={`${card} w-full max-w-md space-y-4`}>
         {phase === 'confirm' && (
           <>

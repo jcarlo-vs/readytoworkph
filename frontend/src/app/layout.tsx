@@ -6,6 +6,7 @@ import { Nav, Footer } from "@/components/ui";
 import { TopLoader } from "@/components/TopLoader";
 import { EmployerShell } from "@/components/EmployerShell";
 import { VisitTracker } from "@/components/VisitTracker";
+import { NoticeBanner } from "@/components/NoticeBanner";
 import "./globals.css";
 
 const geistSans = Geist({
@@ -43,6 +44,9 @@ export default function RootLayout({ children }: LayoutProps<"/">) {
         <Suspense>
           <TopLoader />
           <VisitTracker />
+        </Suspense>
+        <Suspense>
+          <NoticeBanner />
         </Suspense>
         <AuthProvider>
           {/* Nav reads the current path; the placeholder keeps the page from jumping while it loads. */}

@@ -4,10 +4,10 @@ import { readFile } from 'node:fs/promises';
 
 process.env.DATABASE_URL = 'postgres://localhost:5432/remotepinas_test';
 delete process.env.TURNSTILE_SECRET; // tests that need the robot check switch it on themselves
-const { pool } = await import('../src/db.js');
+const { pool } = await import('../src/db/index.js');
 const { app } = await import('../src/app.js');
 
-await pool.query('DROP TABLE IF EXISTS hidden_conversations, page_views, match_runs, blocked_emails, email_verifications, email_codes, hires, saved_workers, feedback, ai_analyses, password_resets, settings, messages, applications, jobs, worker_profiles, users');
+await pool.query('DROP TABLE IF EXISTS broadcasts, support_messages, admin_actions, ignored_ips, hidden_conversations, page_views, match_runs, blocked_emails, email_verifications, email_codes, hires, saved_workers, feedback, ai_analyses, password_resets, settings, messages, applications, jobs, worker_profiles, users');
 // Never send real email from tests, even if .env has a Resend key; tests read `sent` instead.
 const sent = [];
 // Email-confirmation messages go to every new email sign-up; most tests don't care, so they're left out.
@@ -26,7 +26,7 @@ app.locals.relaxedLimits = true;
 // Never call the real AI from tests.
 app.locals.analyzeApplication = async () => { throw new Error('analyzer not stubbed'); };
 app.locals.matchModel = async () => { throw new Error('match model not stubbed'); };
-await pool.query(await readFile(new URL('../src/schema.sql', import.meta.url), 'utf8'));
+await pool.query(await readFile(new URL('../src/db/schema.sql', import.meta.url), 'utf8'));
 const server = app.listen(0);
 const base = `http://localhost:${server.address().port}/api`;
 after(() => { server.close(); pool.end(); });
@@ -154,6 +154,12 @@ test('messages: who can write, read tracking, one email per unread batch', async
   await pool.query("UPDATE users SET plan = 'pro' WHERE id = $1", [boss.user.id]); // paid: may reach out first
   const send = (from, to, body, job_id) => call(`/messages/${to.user.id}`, { token: from.token, body, ...(job_id && { job_id }) });
   const thread = (me, other) => call(`/messages/${other.user.id}`, { token: me.token }, 'GET');
+  // Everyone here just used the site, which counts as "on the site right now" (no email). Set them away first.
+  // (The "last active" update runs just after each request, so wait a moment for it before overriding it.)
+  const away = async () => {
+    await new Promise((r) => setTimeout(r, 30));
+    await pool.query("UPDATE users SET last_seen_at = now() - interval '1 hour' WHERE email IN ('hr@acme.ph', 'maria@x.ph')");
+  };
 
   assert.equal((await send(maria, boss, 'Hi, hire me')).status, 403); // workers can't cold-message
   assert.equal((await send(boss, rival, 'hey')).status, 404); // employer -> employer
@@ -161,6 +167,7 @@ test('messages: who can write, read tracking, one email per unread batch', async
   assert.equal((await send(boss, maria, '   ')).status, 400);
   assert.equal((await send(boss, maria, 'x', rivalJob.id)).status, 400); // someone else's job
 
+  await away();
   const first = await send(boss, maria, 'Loved your application!', job.id);
   assert.equal(first.status, 201);
   assert.equal(first.body.job_title, 'Bookkeeper');
@@ -177,21 +184,39 @@ test('messages: who can write, read tracking, one email per unread batch', async
   assert.deepEqual(inbox.map((c) => [c.name, c.unread, c.last_body]), [['Acme HR', 2, 'Are you free for a call?']]);
 
   const t = (await thread(maria, boss)).body; // opening marks read
+  await away();
   assert.deepEqual([t.user.name, t.can_send, t.messages.length, t.messages[0].job_title], ['Acme HR', true, 2, 'Bookkeeper']);
   assert.equal((await call('/messages/unread-count', { token: maria.token }, 'GET')).body.count, 0);
 
   assert.equal((await send(maria, boss, 'Yes, tomorrow works', job.id)).status, 201); // reply now allowed
   assert.equal(emails.length, 2);
   assert.equal(emails[1].to, 'hr@acme.ph');
+  await away();
   await send(boss, maria, 'Great, 10am'); // Maria read everything, so she gets a new email
   assert.equal(emails.length, 3);
-  assert.equal((await thread(boss, maria)).body.messages.length, 4);
+
+  // On the site right now: Messages shows it within seconds, so no email.
+  await thread(maria, boss);
+  await new Promise((r) => setTimeout(r, 30));
+  await pool.query("UPDATE users SET last_seen_at = now() WHERE email = 'maria@x.ph'");
+  await send(boss, maria, 'See you then');
+  assert.equal(emails.length, 3);
+  // Message emails switched off on the Account page: none, even when away.
+  await thread(maria, boss);
+  assert.equal((await call('/me/notifications', { token: maria.token, message_emails: 'no' }, 'PUT')).status, 400);
+  assert.equal((await call('/me/notifications', { token: maria.token, message_emails: false }, 'PUT')).body.message_emails, false);
+  assert.equal((await call('/me', { token: maria.token }, 'GET')).body.message_emails, false);
+  await away();
+  await send(boss, maria, 'One more thing');
+  assert.equal(emails.length, 3);
+  await call('/me/notifications', { token: maria.token, message_emails: true }, 'PUT');
+  assert.equal((await thread(boss, maria)).body.messages.length, 6);
   assert.equal((await thread(rival, maria)).body.messages.length, 0); // other employers see nothing
   assert.equal((await thread(maria, rival)).body.can_send, false);
 });
 
 test('removing people from Messages: one or many, only for me, back when a new message arrives', async () => {
-  const reg = async (email, role) => (await call('/auth/register', { email, password: 'password1', name: email, role })).body;
+  const reg = async (email, role) => (await call('/auth/register', { email, password: 'password1', name: email.split('@')[0], role })).body;
   const boss = await reg('hide.boss@co.com', 'employer');
   await pool.query("UPDATE users SET plan = 'pro' WHERE id = $1", [boss.user.id]);
   const [a, b, c] = await Promise.all(['a', 'b', 'c'].map((x) => reg(`hide.${x}@x.ph`, 'worker')));
@@ -213,7 +238,7 @@ test('removing people from Messages: one or many, only for me, back when a new m
 });
 
 test('messages show the employer which of their jobs the worker applied to', async () => {
-  const reg = async (email, role) => (await call('/auth/register', { email, password: 'password1', name: email, role })).body;
+  const reg = async (email, role) => (await call('/auth/register', { email, password: 'password1', name: email.split('@')[0], role })).body;
   const boss = await reg('ap.boss@co.com', 'employer');
   const rival = await reg('ap.rival@co.com', 'employer');
   const w = await reg('ap.w@x.ph', 'worker');
@@ -293,7 +318,7 @@ test('analyzer: 5 free analyses, cached results free, premium unlimited, owner o
     calls.push({ job, applicant });
     return { score: 150, verdict: 'Solid fit', strengths: ['A', 'B', 'C', 'D', 'E'], concerns: [] }; // out-of-range score gets clamped
   };
-  const reg = async (email, role) => (await call('/auth/register', { email, password: 'password1', name: email, role })).body.token;
+  const reg = async (email, role) => (await call('/auth/register', { email, password: 'password1', name: email.split('@')[0], role })).body.token;
   const boss = await reg('ai.boss@co.com', 'employer');
   const other = await reg('ai.other@co.com', 'employer');
   const job = (await call('/jobs', { token: boss, title: 'Data Entry', description: 'Excel work', skills: 'excel', job_type: 'gig' })).body;
@@ -342,7 +367,7 @@ test('analyzer: 5 free analyses, cached results free, premium unlimited, owner o
 });
 
 test('resumes: PDF only, size limit, attach on apply, private to the hiring employer', async () => {
-  const reg = async (email, role) => (await call('/auth/register', { email, password: 'password1', name: email, role })).body.token;
+  const reg = async (email, role) => (await call('/auth/register', { email, password: 'password1', name: email.split('@')[0], role })).body.token;
   const worker = await reg('cv.worker@x.ph', 'worker');
   const boss = await reg('cv.boss@co.com', 'employer');
   const rival = await reg('cv.rival@co.com', 'employer');
@@ -418,7 +443,7 @@ test('job pay: cents and pay period, validated', async () => {
 });
 
 test('jobs: owner edits and closes; closed jobs leave search and refuse applications', async () => {
-  const reg = async (email, role) => (await call('/auth/register', { email, password: 'password1', name: email, role })).body.token;
+  const reg = async (email, role) => (await call('/auth/register', { email, password: 'password1', name: email.split('@')[0], role })).body.token;
   const boss = await reg('ed.boss@co.com', 'employer');
   const rival = await reg('ed.rival@co.com', 'employer');
   const w = await reg('ed.w@x.ph', 'worker');
@@ -442,7 +467,7 @@ test('jobs: owner edits and closes; closed jobs leave search and refuse applicat
 });
 
 test("an employer's own application limit closes the job, can be raised to reopen, and is validated", async () => {
-  const reg = async (email, role) => (await call('/auth/register', { email, password: 'password1', name: email, role })).body.token;
+  const reg = async (email, role) => (await call('/auth/register', { email, password: 'password1', name: email.split('@')[0], role })).body.token;
   const boss = await reg('lim.boss@co.com', 'employer');
   const base = { title: 'Limited', description: 'x', job_type: 'gig' };
   assert.equal((await call('/jobs', { token: boss, ...base, max_applications: 0 })).status, 400);
@@ -463,7 +488,7 @@ test("an employer's own application limit closes the job, can be raised to reope
 });
 
 test('each plan caps applications per job: Free 20, Pro 100, Premium 250', async () => {
-  const reg = async (email, role) => (await call('/auth/register', { email, password: 'password1', name: email, role })).body.token;
+  const reg = async (email, role) => (await call('/auth/register', { email, password: 'password1', name: email.split('@')[0], role })).body.token;
   const boss = await reg('plancap.boss@co.com', 'employer');
   const base = { title: 'Capped', description: 'x', job_type: 'gig' };
   const over = await call('/jobs', { token: boss, ...base, max_applications: 21 });
@@ -493,7 +518,7 @@ test('each plan caps applications per job: Free 20, Pro 100, Premium 250', async
 });
 
 test('a job closes itself when it reaches the most applications a job can take', async () => {
-  const reg = async (email, role) => (await call('/auth/register', { email, password: 'password1', name: email, role })).body.token;
+  const reg = async (email, role) => (await call('/auth/register', { email, password: 'password1', name: email.split('@')[0], role })).body.token;
   await pool.query(`INSERT INTO settings (key, value) VALUES ('max_job_applications', '10')`);
   try {
     const boss = await reg('cap.boss@co.com', 'employer');
@@ -517,7 +542,7 @@ test('a job closes itself when it reaches the most applications a job can take',
 test('analyzer reads resume text extracted at upload, and says when it could not', async () => {
   const seen = [];
   app.locals.analyzeApplication = async ({ applicant }) => { seen.push(applicant.resume_text); return { score: 80, verdict: 'ok', strengths: [], concerns: [] }; };
-  const reg = async (email, role) => (await call('/auth/register', { email, password: 'password1', name: email, role })).body.token;
+  const reg = async (email, role) => (await call('/auth/register', { email, password: 'password1', name: email.split('@')[0], role })).body.token;
   const boss = await reg('rt.boss@co.com', 'employer');
   const job = (await call('/jobs', { token: boss, title: 'Bookkeeper', description: 'QuickBooks', job_type: 'gig' })).body;
   const put = (token, body) => fetch(`${base}/profile/resume`, { method: 'PUT', headers: { ...asCookie(token), 'content-type': 'application/pdf' }, body });
@@ -576,15 +601,29 @@ test('admin: separate login, lockout, settings validated and applied', async () 
   assert.equal((await call('/admin/login', { email: 'admin@test.ph', password: 'nope' })).status, 401);
   const { token } = (await call('/admin/login', { email: 'ADMIN@test.ph', password: 'correct horse battery' })).body;
   assert.equal((await call('/me', { token }, 'GET')).status, 401); // admin tokens aren't user accounts
-  assert.deepEqual((await call('/admin/settings', { token }, 'GET')).body, { topups_enabled: false, daily_applications: 60, free_ai_analyses: 5, free_full_names: false, max_job_applications: 250 });
+  assert.deepEqual((await call('/admin/settings', { token }, 'GET')).body, { topups_enabled: false, daily_applications: 60, free_ai_analyses: 5, free_full_names: false, max_job_applications: 250, notice: null, homepage_design: 'classic', homepage_photo: 'laughing', sample_jobs_per_day: 0 });
 
   assert.equal((await call('/admin/settings', { token, topups_enabled: 'yes' }, 'PUT')).status, 400);
   assert.equal((await call('/admin/settings', { token, made_up: 1 }, 'PUT')).status, 400);
+  assert.equal((await call('/admin/settings', { token, homepage_design: 'fancy' }, 'PUT')).status, 400);
+  assert.equal((await call('/admin/settings', { token, homepage_photo: 'cat' }, 'PUT')).status, 400);
+  assert.equal((await call('/admin/settings', { token, homepage_design: 'two_faces' }, 'PUT')).status, 200);
+  await call('/admin/settings', { token, homepage_design: 'hello_call', homepage_photo: 'good_news' }, 'PUT');
+  const pub = (await call('/settings', {}, 'GET')).body;
+  assert.deepEqual([pub.homepage_design, pub.homepage_photo], ['hello_call', 'good_news']); // the homepage reads these
   const saved = await call('/admin/settings', { token, topups_enabled: true, free_ai_analyses: 3 }, 'PUT');
-  assert.deepEqual(saved.body, { topups_enabled: true, daily_applications: 60, free_ai_analyses: 3, free_full_names: false, max_job_applications: 250 });
+  assert.deepEqual(saved.body, { topups_enabled: true, daily_applications: 60, free_ai_analyses: 3, free_full_names: false, max_job_applications: 250, notice: null, homepage_design: 'hello_call', homepage_photo: 'good_news', sample_jobs_per_day: 0 });
   assert.equal((await call('/settings', {}, 'GET')).body.topups_enabled, true);
   const boss = (await call('/auth/register', { email: 'adm.b@co.com', password: 'password1', name: 'B', role: 'employer' })).body.token;
   assert.equal((await call('/analyzer/usage', { token: boss }, 'GET')).body.limit, 3); // setting is used live
+
+  // The notice bar: plain text and a colour, optional end time; only a live one reaches the site.
+  for (const bad of [{ text: 'x', tone: 'info' }, { text: 'Maintenance', tone: 'red' }, { text: 'Maintenance', tone: 'info', html: '<b>' }, { text: 'Maintenance', tone: 'info', ends_at: 'soon' }])
+    assert.equal((await call('/admin/settings', { token, notice: bad }, 'PUT')).status, 400, JSON.stringify(bad));
+  assert.equal((await call('/admin/settings', { token, notice: { text: ' Maintenance tonight 10pm ', tone: 'warning' } }, 'PUT')).status, 200);
+  assert.deepEqual((await call('/settings', {}, 'GET')).body.notice, { text: 'Maintenance tonight 10pm', tone: 'warning' });
+  await call('/admin/settings', { token, notice: { text: 'Over', tone: 'info', ends_at: new Date(Date.now() - 1000).toISOString() } }, 'PUT');
+  assert.equal((await call('/settings', {}, 'GET')).body.notice, null); // past its end time
   await pool.query('DELETE FROM settings');
 
   for (let i = 0; i < 5; i++) await call('/admin/login', { email: 'admin@test.ph', password: 'wrong' });
@@ -678,7 +717,7 @@ test('security: only Cloudflare may call the API, per-visitor and per-user limit
 });
 
 test('admin dashboard stats: counts, activity and country (no IPs)', async () => {
-  const { signAdminToken } = await import('../src/auth.js');
+  const { signAdminToken } = await import('../src/middleware/auth.js');
   const admin = signAdminToken();
   const w = (await call('/auth/register', { email: 'stats.w@x.ph', password: 'password1', name: 'Stat W', role: 'worker' })).body.token;
   assert.equal((await call('/admin/stats', { token: w }, 'GET')).status, 401); // users can't see it
@@ -730,6 +769,58 @@ test('login says what went wrong; forgot password sends a one-time, expiring lin
   const late = sent.at(-1).text.match(/reset-password\?token=([\w-]+)/)[1];
   await pool.query(`UPDATE password_resets SET expires_at = now() - interval '1 minute'`);
   assert.equal((await reset(late, 'too-late-pass')).body.code, 'invalid_link'); // expired
+});
+
+test('forgot password: at most 3 reset emails per account per hour, same answer after that', async () => {
+  await call('/auth/register', { email: 'flood@x.ph', password: 'password1', name: 'Flood', role: 'worker' });
+  sent.length = 0;
+  app.locals.sendEmail = capture;
+  const ask = async () => (await call('/auth/forgot', { email: 'flood@x.ph' })).status;
+  for (let i = 0; i < 6; i++) assert.equal(await ask(), 200); // never tells a bot it was stopped
+  assert.equal(sent.filter((e) => e.to === 'flood@x.ph').length, 3);
+  await pool.query(`UPDATE password_resets SET expires_at = now() - interval '1 minute'`); // an hour later
+  assert.equal(await ask(), 200);
+  assert.equal(sent.filter((e) => e.to === 'flood@x.ph').length, 4);
+});
+
+test('names carry no links, emails, phones or @handles; passwords are 8 to 200 characters', async () => {
+  const reg = (name, password = 'password1', email = `nm${Math.random().toString(36).slice(2, 8)}@x.ph`) =>
+    call('/auth/register', { email, password, name, role: 'employer' });
+  for (const name of ['Pay here scam-site.com', 'Rosa www.example.org', 'Rosa rosa@mail.com', 'Call 0917 123 4567', 'Rosa @rosa_ph'])
+    assert.match((await reg(name)).body.error, /no links, emails, phone numbers or @handles/, name);
+  assert.equal((await reg("Rosa Dela Cruz-O'Neil")).status, 201); // ordinary names are fine
+  assert.equal((await reg('Bright Co 2024')).status, 201); // short numbers too
+  assert.match((await reg('Rosa', 'x'.repeat(201))).body.error, /200 characters or fewer/);
+  assert.equal((await reg('Rosa', 'x'.repeat(200))).status, 201);
+
+  const me = (await reg('Plain Name')).body.token;
+  assert.equal((await call('/me', { token: me, name: 'Visit scam.xyz' }, 'PUT')).status, 400); // renaming too
+  assert.equal((await call('/me', { token: me, name: 'New Name' }, 'PUT')).status, 200);
+
+  // Google names are whatever was typed there: the contact bits are dropped rather than refusing the sign-up.
+  process.env.GOOGLE_CLIENT_ID = 'test-client';
+  app.locals.verifyGoogle = async () => ({ sub: 'g-name-1', email: 'gname@x.ph', email_verified: true, name: 'Ana scam.com Cruz', given_name: 'Ana', family_name: 'Cruz @ana' });
+  const g = await call('/auth/google', { credential: 'x', role: 'worker' });
+  assert.equal(g.body.user.name, 'Ana Cruz');
+  const { rows: [row] } = await pool.query("SELECT first_name, last_name FROM users WHERE email = 'gname@x.ph'");
+  assert.deepEqual([row.first_name, row.last_name], ['Ana', 'Cruz']);
+});
+
+test('Not a fit: the job owner marks an applicant with why, or clears it; nobody else can', async () => {
+  const reg = async (email, role) => (await call('/auth/register', { email, password: 'password1', name: email.split('@')[0], role })).body.token;
+  const [boss, rival, w] = [await reg('nf.boss@co.com', 'employer'), await reg('nf.rival@co.com', 'employer'), await reg('nf.w@x.ph', 'worker')];
+  const job = (await call('/jobs', { token: boss, title: 'VA', description: 'x', job_type: 'gig' })).body;
+  const app_ = (await call(`/jobs/${job.id}/apply`, { token: w, cover_letter: 'hi' })).body;
+  const mark = (token, reason) => call(`/applications/${app_.id}/not-fit`, { token, reason }, 'PUT');
+  const listed = async () => (await call(`/jobs/${job.id}/applications`, { token: boss }, 'GET')).body.applicants[0].not_fit;
+  assert.equal(await listed(), null);
+  assert.equal((await mark(boss, 'bogus')).status, 400);
+  assert.equal((await mark(rival, 'suspicious')).status, 404); // not their job
+  assert.equal((await mark(w, 'suspicious')).status, 403); // workers can't
+  assert.equal((await mark(boss, 'suspicious')).body.not_fit, 'suspicious');
+  assert.equal(await listed(), 'suspicious');
+  assert.equal((await mark(boss, null)).body.not_fit, null); // cleared
+  assert.equal(await listed(), null);
 });
 
 test('emails in job posts are hidden from visitors, shown to signed-in members', async () => {
@@ -904,7 +995,7 @@ test('job title and description: too long is a clear error, not a silent cut', a
 });
 
 test('Premium AI analyses: unlimited up to the monthly fair-use ceiling', async () => {
-  const { PREMIUM_FAIR_USE } = await import('../src/app.js');
+  const { PREMIUM_FAIR_USE } = await import('../src/config.js');
   const boss = (await call('/auth/register', { email: 'fair.use@co.com', password: 'password1', name: 'Fair', role: 'employer' })).body;
   await pool.query("UPDATE users SET plan = 'premium' WHERE id = $1", [boss.user.id]);
   const { rows: [job] } = await pool.query("INSERT INTO jobs (employer_id, title, description, job_type) VALUES ($1, 'VA', 'x', 'gig') RETURNING id", [boss.user.id]);
@@ -956,7 +1047,7 @@ test('feedback: anyone can send it, support gets an email, the admin reads it an
   assert.equal(sent[0].to, 'support@readytowork.ph');
   assert.match(sent[0].text, /Something broke from Fiona <fb.user@co.com> \(employer, free\)/);
 
-  const { signAdminToken } = await import('../src/auth.js');
+  const { signAdminToken } = await import('../src/middleware/auth.js');
   const adminToken = signAdminToken();
   const list = (await call('/admin/feedback', { token: adminToken }, 'GET')).body;
   assert.deepEqual(list.map((f) => [f.type, f.email]), [['idea', 'guest@mail.ph'], ['bug', 'fb.user@co.com']]);
@@ -966,7 +1057,7 @@ test('feedback: anyone can send it, support gets an email, the admin reads it an
 });
 
 test('admin: users, jobs and subscriptions pages; close a job; admin only', async () => {
-  const { signAdminToken } = await import('../src/auth.js');
+  const { signAdminToken } = await import('../src/middleware/auth.js');
   const admin = signAdminToken();
   const reg = async (email, role, name) => (await call('/auth/register', { email, password: 'password1', name, role })).body;
   const boss = await reg('adm.boss@acme.ph', 'employer', 'Adm Boss');
@@ -1008,9 +1099,9 @@ test('worker privacy: free employers see "Maria S." and no links until they may 
 
   let w = await view();
   assert.deepEqual([w.name, w.linkedin_url, w.limited], ['Maria S.', null, true]);
-  const { HIDDEN } = await import('../src/app.js');
+  const { HIDDEN } = await import('../src/lib/contacts.js');
   assert.equal(w.bio, `QuickBooks pro using Node.js. Portfolio: ${HIDDEN}, email ${HIDDEN}, call ${HIDDEN} or ${HIDDEN}`); // Node.js stays
-  const { hideContacts } = await import('../src/app.js');
+  const { hideContacts } = await import('../src/lib/contacts.js');
   assert.equal(hideContacts('email me at @juan.cruz@gmail.com'), `email me at @${HIDDEN}`); // one email, not a handle plus a site
   assert.equal((await call('/workers?q=QuickBooks', { token: boss.token }, 'GET')).body.workers.find((x) => x.id === maria.user.id).name, 'Maria S.');
   assert.equal((await call(`/workers/${maria.user.id}`, { token: maria.token }, 'GET')).body.name, 'Maria Clara Santos'); // her own profile
@@ -1056,6 +1147,7 @@ test('contact form and robot check: support requests reach the inbox; bots are t
     assert.deepEqual([robot.status, robot.body.code], [400, 'robot_check']);
     assert.equal((await call('/auth/register', { email: 'bot@x.ph', password: 'password1', name: 'Bot', role: 'worker' })).body.code, 'robot_check');
     assert.equal((await call('/auth/forgot', { email: 'bot@x.ph' })).body.code, 'robot_check');
+    assert.equal((await call('/admin/login', { email: 'a@b.ph', password: 'x' })).body.code, 'robot_check');
   } finally {
     delete process.env.TURNSTILE_SECRET;
   }
@@ -1146,7 +1238,7 @@ test('login protection: 5 wrong passwords pause the account for 15 minutes, emai
 });
 
 test('bento profile: optional fields saved and validated, hidden contacts, CV only for employers who may contact', async () => {
-  const { HIDDEN } = await import('../src/app.js');
+  const { HIDDEN } = await import('../src/lib/contacts.js');
   const reg = async (email, role, name) => (await call('/auth/register', { email, password: 'password1', name, role })).body;
   const w = await reg('bento.w@x.ph', 'worker', 'Bento Santos');
   const free = await reg('bento.free@co.com', 'employer', 'Free Co');
@@ -1403,7 +1495,7 @@ test('deactivate: hidden from search, jobs and new messages; history kept; loggi
 });
 
 test('job posts: emails, links, phones and @handles hidden from visitors only; ordinary numbers stay', async () => {
-  const { MEMBERS_ONLY } = await import('../src/app.js');
+  const { MEMBERS_ONLY } = await import('../src/lib/contacts.js');
   const boss = (await call('/auth/register', { email: 'mask.jobs@co.com', password: 'password1', name: 'Mask Jobs Co', role: 'employer' })).body;
   const description = 'Apply at hire@acme.com, see acme.com/jobs or https://t.me/acmehr, WhatsApp +63 917 123 4567 or @acme_hr. Pay $900-$1,300, 2024-2025 season, 40 hrs.';
   const job = (await call('/jobs', { token: boss.token, title: 'Masked VA', description, job_type: 'gig' })).body;
@@ -1415,7 +1507,7 @@ test('job posts: emails, links, phones and @handles hidden from visitors only; o
 });
 
 test('admin suspends an account: signed out, can’t log in, hidden, email blocked from signing up again; lifting it undoes that', async () => {
-  const { signAdminToken } = await import('../src/auth.js');
+  const { signAdminToken } = await import('../src/middleware/auth.js');
   const admin = signAdminToken();
   const reg = async (email, role, name) => (await call('/auth/register', { email, password: 'password1', name, role })).body;
   const scam = await reg('scam.boss@co.com', 'employer', 'Scam Co');
@@ -1596,8 +1688,9 @@ test('applicants page: all jobs in one list; bulk message sends one message to e
 });
 
 test('Hire Talent search: every word must appear in title, bio or skills (any order, whole words, never the resume)', async () => {
-  const { searchWords } = await import('../src/app.js');
+  const { searchWords } = await import('../src/lib/search.js');
   assert.deepEqual(searchWords('AI  engineer, c++'), ['\\mai\\M', '\\mengineer', '\\mc\\+\\+']);
+  for (const q of ['full stack', 'Full-Stack', 'fullstack']) assert.deepEqual(searchWords(`${q} dev`), ['\\mfull[\\s-]?stack', '\\mdev\\M']);
   const reg = async (email, role, name) => (await call('/auth/register', { email, password: 'password1', name, role })).body;
   const boss = await reg('srch.boss@co.com', 'employer', 'Search Boss');
   const mk = async (email, name, profile) => {
@@ -1616,23 +1709,303 @@ test('Hire Talent search: every word must appear in title, bio or skills (any or
   assert.deepEqual((await ids('engineer zqx')).sort(), [exact, split, email].sort()); // "engineer" also finds Engineering
 });
 
-test('visitors: the site reports page views (not admin pages, not bots); only the admin sees them', async () => {
+test('admin testing zone: admin only, PDFs only, scores with Vertex AI or Anthropic and saves nothing', async () => {
+  const { signAdminToken } = await import('../src/middleware/auth.js');
+  const cookie = { cookie: `rw_admin=${signAdminToken()}` };
+  const pdf = (body) => fetch(`${base}/admin/testing/resume-text`, { method: 'POST', headers: { 'content-type': 'application/pdf', ...cookie }, body });
+  assert.equal((await call('/admin/testing/score', { title: 'VA', description: 'x' })).status, 401);
+  assert.equal((await pdf(Buffer.from('not a pdf'))).status, 400);
+
+  const fakeVertex = { name: 'vertex' };
+  app.locals.vertexClient = () => fakeVertex;
+  const used = [];
+  app.locals.analyzeApplication = async ({ job, applicant }, ai) => {
+    used.push([job.title, applicant.resume_text, ai]);
+    return { score: 77, verdict: 'ok', strengths: [], concerns: [], usage: { input_tokens: 10, output_tokens: 2 } };
+  };
+  const score = (body) => fetch(`${base}/admin/testing/score`, { method: 'POST', headers: { 'content-type': 'application/json', ...cookie }, body: JSON.stringify(body) });
+  assert.equal((await score({ title: '', description: '' })).status, 400);
+  const v = await (await score({ title: 'VA', description: 'Inbox and calendar', resume_text: 'Gmail expert' })).json();
+  assert.deepEqual([v.provider, v.score, v.usage.input_tokens], ['vertex', 77, 10]);
+  await score({ title: 'VA', description: 'Inbox', provider: 'anthropic' });
+  assert.deepEqual(used.map((u) => u[2]), [fakeVertex, undefined]); // undefined = the normal Anthropic client
+  assert.deepEqual(used[0].slice(0, 2), ['VA', 'Gmail expert']);
+});
+
+test('visitors: the site reports homepage visits (no other pages, no bots); only the admin sees them', async () => {
   const track = (body, ua = 'Mozilla/5.0 (iPhone) Safari/604.1') => fetch(`${base}/track`, {
     method: 'POST', headers: { 'content-type': 'application/json', 'user-agent': ua, 'cf-ipcountry': 'PH' }, body: JSON.stringify(body),
   });
   const w = (await call('/auth/register', { email: 'visit.w@x.ph', password: 'password1', name: 'Vee Visitor', role: 'worker' })).body;
-  await track({ path: '/jobs', referrer: 'https://google.com/' });
-  await fetch(`${base}/track`, { method: 'POST', headers: { 'content-type': 'application/json', 'user-agent': 'Mozilla/5.0 (Windows) Chrome/120', 'cf-ipcountry': 'PH', ...asCookie(w.token) }, body: JSON.stringify({ path: '/profile' }) });
+  await track({ path: '/', referrer: 'https://google.com/' });
+  await fetch(`${base}/track`, { method: 'POST', headers: { 'content-type': 'application/json', 'user-agent': 'Mozilla/5.0 (Windows) Chrome/120', 'cf-ipcountry': 'PH', ...asCookie(w.token) }, body: JSON.stringify({ path: '/' }) });
+  await track({ path: '/jobs' }); // other pages: not counted
   await track({ path: '/admin/users' }); // not counted
-  await track({ path: '/jobs' }, 'Googlebot/2.1'); // not counted
+  await track({ path: '/' }, 'Googlebot/2.1'); // not counted
   await track({ path: 'not-a-path' }); // ignored
 
   assert.equal((await call('/admin/visitors', {}, 'GET')).status, 401);
-  const { signAdminToken } = await import('../src/auth.js');
+  const { signAdminToken } = await import('../src/middleware/auth.js');
   const v = (await call('/admin/visitors', { token: signAdminToken() }, 'GET')).body;
-  assert.deepEqual(v.visits.map((r) => [r.path, r.country, r.device, r.user_name]), [['/profile', 'PH', 'Desktop · Chrome', 'Vee Visitor'], ['/jobs', 'PH', 'Mobile · Safari', null]]);
+  assert.deepEqual(v.visits.map((r) => [r.path, r.country, r.device, r.user_name]), [['/', 'PH', 'Desktop · Chrome', 'Vee Visitor'], ['/', 'PH', 'Mobile · Safari', null]]);
   assert.equal(v.visits[1].referrer, 'https://google.com/');
   assert.ok(v.visits[0].ip);
   assert.deepEqual([v.totals.views_24h, v.total], [2, 2]);
-  assert.equal(v.pages.find((p) => p.path === '/jobs').views, 1);
+  assert.deepEqual(v.pages.map((p) => [p.path, p.views]), [['/', 2]]);
+  // Periods: 30 days unless asked; an older visit only shows under "Last 6 months".
+  await pool.query("UPDATE page_views SET at = now() - interval '60 days' WHERE user_id IS NULL");
+  const period = async (range) => (await call(`/admin/visitors${range ? `?range=${range}` : ''}`, { token: signAdminToken() }, 'GET')).body;
+  assert.deepEqual([(await period()).range, (await period()).total, (await period('7d')).total, (await period('6m')).total], ['30d', 1, 1, 2]);
+  assert.equal((await period('bogus')).range, '30d');
+  await pool.query("UPDATE page_views SET at = now() WHERE user_id IS NULL");
+
+  // "Don't count my IP": the admin's own IP (here, every test request's) is hidden, then never recorded.
+  const admin = signAdminToken();
+  const visits = async () => (await call('/admin/visitors', { token: admin }, 'GET')).body;
+  const stored = async () => (await pool.query('SELECT count(*)::int AS n FROM page_views')).rows[0].n;
+  assert.equal((await call('/admin/ignored-ips', { token: admin, ip: 'not-an-ip' })).status, 400);
+  const mine = await call('/admin/ignored-ips', { token: admin, label: 'My laptop' });
+  assert.equal(mine.status, 201);
+  const after = await visits();
+  assert.deepEqual([after.total, after.totals.views_24h, after.ignored.map((x) => x.label), after.my_ip_ignored], [0, 0, ['My laptop'], true]);
+  const before = await stored();
+  await track({ path: '/' });
+  assert.equal(await stored(), before); // not recorded at all
+  assert.equal((await call('/admin/ignored-ips', { token: admin, ip: '2001:db8:1:2:aaaa::1' })).body.net, '2001:db8:1:2::/64'); // IPv6: its /64
+  assert.equal((await call('/admin/ignored-ips', { token: admin, net: mine.body.net }, 'DELETE')).status, 204);
+  assert.equal((await visits()).total, 2); // shown again
+});
+
+test('admin user page: confirm email, new code, plan by hand (not over Paddle), delete on request; all logged', async () => {
+  const { signAdminToken } = await import('../src/middleware/auth.js');
+  const admin = signAdminToken();
+  const boss = (await call('/auth/register', { email: 'au.boss@co.com', password: 'password1', name: 'AU Boss', role: 'employer', unconfirmed: true })).body;
+  const id = boss.user.id;
+  assert.equal((await call(`/admin/users/${id}`, {}, 'GET')).status, 401);
+  const page = async () => (await call(`/admin/users/${id}`, { token: admin }, 'GET')).body;
+  assert.equal((await page()).user.email, 'au.boss@co.com');
+
+  const codes = [];
+  app.locals.sendEmail = async (e) => { if (isCode(e)) codes.push(e.to); };
+  assert.equal((await call(`/admin/users/${id}/resend-code`, { token: admin }, 'POST')).status, 204);
+  assert.deepEqual(codes, ['au.boss@co.com']); // no once-a-minute wait for the admin
+  app.locals.sendEmail = capture;
+  assert.equal((await call(`/admin/users/${id}/confirm-email`, { token: admin }, 'POST')).status, 204);
+  assert.equal((await call(`/admin/users/${id}/confirm-email`, { token: admin }, 'POST')).status, 409); // already
+  assert.ok((await page()).user.email_verified_at);
+
+  assert.equal((await call(`/admin/users/${id}/plan`, { token: admin, plan: 'gold' }, 'PUT')).status, 400);
+  assert.equal((await call(`/admin/users/${id}/plan`, { token: admin, plan: 'pro' }, 'PUT')).body.plan, 'pro');
+  await pool.query("UPDATE users SET paddle_subscription_id = 'sub_x' WHERE id = $1", [id]);
+  assert.match((await call(`/admin/users/${id}/plan`, { token: admin, plan: 'free' }, 'PUT')).body.error, /Paddle/);
+  await pool.query('UPDATE users SET paddle_subscription_id = NULL WHERE id = $1', [id]);
+
+  assert.equal((await call(`/admin/users/${id}`, { token: admin, confirm: 'nope' }, 'DELETE')).status, 400);
+  assert.equal((await call(`/admin/users/${id}`, { token: admin, confirm: 'DELETE' }, 'DELETE')).status, 204);
+  const after = await page();
+  assert.ok(after.user.deleted_at);
+  assert.deepEqual(after.actions.map((a) => a.action), ['Deleted the account', 'Changed the plan', 'Confirmed the email by hand', 'Sent a new confirmation code']);
+  assert.equal((await call(`/admin/users/${id}/plan`, { token: admin, plan: 'pro' }, 'PUT')).status, 409); // deleted
+});
+
+test('email everyone: only reachable people, test copy, exact count, no double send, one-click unsubscribe', async () => {
+  const { signAdminToken } = await import('../src/middleware/auth.js');
+  const admin = signAdminToken();
+  const reg = async (email, role, extra = {}) => (await call('/auth/register', { email, password: 'password1', name: `Bc ${role}`, role, ...extra })).body;
+  const [w1, w2] = [await reg('bc.w1@x.ph', 'worker'), await reg('bc.w2@x.ph', 'worker')];
+  await reg('bc.unconfirmed@x.ph', 'worker', { unconfirmed: true }); // never emailed
+  const batches = [];
+  app.locals.sendBatch = async (emails) => { batches.push(emails); };
+  app.locals.sendEmail = capture;
+  process.env.ADMIN_EMAIL = 'admin@test.ph';
+  const count = async () => (await call('/admin/broadcasts', { token: admin }, 'GET')).body.counts.workers;
+  const workers = await count();
+  assert.ok(workers >= 2);
+
+  const msg = { token: admin, audience: 'workers', subject: 'New: job alerts', body: 'Hello!\n\nWe added job alerts.' };
+  sent.length = 0;
+  assert.equal((await call('/admin/broadcasts', { ...msg, test: true })).body.to, 'admin@test.ph');
+  assert.match(sent[0].subject, /^\[Test\]/);
+  assert.equal((await call('/admin/broadcasts', { ...msg, confirm: workers + 5 })).status, 409); // stale count
+  assert.equal((await call('/admin/broadcasts', { ...msg, confirm: workers })).body.sent, workers);
+  const all = batches.flat();
+  assert.ok(!all.some((e) => e.to === 'bc.unconfirmed@x.ph'));
+  const mine = all.find((e) => e.to === 'bc.w1@x.ph');
+  assert.match(mine.html, /Hi Bc,/);
+  assert.equal(mine.headers['List-Unsubscribe-Post'], 'List-Unsubscribe=One-Click');
+  assert.equal((await call('/admin/broadcasts', { ...msg, confirm: workers })).status, 409); // same email twice
+
+  // Unsubscribe with the link from the email (Gmail's one-click POSTs to the same address).
+  const [, u, t] = mine.headers['List-Unsubscribe'].match(/\?u=(\d+)&t=(\w+)/);
+  assert.equal((await fetch(`${base}/unsubscribe?u=${u}&t=bad`, { method: 'POST' })).status, 400);
+  assert.equal((await fetch(`${base}/unsubscribe?u=${u}&t=${t}`, { method: 'POST', body: 'List-Unsubscribe=One-Click', headers: { 'content-type': 'application/x-www-form-urlencoded' } })).status, 200);
+  assert.equal(await count(), workers - 1);
+  assert.equal((await call('/unsubscribe', { u: Number(u), t, on: true })).body.subscribed, true); // and back
+  assert.equal(await count(), workers);
+  assert.ok(w2);
+});
+
+test('support: reply by email, their answer joins the ticket and reopens it; new emails start tickets; loops and repeats skipped', async () => {
+  const { signAdminToken } = await import('../src/middleware/auth.js');
+  const admin = signAdminToken();
+  app.locals.sendEmail = capture;
+  const ticket = (await call('/contact', { name: 'Rosa', email: 'rosa@mail.ph', subject: 'Refund', message: 'How do refunds work?' })).body.id;
+  sent.length = 0;
+  assert.equal((await call(`/admin/feedback/${ticket}/reply`, { token: admin, body: 'Hi! Refunds take 5 days.', resolve: true })).status, 201);
+  assert.equal(sent[0].to, 'rosa@mail.ph');
+  assert.equal(sent[0].subject, `Re: Refund [#${ticket}]`);
+  const view = async () => (await call(`/admin/feedback/${ticket}`, { token: admin }, 'GET')).body;
+  assert.ok((await view()).done_at); // resolved
+
+  const inbound = (body, secret = 'in-secret') => fetch(`${base}/support/inbound`, { method: 'POST', headers: { 'content-type': 'application/json', 'x-inbound-secret': secret }, body: JSON.stringify(body) });
+  assert.equal((await inbound({})).status, 503); // not set up
+  process.env.INBOUND_SECRET = 'in-secret';
+  try {
+    assert.equal((await inbound({}, 'wrong')).status, 403);
+    const answer = { from: 'Rosa@Mail.ph', subject: `Re: Re: Refund [#${ticket}]`, text: 'Thanks! One more question.\n\nOn Mon, Oct 20, 2026 at 9:00 AM ReadyToWork.ph wrote:\n> Hi! Refunds take 5 days.', message_id: '<a1@mail>' };
+    assert.equal((await (await inbound(answer)).json()).ticket, ticket);
+    await inbound(answer); // delivered twice: added once
+    const t = await view();
+    assert.deepEqual(t.messages.map((m) => [m.from_admin, m.body]), [[true, 'Hi! Refunds take 5 days.'], [false, 'Thanks! One more question.']]);
+    assert.equal(t.done_at, null); // reopened
+
+    // Someone else using the ticket number doesn't get into it; a fresh email starts its own ticket.
+    const other = await (await inbound({ from: 'eve@x.ph', subject: `[#${ticket}] hi`, text: 'sneaky', message_id: '<e1@x>' })).json();
+    assert.notEqual(other.ticket, ticket);
+    assert.equal((await call(`/admin/feedback/${other.ticket}`, { token: admin }, 'GET')).body.type, 'email');
+    for (const from of ['hello@readytowork.ph', 'MAILER-DAEMON@x.com']) assert.equal((await (await inbound({ from, subject: 'x', text: 'y' })).json()).skipped, true);
+  } finally {
+    delete process.env.INBOUND_SECRET;
+  }
+});
+
+test('Team messages: admin writes, it arrives in Messages and by email, replies come back; nobody can be the Team account', async () => {
+  const { signAdminToken } = await import('../src/middleware/auth.js');
+  const admin = signAdminToken();
+  const w = (await call('/auth/register', { email: 'tm.w@x.ph', password: 'password1', name: 'Tina Worker', role: 'worker' })).body;
+  const mails = [];
+  app.locals.sendEmail = async (e) => { if (!isCode(e)) mails.push(e); };
+  assert.equal((await call(`/admin/users/${w.user.id}/message`, { token: admin, body: '' })).status, 400);
+  assert.equal((await call(`/admin/users/${w.user.id}/message`, { token: admin, body: 'Hi Tina, your profile looks great!' })).status, 201);
+  assert.equal(mails[0].to, 'tm.w@x.ph');
+  assert.match(mails[0].subject, /New message from ReadyToWork\.ph Team/);
+
+  const inbox = (await call('/messages', { token: w.token }, 'GET')).body;
+  assert.deepEqual([inbox[0].name, inbox[0].role], ['ReadyToWork.ph Team', 'team']);
+  const team = inbox[0].user_id;
+  assert.equal((await call(`/messages/${team}`, { token: w.token }, 'GET')).body.can_send, true); // they can answer
+  await call(`/messages/${team}`, { token: w.token, body: 'Thank you!' });
+  const list = (await call('/admin/messages', { token: admin }, 'GET')).body;
+  assert.deepEqual([list[0].user_id, list[0].unread, list[0].from_team], [w.user.id, 1, false]);
+  assert.equal((await call('/admin/stats', { token: admin }, 'GET')).body.totals.team_unread, 1);
+  const thread = (await call(`/admin/users/${w.user.id}/messages`, { token: admin }, 'GET')).body;
+  assert.deepEqual(thread.map((m) => [m.from_team, m.body]), [[true, 'Hi Tina, your profile looks great!'], [false, 'Thank you!']]);
+  assert.equal((await call('/admin/messages', { token: admin }, 'GET')).body[0].unread, 0); // opened = read
+
+  // The Team account: no reset email, no session, not in lists, counts or announcements.
+  mails.length = 0;
+  await call('/auth/forgot', { email: 'team@readytowork.ph' });
+  assert.equal(mails.length, 0);
+  const { rows: [t] } = await pool.query("SELECT id FROM users WHERE role = 'team'");
+  const jwt = (await import('jsonwebtoken')).default;
+  const forged = jwt.sign({ id: t.id, role: 'team' }, process.env.JWT_SECRET);
+  assert.equal((await call('/me', { token: forged }, 'GET')).status, 401);
+  assert.ok(!(await call('/admin/users?q=team', { token: admin }, 'GET')).body.users.some((u) => u.id === t.id));
+  const { counts } = (await call('/admin/broadcasts', { token: admin }, 'GET')).body;
+  assert.equal(counts.everyone, counts.employers + counts.workers);
+
+  await pool.query('UPDATE users SET suspended_at = now() WHERE id = $1', [w.user.id]);
+  assert.equal((await call(`/admin/users/${w.user.id}/message`, { token: admin, body: 'hello' })).status, 409);
+  await pool.query('UPDATE users SET suspended_at = NULL WHERE id = $1', [w.user.id]);
+});
+
+test('sample jobs: posted at random planned times by many employers, never twice; open to applications, not in the sitemap; admin can log in as anyone', async () => {
+  const { postDueSampleJobs, phDay, spread } = await import('../src/modules/sample-jobs/sample-jobs.service.js');
+  // Planned times stay in the window, sorted and at least an hour apart.
+  for (let k = 0; k < 200; k++) {
+    const t = spread(10, 0, 17.5 * 3_600_000);
+    assert.equal(t.length, 10);
+    assert.ok(t[0] >= 0 && t.at(-1) <= 17.5 * 3_600_000 && t.every((x, i) => !i || x - t[i - 1] >= 3_600_000 - 1));
+  }
+  const { signAdminToken } = await import('../src/middleware/auth.js');
+  const admin = signAdminToken();
+  const day = phDay(Date.now());
+  const at = (hhmm) => Date.parse(`${day}T${hhmm}:00+08:00`);
+  const plan = async () => (await pool.query(`SELECT value FROM settings WHERE key = 'sample_jobs_plan'`)).rows[0].value;
+
+  assert.equal(await postDueSampleJobs(pool, 0, at('12:00')), 0); // off
+  assert.equal(await postDueSampleJobs(pool, 10, at('05:00')), 0); // plans 10 between 6am and 11:30pm, none due yet
+  const { times } = await plan();
+  assert.equal(times.length, 10);
+  assert.ok(times.every((t) => t >= at('06:00') && t <= at('23:30')));
+  const byNoon = times.filter((t) => t <= at('12:00')).length;
+  assert.equal(await postDueSampleJobs(pool, 10, at('12:00')), byNoon);
+  assert.equal(await postDueSampleJobs(pool, 10, at('12:00')), 0); // nothing posts twice
+  assert.equal(await postDueSampleJobs(pool, 10, at('23:59')), 10 - byNoon);
+  const { rows: jobs } = await pool.query('SELECT id, employer_id, created_at FROM jobs WHERE is_sample ORDER BY created_at');
+  assert.deepEqual(jobs.map((j) => Math.round(j.created_at / 1000)), times.map((t) => Math.round(t / 1000))); // dated to the plan
+  assert.ok(new Set(jobs.map((j) => j.employer_id)).size > 1);
+
+  const w = (await call('/auth/register', { email: 'sample.w@x.ph', password: 'password1', name: 'Sam Worker', role: 'worker' })).body;
+  assert.equal((await call(`/jobs/${jobs[0].id}/apply`, { token: w.token, cover_letter: 'Hi' })).status, 201); // like a real job
+  // Nothing in the public job data says it's a sample, for visitors or workers.
+  for (const token of [undefined, w.token]) {
+    const pub = (await call(`/jobs/${jobs[0].id}`, { token }, 'GET')).body;
+    assert.ok(!('is_sample' in pub) && pub.indexed === false && !/sample/i.test(JSON.stringify(pub)));
+  }
+  assert.equal((await pool.query('SELECT plan FROM users WHERE id = $1', [jobs[0].employer_id])).rows[0].plan, 'premium');
+  assert.ok(!(await call('/jobs/sitemap')).body.some((j) => j.id === jobs[0].id));
+  assert.equal((await call('/admin/sample-jobs', { token: admin })).body.total, 10);
+
+  // Log in as: any worker or employer, admin only; looking around doesn't make them look active.
+  const loginAs = (id, token) => fetch(`${base}/admin/users/${id}/login-as`, { method: 'POST', headers: token ? asCookie(token) : {} });
+  assert.equal((await loginAs(jobs[0].employer_id)).status, 401);
+  assert.equal((await loginAs(99999, admin)).status, 404);
+  for (const id of [jobs[0].employer_id, w.user.id]) {
+    const res = await loginAs(id, admin);
+    assert.equal(res.status, 204);
+    assert.match(res.headers.getSetCookie().join(), /Max-Age=7200/);
+    assert.equal((await call('/me', { token: sessionFrom(res) })).body.id, id);
+  }
+  await new Promise((r) => setTimeout(r, 50)); // the activity write happens after the response
+  assert.equal((await pool.query('SELECT last_seen_at FROM users WHERE id = $1', [jobs[0].employer_id])).rows[0].last_seen_at, null);
+  // Reading their messages as them leaves them unread; their own visit marks them read.
+  const asEmployer = sessionFrom(await loginAs(jobs[0].employer_id, admin));
+  const asWorker = sessionFrom(await loginAs(w.user.id, admin));
+  assert.equal((await call(`/messages/${w.user.id}`, { token: asEmployer, body: 'Hi Sam' })).status, 201);
+  await call(`/messages/${jobs[0].employer_id}`, { token: asWorker }, 'GET');
+  assert.equal((await call('/messages/unread-count', { token: w.token }, 'GET')).body.count, 1);
+  await call(`/messages/${jobs[0].employer_id}`, { token: w.token }, 'GET');
+  assert.equal((await call('/messages/unread-count', { token: w.token }, 'GET')).body.count, 0);
+  // Not into suspended accounts.
+  await call(`/admin/users/${w.user.id}/suspend`, { token: admin, suspended: true }, 'PUT');
+  assert.equal((await loginAs(w.user.id, admin)).status, 409);
+  await call(`/admin/users/${w.user.id}/suspend`, { token: admin, suspended: false }, 'PUT');
+
+  // Removing them all keeps the one a real worker applied to (closed), so their application stays.
+  assert.deepEqual((await call('/admin/sample-jobs', { token: admin }, 'DELETE')).body, { deleted: 9, closed: 1 });
+  assert.equal((await pool.query('SELECT count(*)::int AS n FROM applications WHERE job_id = $1', [jobs[0].id])).rows[0].n, 1);
+  await pool.query('DELETE FROM jobs WHERE is_sample');
+
+  // Fill the board: 40 at once, dated in the past, at least 30 minutes apart, no role used twice.
+  assert.equal((await call('/admin/sample-jobs', { token: admin, count: 101 })).status, 400);
+  assert.equal((await call('/admin/sample-jobs', { token: admin, count: 40 })).status, 201);
+  const { rows: filled } = await pool.query('SELECT title, created_at FROM jobs WHERE is_sample ORDER BY created_at');
+  assert.equal(filled.length, 40);
+  assert.ok(filled.every((j, i) => j.created_at < new Date() && (!i || j.created_at - filled[i - 1].created_at >= 30 * 60_000 - 1000)));
+  const { ROLES, FILL_ROLES } = await import('../src/modules/sample-jobs/sample-roles.js');
+  const roleOf = (t, list) => list.map(([r]) => r).filter((r) => t.includes(r)).sort((a, b) => b.length - a.length)[0];
+  assert.equal(new Set(filled.map((j) => roleOf(j.title, FILL_ROLES))).size, 40); // 40 different fill roles
+  assert.ok(!FILL_ROLES.some(([r]) => ROLES.some(([d]) => d === r))); // none of them in the daily list
+
+  // Off in the morning, back on in the evening: nothing planned while it was off gets posted.
+  const day2 = phDay(Date.now() + 86_400_000);
+  const at2 = (hhmm) => Date.parse(`${day2}T${hhmm}:00+08:00`);
+  assert.equal(await postDueSampleJobs(pool, 10, at2('05:00')), 0);
+  assert.equal(await postDueSampleJobs(pool, 0, at2('09:00')), 0);
+  assert.deepEqual((await plan()).times, []);
+  assert.equal(await postDueSampleJobs(pool, 10, at2('20:00')), 0);
+  assert.ok((await plan()).times.every((t) => t > at2('20:00')));
+  await pool.query(`DELETE FROM users WHERE email LIKE '%@seed.test'`);
+  await pool.query(`DELETE FROM settings WHERE key = 'sample_jobs_plan'`);
 });

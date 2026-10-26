@@ -1,20 +1,24 @@
 'use client';
+import Link from 'next/link';
 import { useCallback, useEffect, useState } from 'react';
 import { ErrorText, card } from '@/components/ui';
 import { PageHeader, Pager, Search, Seg, adminApi, ago, failed, pageOf, pill, usePageSize, useAdmin } from '../ui';
 
 type Feedback = {
-  id: number; type: 'idea' | 'bug' | 'other' | 'support'; subject: string | null; message: string; page: string | null; contact_ok: boolean;
+  id: number; type: 'idea' | 'bug' | 'other' | 'support' | 'email'; subject: string | null; message: string; page: string | null; contact_ok: boolean;
   created_at: string; done_at: string | null; email: string | null; name: string | null; role: string | null;
+  replies: number; they_replied_last: boolean | null;
 };
 const LABEL = {
   idea: { text: 'Idea', className: 'bg-emerald-50 text-emerald-800' },
   bug: { text: 'Something broke', className: 'bg-red-50 text-red-700' },
   other: { text: 'Other', className: 'bg-slate-100 text-slate-700' },
   support: { text: 'Support request', className: 'bg-sky-50 text-sky-800' },
+  email: { text: 'Email', className: 'bg-indigo-50 text-indigo-800' },
 };
 
-// What people tell us to improve. Open items first; mark one done once it's handled (or reopen it).
+// Support requests, emails to support@ and feedback. Open first; open one to read the conversation and reply by
+// email. Resolve it when it's handled; their next email reopens it.
 export default function FeedbackPage() {
   const { logout, refreshCounts } = useAdmin();
   const [items, setItems] = useState<Feedback[] | null>(null);
@@ -38,10 +42,10 @@ export default function FeedbackPage() {
     .filter((f) => !term || `${f.subject ?? ''} ${f.message} ${f.name ?? ''} ${f.email ?? ''} ${f.page ?? ''}`.toLowerCase().includes(term));
   return (
     <>
-      <PageHeader title="Feedback & support" sub={`${open} open · each one is also emailed to support@readytowork.ph`}>
+      <PageHeader title="Feedback & support" sub={`${open} open · reply from here and their answers come back here`}>
         <Search value={q} onChange={(v) => { setQ(v); setPage(0); }} placeholder="Search feedback" />
       </PageHeader>
-      <Seg label="Show" value={filter} onChange={(v) => { setFilter(v); setPage(0); }} options={[['open', 'Open'], ['all', 'All'], ['support', 'Support'], ['idea', 'Ideas'], ['bug', 'Broken'], ['other', 'Other']]} />
+      <Seg label="Show" value={filter} onChange={(v) => { setFilter(v); setPage(0); }} options={[['open', 'Open'], ['all', 'All'], ['support', 'Support'], ['email', 'Emails'], ['idea', 'Ideas'], ['bug', 'Broken'], ['other', 'Other']]} />
       <ErrorText msg={error} />
       <section className={card}>
         {!items ? <p className="text-sm text-slate-500">Loading…</p> : shown.length === 0 ? (
@@ -59,17 +63,21 @@ export default function FeedbackPage() {
                     <span>· {ago(f.created_at)}</span>
                     {f.page && <span>· {f.page}</span>}
                   </div>
-                  {f.subject && <p className="text-sm font-semibold text-slate-900">{f.subject}</p>}
-                  <p className="whitespace-pre-line text-sm text-slate-800">{f.message}</p>
+                  <Link href={`/admin/feedback/${f.id}`} className="block hover:underline">
+                    {f.subject && <span className="block text-sm font-semibold text-slate-900">#{f.id} {f.subject}</span>}
+                    <span className="line-clamp-2 whitespace-pre-line text-sm text-slate-800">{f.message}</span>
+                  </Link>
+                  {f.replies > 0 && (
+                    <p className={`text-xs font-semibold ${f.they_replied_last ? 'text-amber-700' : 'text-slate-500'}`}>
+                      {f.they_replied_last ? 'They replied: waiting for you' : 'You replied'} · {f.replies} {f.replies === 1 ? 'reply' : 'replies'}
+                    </p>
+                  )}
                 </div>
                 <div className="flex shrink-0 gap-2">
-                  {f.contact_ok && f.email && (
-                    <a href={`mailto:${f.email}?subject=${encodeURIComponent(f.subject ? `Re: ${f.subject}` : 'About your feedback on ReadyToWork.ph')}`}
-                      className="rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-50">Reply</a>
-                  )}
+                  <Link href={`/admin/feedback/${f.id}`} className="rounded-lg bg-emerald-950 px-3 py-1.5 text-xs font-semibold text-white hover:bg-emerald-900">Open</Link>
                   <button type="button" onClick={() => mark(f, !f.done_at)}
                     className="rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-50">
-                    {f.done_at ? 'Reopen' : 'Mark done'}
+                    {f.done_at ? 'Reopen' : 'Resolve'}
                   </button>
                 </div>
               </li>

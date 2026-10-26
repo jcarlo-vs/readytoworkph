@@ -76,6 +76,7 @@ export default function MessagesPage() {
                 <span className="min-w-0 flex-1">
                   <span className="flex items-baseline justify-between gap-2">
                     <span className={`truncate ${c.unread ? 'font-bold text-slate-900' : 'font-semibold text-slate-800'}`}>{c.name}</span>
+                    {c.role === 'team' && <Official />}
                     {c.deactivated && <span className="shrink-0 rounded-full bg-slate-200 px-1.5 py-0.5 text-[10px] font-semibold text-slate-600">Deactivated</span>}
                     <span className="shrink-0 text-xs text-slate-400"><TimeAgo date={c.last_at} /></span>
                   </span>
@@ -168,8 +169,8 @@ function ThreadView({ otherId, jobId, myId, onSent }: { otherId: string; jobId: 
         </Link>
         <Initials name={other.name} id={other.id} size="h-10 w-10 text-sm" />
         <div className="min-w-0">
-          <p className="truncate font-semibold">{other.name}</p>
-          <p className="text-xs capitalize text-slate-500">{other.role}</p>
+          <p className="flex items-center gap-1.5 truncate font-semibold">{other.name}{other.role === 'team' && <Official />}</p>
+          <p className="text-xs capitalize text-slate-500">{other.role === 'team' ? 'Official messages from ReadyToWork.ph' : other.role}</p>
         </div>
         {other.role === 'worker' && (
           <Link href={`/workers/${other.id}`} className={`${thread.applied ? 'xl:hidden ' : ''}ml-auto rounded-lg border border-slate-200 px-3 py-1.5 text-xs font-semibold text-slate-700 hover:border-emerald-600 hover:text-emerald-800`}>View profile</Link>
@@ -305,5 +306,15 @@ function WorkerPanel({ user, applied, canSend, onSent }: { user: Thread['user'];
         </div>
       )}
     </aside>
+  );
+}
+
+// The ReadyToWork.ph Team account (messages from the admin): marked so nobody mistakes an employer for us.
+function Official() {
+  return (
+    <span className="inline-flex shrink-0 items-center gap-0.5 rounded-full bg-emerald-700 px-1.5 py-0.5 text-[10px] font-bold text-white" title="Official message from ReadyToWork.ph">
+      <svg viewBox="0 0 20 20" className="h-2.5 w-2.5" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M4 10l4 4 8-8" /></svg>
+      Official
+    </span>
   );
 }
