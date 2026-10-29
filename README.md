@@ -2,9 +2,9 @@
 
 Job board connecting employers with Filipino remote workers.
 
-- `frontend/` — Next.js (App Router, Tailwind) on http://localhost:3000
-- `backend/` — Node.js + Express API on http://localhost:4000
-- Database — local PostgreSQL (`remotepinas`)
+- `frontend/` - Next.js (App Router, Tailwind) on http://localhost:3000
+- `backend/` - Node.js + Express API on http://localhost:4000
+- Database - local PostgreSQL (`remotepinas`)
 
 ## Run locally
 
@@ -29,6 +29,8 @@ Support email into the admin panel (Admin › Feedback & support): Cloudflare Em
 
 Paid plans are sold through Paddle (it's the seller of record and handles sales tax). Set these in `backend/.env`; until `PADDLE_CLIENT_TOKEN` and `PADDLE_API_KEY` are set, the pricing page says "email us to upgrade":
 `PADDLE_ENV` (`sandbox` or `production`), `PADDLE_API_KEY`, `PADDLE_CLIENT_TOKEN`, `PADDLE_WEBHOOK_SECRET`, and the four price IDs `PADDLE_PRICE_PRO_MONTHLY`, `PADDLE_PRICE_PRO_YEARLY`, `PADDLE_PRICE_PREMIUM_MONTHLY`, `PADDLE_PRICE_PREMIUM_YEARLY`. Paddle's webhook goes to `https://readytowork.ph/api/billing/webhook` (subscription events); it is the only thing that changes an employer's plan.
+
+Testing payments locally: Paddle can't reach `localhost`, so open a temporary tunnel with `cloudflared tunnel --url http://localhost:4000`. It prints a new `https://….trycloudflare.com` address each run; put that address plus `/api/billing/webhook` in a separate sandbox notification destination (never the production one), and its secret in `backend/.env` as `PADDLE_WEBHOOK_SECRET`. If the tunnel keeps logging `Unauthorized: Tunnel not found`, Cloudflare dropped it (often after the laptop slept): press Ctrl+C, run it again, and update the destination with the new address. Stop the tunnel when you're done testing.
 
 Google sign-in stays hidden until the same OAuth Client ID is set in both files; restart both dev servers after changing them.
 

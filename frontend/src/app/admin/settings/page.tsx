@@ -5,7 +5,7 @@ import { PageHeader, adminApi, failed, useAdmin } from '../ui';
 import { HOME_PHOTOS, type HomePhoto } from '@/app/(home)/HelloCall';
 import type { HomeDesign } from '@/app/(home)/Heroes';
 
-type Settings = { topups_enabled: boolean; daily_applications: number; free_ai_analyses: number; free_full_names: boolean; max_job_applications: number;
+type Settings = { topups_enabled: boolean; daily_applications: number; free_ai_analyses: number; free_full_names: boolean; free_messaging: boolean; max_job_applications: number;
   homepage_design: HomeDesign; homepage_photo: HomePhoto };
 
 function Toggle({ checked, onChange, label }: { checked: boolean; onChange: (v: boolean) => void; label: string }) {
@@ -176,6 +176,9 @@ export default function SettingsPage() {
         <div className="divide-y divide-slate-100">
         <Row title="Show full names on Free" hint="Off: Free employers see “Maria S.” until the worker applies or they upgrade. Links and contact details stay hidden either way.">
           <Toggle label="Show full names on Free" checked={form.free_full_names} onChange={(free_full_names) => setForm({ ...form, free_full_names })} />
+        </Row>
+        <Row title="Free employers can message applicants" hint="On: Free employers can message workers who applied to their jobs, so they get a feel for the site. Off: they can read messages but need Pro or Premium to send. Workers can still reply to messages they already got.">
+          <Toggle label="Free employers can message applicants" checked={form.free_messaging} onChange={(free_messaging) => setForm({ ...form, free_messaging })} />
         </Row>
         <Row title="Smart Scores per month on Free" hint="Pro gets 500 and Premium is unlimited (10,000 fair use). From 0 to 1,000.">
           <div className="w-24 shrink-0"><input className={`${input} text-center`} type="number" min={0} max={1000} required aria-label="Free Smart Scores per month" value={form.free_ai_analyses} onChange={num('free_ai_analyses')} /></div>

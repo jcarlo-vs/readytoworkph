@@ -6,6 +6,7 @@ import { hooks } from '../../services/hooks.js';
 import { renderEmail } from '../../services/mail.js';
 import { findContact } from '../../models/users.model.js';
 import { planOf } from '../../services/plans.js';
+import { getSettings } from '../../services/settings.js';
 import * as Messages from './messages.model.js';
 
 // The admin writes to one person; it arrives in their Messages from the Team account, with the usual "new message"
@@ -28,12 +29,16 @@ export async function counterpart(me, otherId) {
   return other && other.id !== me.id && other.role !== me.role ? other : null;
 }
 
+// Whether Free employers may message at all (Admin › Settings; on while the site is new, so they can try it).
+export const freeMessaging = async () => (await getSettings()).free_messaging;
+
 // Workers may only reply to employers who messaged them first. Employers on a paid plan can reach out to
-// any worker; on Free, only to workers who applied to one of their jobs, or to keep a conversation going.
+// any worker; on Free, only to workers who applied to one of their jobs, or to keep a conversation going
+// (and not at all while Free messaging is off).
 export async function canSend(me, other) {
   if (me.role === 'employer') {
     if (PLAN_LIMITS[await planOf(pool, me.id)].outreach) return true;
-    return Messages.employerKnowsWorker(me.id, other.id);
+    return await freeMessaging() && Messages.employerKnowsWorker(me.id, other.id);
   }
   return Messages.hasWritten(other.id, me.id);
 }

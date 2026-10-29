@@ -11,13 +11,13 @@ export const JOB_TYPES: Option[] = [
 
 // `searchable` adds a search box at the top of the list (for long lists, e.g. picking one of many jobs).
 // At most `limit` options are listed at once; search always looks through all of them, so a list of
-// hundreds stays short and fast and people type to find the rest.
+// hundreds stays short and fast and people type to find the rest. `compact` is the small size for toolbars.
 type Props = {
   value: string; onChange: (v: string) => void; options: Option[]; label: string; placeholder?: string;
-  searchable?: boolean; className?: string; limit?: number; noun?: string;
+  searchable?: boolean; className?: string; limit?: number; noun?: string; compact?: boolean;
 };
 
-export function Select({ value, onChange, options, label, placeholder = 'Select…', searchable = false, className = '', limit = 50, noun = 'options' }: Props) {
+export function Select({ value, onChange, options, label, placeholder = 'Select…', searchable = false, className = '', limit = 50, noun = 'options', compact = false }: Props) {
   const id = useId();
   const root = useRef<HTMLDivElement>(null);
   const trigger = useRef<HTMLDivElement>(null);
@@ -69,7 +69,7 @@ export function Select({ value, onChange, options, label, placeholder = 'Select�
         aria-expanded={open} aria-controls={`${id}-list`}
         aria-activedescendant={open && !searchable && shown[active] ? `${id}-${active}` : undefined}
         onClick={() => (open ? hide() : show())} onKeyDown={onKeyDown}
-        className={`flex w-full cursor-pointer select-none items-center gap-2.5 rounded-lg border bg-white px-3.5 py-2.5 text-sm shadow-sm transition
+        className={`flex w-full cursor-pointer select-none items-center gap-2.5 rounded-lg border bg-white shadow-sm transition ${compact ? 'px-2.5 py-1.5 text-xs' : 'px-3.5 py-2.5 text-sm'}
           focus:outline-none focus-visible:border-emerald-600 focus-visible:ring-2 focus-visible:ring-emerald-600/20
           ${open ? 'border-emerald-600 ring-2 ring-emerald-600/20' : 'border-slate-300 hover:border-slate-400'}`}
       >

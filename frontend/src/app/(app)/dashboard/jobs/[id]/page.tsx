@@ -8,6 +8,7 @@ import { api, useApi, salary, interest, type Job } from '@/lib/api';
 import { Skills, ErrorText, Initials, Interest, CREDITS_INFO, SMART_SCORE_INFO, TimeAgo, ScoreDonut as Donut, scoreBand as band } from '@/components/ui';
 import { ResumeModal, type ViewableResume } from '@/components/ResumeModal';
 import { BulkMessage } from '@/components/BulkMessage';
+import { useMatchFinder } from '@/components/MatchFinder';
 
 type Analysis = { score: number; verdict: string; strengths: string[]; concerns: string[]; resume?: 'read' | 'unreadable' | 'none' };
 type Plan = 'free' | 'pro' | 'premium';
@@ -67,6 +68,7 @@ export default function Applicants() {
   useEffect(() => { const m = location.hash.match(/^#applicant-(\d+)$/); if (m) setSel(Number(m[1])); }, []);
   const hidden = page ? page.total - page.applicants.length : 0;
   const { data: job } = useApi<Job>(`/jobs/${id}`);
+  const matches = useMatchFinder(Number(id)); // Smart Matching: a button in the header, results under the stats
   const { data: initialUsage } = useApi<Usage>('/analyzer/usage');
   const [usage, setUsage] = useState<Usage | null>(null);
   const [results, setResults] = useState<Record<number, Analysis>>({});
@@ -257,6 +259,8 @@ export default function Applicants() {
         ))}
       </div>
 
+      {matches.panel}
+
       {hidden > 0 && page && (
         <div className="flex flex-wrap items-center gap-3 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm">
           <p className="min-w-56 flex-1 text-amber-950"><b>{hidden} more applicant{hidden === 1 ? ' is' : 's are'} hidden.</b> The {PLAN_NAME[page.plan]} plan shows the first {page.limit} people who apply to each job.</p>
@@ -284,7 +288,9 @@ export default function Applicants() {
           {picked.size > 0
             ? <button type="button" onClick={() => setPicked(new Set())} className="text-xs text-slate-500 hover:text-slate-800">Clear</button>
             : messageable.length > 1 && <span className="text-xs text-slate-400">Tick people to message them together</span>}
-          <div className="ml-auto flex flex-wrap items-center gap-3 text-xs text-slate-500">
+          <div className="ml-auto">{matches.button}</div>
+          {/* Its own line under Smart Matching, on the right. */}
+          <div className="flex basis-full flex-wrap items-center justify-end gap-3 text-xs text-slate-500">
             {u && (
               // How many Smart Scores are left: green while plenty, amber when running low, red with Upgrade at zero.
               <span className={`inline-flex items-center gap-2 rounded-full px-3 py-1 ring-1 ${outOfFree ? 'bg-red-50 text-red-900 ring-red-200' : left <= 0.4 ? 'bg-amber-50 text-amber-900 ring-amber-200' : 'bg-emerald-50 text-emerald-900 ring-emerald-200'}`}>
@@ -309,7 +315,7 @@ export default function Applicants() {
                 Score all <span className="rounded bg-slate-100 px-1.5 text-[10px] text-slate-600">Premium</span>
               </Link>
             )}
-            <Select label="Sort" className="w-52" value={sortBy} onChange={(v) => setSortBy(v as typeof sortBy)}
+            <Select label="Sort" className="w-44" compact value={sortBy} onChange={(v) => setSortBy(v as typeof sortBy)}
               options={[{ value: 'credits', label: 'Most interested' }, { value: 'newest', label: 'Newest' }, { value: 'score', label: 'Highest Smart Score' }]} />
           </div>
         </div>
@@ -424,7 +430,7 @@ export default function Applicants() {
               <div className="flex flex-wrap gap-2 text-xs font-semibold">
                 {!person.deleted && !person.deactivated && <Link href={`/messages?with=${person.worker_id}&job=${id}`} className="rounded-lg bg-emerald-950 px-3 py-2 text-white hover:bg-emerald-900">Message {first(person.name)}</Link>}
                 {person.resume_name && <button type="button" onClick={() => openResume(person.id, person.resume_name!)} className="rounded-lg px-3 py-2 text-slate-700 ring-1 ring-slate-200 hover:ring-emerald-600">Resume (PDF)</button>}
-                {!person.deleted && <Link href={`/workers/${person.worker_id}`} className="rounded-lg px-3 py-2 text-slate-700 ring-1 ring-slate-200 hover:ring-emerald-600">Full profile</Link>}
+                {!person.deleted && <Link href={`/workers/${person.worker_id}`} target="_blank" rel="noopener" className="rounded-lg px-3 py-2 text-slate-700 ring-1 ring-slate-200 hover:ring-emerald-600">Full profile</Link>}
                 {!person.deleted && <a href={`mailto:${person.email}`} className="rounded-lg px-3 py-2 text-slate-700 ring-1 ring-slate-200 hover:ring-emerald-600">Email</a>}
                 {!person.deleted && (
                   <button type="button" onClick={() => toggleSave(person)} aria-pressed={isSaved(person)}
