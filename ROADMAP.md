@@ -94,7 +94,7 @@ Features we decided to build, many inspired by looking through OnlineJobs.ph (em
 - [x] Hide contact details for the employer side too (job post text), see 3.
 - [x] **Smart Matching** (2026-10-21; AI fit scores renamed **Smart Score**; ⓘ labels on dashboards and pricing): an AI recruiter agent (`backend/src/services/ai/matchAgent.js`, Claude tool use) searches all talent for a job (Claude Haiku 5.5, about $0.002-0.02 a run), reads profiles and CVs, shortlists up to 10 with reasons; steps stream live; runs saved per job. Pro 3 / Premium 30 a month; skills ~80%, availability ~10%, rate ~10% (above-budget tag, never a filter)
   - [ ] Follow-up: move runs to a queue + worker when simultaneous runs reach the hundreds (today they run inside the request, max 20 per server)
-  - [ ] Follow-up: put Smart Matching back on a job's applicants page (hidden 2026-10-21 while the page was redesigned; the component and API are still there: `useMatchFinder` in `components/MatchFinder.tsx`)
+  - [x] Follow-up: Smart Matching is back on a job's applicants page (2026-10-28; button in the header, results under the stats)
   - [ ] Follow-up (only if AI costs grow): prompt caching for the agent's system prompt and tools
   - [ ] Follow-up: skim wider at scale: 40 cards per search, up to 3 pages, about 200 cards per run; "narrow instead of paging" in the prompt
   - [ ] Follow-up: block same-job reruns until the job is edited or 7 days pass

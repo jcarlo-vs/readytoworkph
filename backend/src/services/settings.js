@@ -7,6 +7,7 @@ export const SETTINGS = {
   daily_applications: { default: 60, valid: (v) => Number.isInteger(v) && v >= 1 && v <= 500 }, // spam cap; 0-credit applies are free
   free_ai_analyses: { default: 5, valid: (v) => Number.isInteger(v) && v >= 0 && v <= 1000 },
   free_full_names: { default: false, valid: (v) => typeof v === 'boolean' }, // Free employers see "Maria Santos", not "Maria S."
+  free_messaging: { default: true, valid: (v) => typeof v === 'boolean' }, // Free employers may message their applicants (off: Pro and up only)
   max_job_applications: { default: 250, valid: (v) => Number.isInteger(v) && v >= 10 && v <= 5000 }, // a job closes itself when full
   homepage_design: { default: 'classic', valid: (v) => ['classic', 'hello_call', 'big_photo', 'search_first', 'two_faces'].includes(v) }, // which homepage hero visitors see
   sample_jobs_per_day: { default: 0, valid: (v) => Number.isInteger(v) && v >= 0 && v <= 50 }, // the sample-job autopilot; 0 = off

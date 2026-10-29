@@ -5,7 +5,9 @@ import { bad, num, str } from '../../lib/validate.js';
 import { planOf } from '../../services/plans.js';
 import { findTitle } from '../jobs/jobs.model.js';
 import * as Messages from './messages.model.js';
-import { BULK_MAX, appliedToMe, canSend, counterpart, deliverMessage } from './messages.service.js';
+import { BULK_MAX, appliedToMe, canSend, counterpart, deliverMessage, freeMessaging } from './messages.service.js';
+
+const FREE_OFF = 'Messaging applicants is part of Pro and Premium. Upgrade to message them.';
 
 export const inbox = async (req, res) => {
   const rows = await Messages.inbox(req.user.id);
@@ -40,7 +42,8 @@ export const conversation = async (req, res) => {
   const employerView = req.user.role === 'employer' && other.role === 'worker';
   const applied = employerView ? (await appliedToMe(req.user.id, [other.id]))[other.id] ?? [] : undefined;
   const profile = employerView ? (await Messages.workerHeadline(other.id)) ?? {} : {};
-  res.json({ user: { id: other.id, name: other.name, role: other.role, status: other.status, ...profile }, can_send: !other.status && await canSend(req.user, other), messages: rows, applied });
+  res.json({ user: { id: other.id, name: other.name, role: other.role, status: other.status, ...profile }, can_send: !other.status && await canSend(req.user, other), messages: rows, applied,
+    ...(employerView && { free_messaging: await freeMessaging() }) });
 };
 
 export const bulk = async (req, res) => {
@@ -49,7 +52,9 @@ export const bulk = async (req, res) => {
   if (!body) return bad(res, 'Message can’t be empty');
   if (!ids.length) return bad(res, 'Pick at least one applicant');
   if (ids.length > BULK_MAX) return bad(res, `You can message up to ${BULK_MAX} applicants at once`);
-  const limit = PLAN_LIMITS[await planOf(pool, req.user.id)].applicants;
+  const plan = PLAN_LIMITS[await planOf(pool, req.user.id)];
+  if (!plan.outreach && !(await freeMessaging())) return res.status(403).json({ error: FREE_OFF, upgrade: true });
+  const limit = plan.applicants;
   const rows = await Messages.bulkRecipients(ids, req.user.id, limit);
   const sent = [], skipped = [];
   for (const r of rows) {
@@ -67,7 +72,7 @@ export const send = async (req, res) => {
   const body = str(req.body.body, 5000);
   if (!body) return bad(res, 'Message can’t be empty');
   if (!(await canSend(req.user, other))) return res.status(403).json(req.user.role === 'employer'
-    ? { error: 'On the Free plan you can message workers who applied to your jobs. Upgrade to Pro to reach out to any worker first.', upgrade: true }
+    ? { error: (await freeMessaging()) ? 'On the Free plan you can message workers who applied to your jobs. Upgrade to Pro to reach out to any worker first.' : FREE_OFF, upgrade: true }
     : { error: 'You can reply once this employer messages you' });
 
   let job = null;

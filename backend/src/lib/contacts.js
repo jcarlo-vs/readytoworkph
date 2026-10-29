@@ -11,7 +11,10 @@ export const withoutContacts = (s) => hideContacts(s, '').replace(/\s+/g, ' ').t
 // Contact details in job posts (emails, links, phone numbers, @handles) are only sent to signed-in members.
 // Visitors, scrapers and bots get a placeholder instead, in the HTML and in this API alike, so there's
 // nothing to un-blur; the page shows it as "Sign up or log in to see".
-export const EMAIL = /[A-Z0-9._%+-]+@[A-Z0-9-]+(?:\.[A-Z0-9-]+)*\.[A-Z]{2,}/gi;
+// Lengths are capped at what real emails allow (64 before the @, 63 per part after it): without caps, a long
+// run like "aaaa…" or "a.a.a.…" made each check re-read the rest of the text from every letter, and one
+// 10,000-character job post took a fifth of a second, on every job list a visitor opened.
+export const EMAIL = /[A-Z0-9._%+-]{1,64}@[A-Z0-9-]{1,63}(?:\.[A-Z0-9-]{1,63}){0,8}\.[A-Z]{2,24}/gi;
 
 export const MEMBERS_ONLY = '[contact hidden, log in to see it]';
 
@@ -25,10 +28,20 @@ export const shortName = (name) => {
 // HIDDEN before the text leaves the server; the page shows a blurred "upgrade to see" in their place.
 export const HIDDEN = '[hidden: upgrade to see]';
 
+// Emails written to get past a filter: "juan [at] gmail [dot] com", "juan(at)gmail(dot)com", "juan @ gmail . com",
+// look-alike symbols (＠, 。), and "juan at gmail dot com" (the word "at" only counts with the word "dot" after it).
+const AT = String.raw`(?:\s*(?:[@＠]|[\[({]\s*at\s*[\])}])\s*)`;
+const DOT = String.raw`(?:\s*(?:[.．。]|[\[({]\s*dot\s*[\])}])\s*|\sdot\s)`;
+const ENDING = String.raw`(?:com|net|org|ph|io)(?![\w-]|\.\w)`;
+const DISGUISED_EMAIL = String.raw`[a-z0-9._%+-]{1,64}(?:${AT}[a-z0-9-]{1,63}(?:${DOT}[a-z0-9-]{1,63}){0,8}?${DOT}|\sat\s[a-z0-9-]{1,63}(?:\sdot\s[a-z0-9-]{1,63}){0,8}?\sdot\s)${ENDING}`;
+// Common web address endings, link shorteners (bit.ly, tinyurl.com) included; not "Node.js" or "e.g.".
+const SITE_ENDINGS = 'com|net|org|ph|io|dev|me|co|app|link|site|xyz|info|biz|ly|ai|ca|uk|us|au|nz|sg|de|gg|tv|cc|gl|page|online|store|shop|tech|website|email|live|club';
+
 const CONTACT_RE = new RegExp([
-  EMAIL.source,
+  EMAIL.source, // first, so "hr@acme.com.ph" is taken whole
+  DISGUISED_EMAIL,
   String.raw`(?:https?:\/\/|www\.)[^\s,;)]+`, // a link ends at a space, comma, semicolon or bracket
-  String.raw`\b[a-z0-9-]+(?:\.[a-z0-9-]+)*\.(?:com|ph|io|dev|me|co|org|app|link|site|xyz|info|biz)(?:\/[^\s,;)]*)?`,
+  String.raw`\b[a-z0-9-]{1,63}(?:\.[a-z0-9-]{1,63}){0,8}\.(?:${SITE_ENDINGS})(?![a-z0-9-])(?:\/[^\s,;)]*)?`,
   String.raw`(?:\+?\d[\d\s().-]{7,}\d)`,
   String.raw`(?<![\w.])@[a-z0-9_.]{2,}[a-z0-9_](?![\w.]*@)`, // an @handle (never ending in a full stop), not the start of an email
 ].join('|'), 'gi');

@@ -182,6 +182,7 @@ test('messages: who can write, read tracking, one email per unread batch', async
   assert.equal((await call('/messages/unread-count', { token: maria.token }, 'GET')).body.count, 2);
   const inbox = (await call('/messages', { token: maria.token }, 'GET')).body;
   assert.deepEqual(inbox.map((c) => [c.name, c.unread, c.last_body]), [['Acme HR', 2, 'Are you free for a call?']]);
+  assert.deepEqual(inbox[0].first_job, { id: job.id, title: 'Bookkeeper' }); // "First contacted for job", though the latest message has no job
 
   const t = (await thread(maria, boss)).body; // opening marks read
   await away();
@@ -212,6 +213,20 @@ test('messages: who can write, read tracking, one email per unread batch', async
   await call('/me/notifications', { token: maria.token, message_emails: true }, 'PUT');
   assert.equal((await thread(boss, maria)).body.messages.length, 6);
   assert.equal((await thread(rival, maria)).body.messages.length, 0); // other employers see nothing
+
+  // Admin switches Free messaging off: the Free employer can read but not send (one by one or to many); Maria can still reply.
+  await pool.query("UPDATE users SET plan = 'free' WHERE id = $1", [boss.user.id]);
+  await pool.query(`INSERT INTO settings (key, value) VALUES ('free_messaging', 'false')`);
+  const off = (await thread(boss, maria)).body;
+  assert.deepEqual([off.can_send, off.free_messaging], [false, false]);
+  const blocked = await send(boss, maria, 'Still there?');
+  assert.deepEqual([blocked.status, blocked.body.upgrade], [403, true]);
+  assert.match(blocked.body.error, /part of Pro and Premium/);
+  assert.equal((await call('/messages/bulk', { token: boss.token, application_ids: [1], body: 'Hi all' })).status, 403);
+  assert.equal((await send(maria, boss, 'Thanks!')).status, 201);
+  await pool.query(`DELETE FROM settings WHERE key = 'free_messaging'`);
+  assert.equal((await thread(boss, maria)).body.can_send, true);
+  await pool.query("UPDATE users SET plan = 'pro' WHERE id = $1", [boss.user.id]);
   assert.equal((await thread(maria, rival)).body.can_send, false);
 });
 
@@ -601,7 +616,7 @@ test('admin: separate login, lockout, settings validated and applied', async () 
   assert.equal((await call('/admin/login', { email: 'admin@test.ph', password: 'nope' })).status, 401);
   const { token } = (await call('/admin/login', { email: 'ADMIN@test.ph', password: 'correct horse battery' })).body;
   assert.equal((await call('/me', { token }, 'GET')).status, 401); // admin tokens aren't user accounts
-  assert.deepEqual((await call('/admin/settings', { token }, 'GET')).body, { topups_enabled: false, daily_applications: 60, free_ai_analyses: 5, free_full_names: false, max_job_applications: 250, notice: null, homepage_design: 'classic', homepage_photo: 'laughing', sample_jobs_per_day: 0 });
+  assert.deepEqual((await call('/admin/settings', { token }, 'GET')).body, { topups_enabled: false, daily_applications: 60, free_ai_analyses: 5, free_full_names: false, free_messaging: true, max_job_applications: 250, notice: null, homepage_design: 'classic', homepage_photo: 'laughing', sample_jobs_per_day: 0 });
 
   assert.equal((await call('/admin/settings', { token, topups_enabled: 'yes' }, 'PUT')).status, 400);
   assert.equal((await call('/admin/settings', { token, made_up: 1 }, 'PUT')).status, 400);
@@ -612,7 +627,7 @@ test('admin: separate login, lockout, settings validated and applied', async () 
   const pub = (await call('/settings', {}, 'GET')).body;
   assert.deepEqual([pub.homepage_design, pub.homepage_photo], ['hello_call', 'good_news']); // the homepage reads these
   const saved = await call('/admin/settings', { token, topups_enabled: true, free_ai_analyses: 3 }, 'PUT');
-  assert.deepEqual(saved.body, { topups_enabled: true, daily_applications: 60, free_ai_analyses: 3, free_full_names: false, max_job_applications: 250, notice: null, homepage_design: 'hello_call', homepage_photo: 'good_news', sample_jobs_per_day: 0 });
+  assert.deepEqual(saved.body, { topups_enabled: true, daily_applications: 60, free_ai_analyses: 3, free_full_names: false, free_messaging: true, max_job_applications: 250, notice: null, homepage_design: 'hello_call', homepage_photo: 'good_news', sample_jobs_per_day: 0 });
   assert.equal((await call('/settings', {}, 'GET')).body.topups_enabled, true);
   const boss = (await call('/auth/register', { email: 'adm.b@co.com', password: 'password1', name: 'B', role: 'employer' })).body.token;
   assert.equal((await call('/analyzer/usage', { token: boss }, 'GET')).body.limit, 3); // setting is used live
@@ -1103,6 +1118,19 @@ test('worker privacy: free employers see "Maria S." and no links until they may 
   assert.equal(w.bio, `QuickBooks pro using Node.js. Portfolio: ${HIDDEN}, email ${HIDDEN}, call ${HIDDEN} or ${HIDDEN}`); // Node.js stays
   const { hideContacts } = await import('../src/lib/contacts.js');
   assert.equal(hideContacts('email me at @juan.cruz@gmail.com'), `email me at @${HIDDEN}`); // one email, not a handle plus a site
+  // Disguised emails, look-alike symbols, and links with any common ending (link shorteners too) are hidden.
+  for (const sneaky of ['juan [at] gmail [dot] com', 'juan(at)gmail(dot)com', 'juan at gmail dot com', 'juan @ gmail . com',
+    'juan＠gmail.com', 'bit.ly/abc123', 'hire.example.net', 'example.ca/apply', 'tinyurl.com/x1', 'my.site.ai'])
+    assert.equal(hideContacts(sneaky), HIDDEN, sneaky);
+  // Ordinary text stays readable.
+  for (const fine of ['Node.js and Next.js', 'meet at 10am', 'Not an email: 5 @ 10am.', 'Pay 1,300-2,500 a month', 'e.g. invoices', 'version 2.5'])
+    assert.equal(hideContacts(fine), fine, fine);
+  // Long junk text stays quick to check (it used to take a fifth of a second per 10,000 characters).
+  for (const junk of ['a.'.repeat(10_000), 'a'.repeat(20_000), 'a@' + 'a.'.repeat(10_000)]) {
+    const t = performance.now();
+    hideContacts(junk);
+    assert.ok(performance.now() - t < 100, `${junk.slice(0, 6)}… took ${Math.round(performance.now() - t)} ms`);
+  }
   assert.equal((await call('/workers?q=QuickBooks', { token: boss.token }, 'GET')).body.workers.find((x) => x.id === maria.user.id).name, 'Maria S.');
   assert.equal((await call(`/workers/${maria.user.id}`, { token: maria.token }, 'GET')).body.name, 'Maria Clara Santos'); // her own profile
 

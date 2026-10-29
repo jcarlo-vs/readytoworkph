@@ -12,15 +12,19 @@ export const findTeam = async () => (await pool.query("SELECT id, name FROM user
 // --- Inbox ---
 
 // One row per person this user has exchanged messages with, newest first, without the ones they removed
-// (until a newer message arrives).
+// (until a newer message arrives). `first_job` is the job the conversation started about ("First contacted for").
 export const inbox = async (userId) => (await pool.query(
   `WITH m AS (
-     SELECT CASE WHEN sender_id = $1 THEN recipient_id ELSE sender_id END AS other, sender_id, body, created_at
+     SELECT CASE WHEN sender_id = $1 THEN recipient_id ELSE sender_id END AS other, sender_id, body, created_at, id, job_id
      FROM messages WHERE sender_id = $1 OR recipient_id = $1
-   ), latest AS (SELECT DISTINCT ON (other) * FROM m ORDER BY other, created_at DESC)
+   ), latest AS (SELECT DISTINCT ON (other) * FROM m ORDER BY other, created_at DESC),
+   first_job AS (SELECT DISTINCT ON (m.other) m.other, json_build_object('id', j.id, 'title', j.title) AS job
+     FROM m JOIN jobs j ON j.id = m.job_id ORDER BY m.other, m.created_at, m.id)
    SELECT l.other AS user_id, u.name, u.role, u.deleted_at IS NOT NULL AS deleted, u.deactivated_at IS NOT NULL AS deactivated, l.body AS last_body, l.created_at AS last_at, l.sender_id = $1 AS last_from_me,
-     (SELECT count(*)::int FROM messages x WHERE x.sender_id = l.other AND x.recipient_id = $1 AND x.read_at IS NULL) AS unread
+     (SELECT count(*)::int FROM messages x WHERE x.sender_id = l.other AND x.recipient_id = $1 AND x.read_at IS NULL) AS unread,
+     f.job AS first_job
    FROM latest l JOIN users u ON u.id = l.other
+   LEFT JOIN first_job f ON f.other = l.other
    LEFT JOIN hidden_conversations h ON h.user_id = $1 AND h.other_id = l.other
    WHERE h.hidden_at IS NULL OR l.created_at > h.hidden_at
    ORDER BY l.created_at DESC`,

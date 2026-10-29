@@ -5,6 +5,7 @@ import { useEffect, useRef, useState } from 'react';
 import { api, useApi, type Applied, type Conversation, type Job, type Thread } from '@/lib/api';
 import { useAuth } from '@/lib/auth';
 import { ErrorText, Initials, TimeAgo, button, scoreBand } from '@/components/ui';
+import { useModal } from '@/components/useModal';
 
 export default function MessagesPage() {
   const { user, ready } = useAuth();
@@ -33,23 +34,66 @@ export default function MessagesPage() {
     }
   }
 
+  // Employers: filter the list by job (who applied to it), or the people they reached out to first.
+  const [filter, setFilter] = useState<'all' | 'unread' | 'out' | number>('all');
+  const [clearing, setClearing] = useState<number | null>(null); // job whose chats are being removed from the list
+  const byJob = jobFolders(inbox ?? []);
+  const reachedOut = (inbox ?? []).filter((c) => c.applied?.length === 0 && c.role === 'worker');
+  const unread = (inbox ?? []).filter((c) => c.unread > 0 || String(c.user_id) === withId); // the open chat stays while you read it
+  const folder = typeof filter === 'number' && byJob.find((j) => j.id === filter);
+  const shown = filter === 'all' ? inbox : filter === 'unread' ? unread : filter === 'out' ? reachedOut : folder ? folder.people : [];
+  const jobsNav = user?.role === 'employer' && !!inbox?.length;
+  // Picking a folder while a chat is open goes back to the list, filtered.
+  const pick = (f: typeof filter) => { setFilter(f); if (withId) router.push('/messages'); };
+
   if (ready && !user) return <p><Link href="/login?next=/messages" className="font-medium text-emerald-800 underline">Log in</Link> to see your messages.</p>;
   if (!user) return null;
 
   return (
-    <div className="grid h-[calc(100vh-11rem)] min-h-[32rem] overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm md:grid-cols-[20rem_minmax(0,1fr)]">
-      <aside className={`flex min-h-0 flex-col border-slate-200 md:border-r ${withId ? 'hidden md:flex' : 'flex'}`}>
+    <div data-wide className={`grid h-[calc(100vh-11rem)] min-h-[32rem] overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm ${jobsNav ? 'lg:grid-cols-[14rem_minmax(0,1fr)]' : ''}`}>
+      {jobsNav && (
+        <nav aria-label="Filter by job" className="hidden min-h-0 flex-col gap-0.5 overflow-y-auto border-r border-slate-200 bg-slate-50/60 p-2 lg:flex">
+          <FolderButton label="All messages" count={inbox.length} active={filter === 'all'} onClick={() => pick('all')} />
+          <FolderButton label="Unread" count={unread.length} active={filter === 'unread'} onClick={() => pick('unread')} />
+          {byJob.length > 0 && <p className="px-2.5 pt-3 pb-1 text-[11px] font-semibold uppercase tracking-wide text-slate-400">Job posts</p>}
+          {byJob.map((j) => (
+            <FolderButton key={j.id} label={j.title} count={j.people.length} active={filter === j.id} onClick={() => pick(j.id)}
+              onRemove={() => setClearing(j.id)} />
+          ))}
+          {reachedOut.length > 0 && <>
+            <p className="px-2.5 pt-3 pb-1 text-[11px] font-semibold uppercase tracking-wide text-slate-400">Other</p>
+            <FolderButton label="You reached out" count={reachedOut.length} active={filter === 'out'} onClick={() => pick('out')} />
+          </>}
+        </nav>
+      )}
+      {/* Like an email inbox: the list fills the space, and opening a chat shows it in the list's place. */}
+      <aside className={`min-h-0 flex-col ${withId ? 'hidden' : 'flex'}`}>
         <div className="flex items-center justify-between gap-2 border-b border-slate-200 px-5 py-3">
           <h1 className="py-1 text-lg font-bold">Messages</h1>
+          {jobsNav && (
+            <select value={String(filter)} onChange={(e) => { const v = e.target.value; pick(v === 'all' || v === 'unread' || v === 'out' ? v : Number(v)); }}
+              aria-label="Filter by job" className="min-w-0 flex-1 truncate rounded-lg border border-slate-200 bg-white px-2 py-1.5 text-xs text-slate-700 lg:hidden">
+              <option value="all">All messages ({inbox.length})</option>
+              <option value="unread">Unread ({unread.length})</option>
+              {byJob.map((j) => <option key={j.id} value={j.id}>{j.title} ({j.people.length})</option>)}
+              {reachedOut.length > 0 && <option value="out">You reached out ({reachedOut.length})</option>}
+            </select>
+          )}
           {!!inbox?.length && (picked
             ? <button type="button" onClick={stopSelecting} className="rounded-lg px-2.5 py-1.5 text-sm font-semibold text-slate-600 hover:bg-slate-100">Cancel</button>
             : <button type="button" onClick={() => setPicked(new Set())} className="rounded-lg px-2.5 py-1.5 text-sm font-semibold text-emerald-800 hover:bg-emerald-50">Select</button>)}
         </div>
-        {picked && inbox && (
+        {folder && (
+          <div className="flex items-center justify-between gap-2 border-b border-slate-200 bg-slate-50 px-5 py-2 text-xs lg:hidden">
+            <span className="truncate text-slate-600">{folder.people.length} {folder.people.length === 1 ? 'person' : 'people'} applied</span>
+            <button type="button" onClick={() => setClearing(folder.id)} className="shrink-0 font-semibold text-red-700 hover:underline">Remove from Messages</button>
+          </div>
+        )}
+        {picked && shown && (
           <div className="flex items-center gap-3 border-b border-slate-200 bg-slate-50 px-5 py-2 text-sm">
             <label className="flex items-center gap-2 font-medium text-slate-700">
-              <input type="checkbox" className="size-4 accent-emerald-700" checked={picked.size === inbox.length && inbox.length > 0}
-                onChange={(e) => setPicked(new Set(e.target.checked ? inbox.map((c) => c.user_id) : []))} />
+              <input type="checkbox" className="size-4 accent-emerald-700" checked={picked.size === shown.length && shown.length > 0}
+                onChange={(e) => setPicked(new Set(e.target.checked ? shown.map((c) => c.user_id) : []))} />
               {picked.size ? `${picked.size} selected` : 'Select all'}
             </label>
           </div>
@@ -63,7 +107,8 @@ export default function MessagesPage() {
                 : 'Employers will reach out here about your applications.'}
             </li>
           )}
-          {inbox?.map((c) => (
+          {inbox && inbox.length > 0 && shown?.length === 0 && <li className="p-5 text-sm text-slate-500">{filter === 'unread' ? 'You’re all caught up.' : 'No one here anymore.'}</li>}
+          {shown?.map((c) => (
             <li key={c.user_id} className={picked ? 'flex items-center border-b border-slate-100 pl-5' : ''}>
               {picked && (
                 <input type="checkbox" className="size-4 shrink-0 accent-emerald-700" checked={picked.has(c.user_id)} onChange={() => toggle(c.user_id)}
@@ -82,9 +127,10 @@ export default function MessagesPage() {
                   </span>
                   {c.applied && c.role === 'worker' && (c.applied.length ? (
                     <span className="block truncate text-xs font-medium text-emerald-700">
-                      {c.applied[0].title}{c.applied.length > 1 && ` · +${c.applied.length - 1} job${c.applied.length > 2 ? 's' : ''}`}
+                      {(c.applied.find((a) => a.job_id === filter) ?? c.applied[0]).title}{c.applied.length > 1 && ` · +${c.applied.length - 1} job${c.applied.length > 2 ? 's' : ''}`}
                     </span>
                   ) : <span className="block truncate text-xs text-slate-400">Hasn’t applied · you reached out</span>)}
+                  {c.role === 'employer' && c.first_job && <span className="block truncate text-xs font-medium text-emerald-700">{c.first_job.title}</span>}
                   <span className="mt-0.5 flex items-center gap-2">
                     <span className={`truncate text-sm ${c.unread ? 'font-medium text-slate-800' : 'text-slate-500'}`}>
                       {c.last_from_me && 'You: '}{c.last_body}
@@ -120,19 +166,34 @@ export default function MessagesPage() {
         )}
       </aside>
 
-      <section className={`min-h-0 flex-col ${withId ? 'flex' : 'hidden md:flex'}`}>
-        {withId
-          ? <ThreadView key={withId} otherId={withId} jobId={jobId} myId={user.id} onSent={reloadInbox} />
-          : <div className="m-auto max-w-xs p-6 text-center text-sm text-slate-500">Choose a conversation to read it here.</div>}
-      </section>
+      {clearing !== null && (
+        <ClearJob job={byJob.find((j) => j.id === clearing)} onClose={() => setClearing(null)}
+          onDone={(ids) => {
+            if (withId && ids.includes(Number(withId))) router.push('/messages');
+            setClearing(null); setFilter('all'); reloadInbox();
+            window.dispatchEvent(new Event('rp:unread-changed'));
+          }} />
+      )}
+      {withId && (
+        <section className="flex min-h-0 flex-col">
+          <ThreadView key={withId} otherId={withId} jobId={jobId} myId={user.id} onSent={reloadInbox} {...nextPrev(shown ?? [], withId)} />
+        </section>
+      )}
     </div>
   );
 }
 
-function ThreadView({ otherId, jobId, myId, onSent }: { otherId: string; jobId: string | null; myId: number; onSent: () => void }) {
+// The people before and after this one in the list as it's filtered now, for the ‹ › buttons.
+function nextPrev(list: Conversation[], withId: string) {
+  const i = list.findIndex((c) => String(c.user_id) === withId);
+  return { prevId: i > 0 ? list[i - 1].user_id : null, nextId: i >= 0 && i < list.length - 1 ? list[i + 1].user_id : null };
+}
+
+function ThreadView({ otherId, jobId, myId, onSent, prevId, nextId }: { otherId: string; jobId: string | null; myId: number; onSent: () => void; prevId: number | null; nextId: number | null }) {
   const { data: thread, error, reload } = useApi<Thread>(`/messages/${otherId}`, 10_000);
   const { data: job } = useApi<Job>(jobId ? `/jobs/${jobId}` : null);
   const [draft, setDraft] = useState('');
+  const [details, setDetails] = useState(false); // worker details slide over the chat on smaller screens (always shown on wide ones)
   const [status, setStatus] = useState({ busy: false, error: '' });
   const bottom = useRef<HTMLDivElement>(null);
   const count = thread?.messages.length ?? 0;
@@ -159,12 +220,13 @@ function ThreadView({ otherId, jobId, myId, onSent }: { otherId: string; jobId: 
   if (error) return <div className="m-auto p-6"><ErrorText msg={error} /></div>;
   if (!thread) return <p className="m-auto text-sm text-slate-500">Loading…</p>;
   const other = thread.user;
+  const firstJob = thread.messages.find((m) => m.job_id && m.job_title);
 
   return (
-    <div className="flex min-h-0 flex-1">
+    <div className="relative flex min-h-0 flex-1">
     <div className="flex min-h-0 min-w-0 flex-1 flex-col">
       <header className="flex items-center gap-3 border-b border-slate-200 px-5 py-3">
-        <Link href="/messages" aria-label="Back to conversations" className="rounded-lg p-1.5 text-slate-500 hover:bg-slate-100 md:hidden">
+        <Link href="/messages" aria-label="Back to conversations" className="rounded-lg p-1.5 text-slate-500 hover:bg-slate-100">
           <svg viewBox="0 0 20 20" className="h-5 w-5" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M12 5l-5 5 5 5" /></svg>
         </Link>
         <Initials name={other.name} id={other.id} size="h-10 w-10 text-sm" />
@@ -173,8 +235,18 @@ function ThreadView({ otherId, jobId, myId, onSent }: { otherId: string; jobId: 
           <p className="text-xs capitalize text-slate-500">{other.role === 'team' ? 'Official messages from ReadyToWork.ph' : other.role}</p>
         </div>
         {other.role === 'worker' && (
-          <Link href={`/workers/${other.id}`} className={`${thread.applied ? 'xl:hidden ' : ''}ml-auto rounded-lg border border-slate-200 px-3 py-1.5 text-xs font-semibold text-slate-700 hover:border-emerald-600 hover:text-emerald-800`}>View profile</Link>
+          thread.applied
+            ? <button type="button" onClick={() => setDetails(!details)} aria-expanded={details} className={`ml-auto rounded-lg border px-3 py-1.5 text-xs font-semibold xl:hidden ${details ? 'border-emerald-600 text-emerald-800' : 'border-slate-200 text-slate-700 hover:border-emerald-600 hover:text-emerald-800'}`}>Details</button>
+            : <Link href={`/workers/${other.id}`} className="ml-auto rounded-lg border border-slate-200 px-3 py-1.5 text-xs font-semibold text-slate-700 hover:border-emerald-600 hover:text-emerald-800">View profile</Link>
         )}
+        <span className={`flex gap-1 ${other.role === 'worker' ? '' : 'ml-auto'}`}>
+          {([[prevId, 'Previous person', 'M12 5l-5 5 5 5'], [nextId, 'Next person', 'M8 5l5 5-5 5']] as const).map(([id, label, d]) => {
+            const icon = <svg viewBox="0 0 20 20" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d={d} /></svg>;
+            return id
+              ? <Link key={label} href={`/messages?with=${id}`} aria-label={label} title={label} className="rounded-lg p-1.5 text-slate-600 hover:bg-slate-100">{icon}</Link>
+              : <span key={label} className="p-1.5 text-slate-300">{icon}</span>;
+          })}
+        </span>
       </header>
 
       <div className="min-h-0 flex-1 space-y-3 overflow-y-auto bg-slate-50/60 px-5 py-5">
@@ -198,6 +270,13 @@ function ThreadView({ otherId, jobId, myId, onSent }: { otherId: string; jobId: 
         <div ref={bottom} />
       </div>
 
+      {firstJob && (
+        <p className="truncate border-t border-slate-200 bg-slate-50 px-5 py-2 text-xs text-slate-500">
+          First contacted for job:{' '}
+          <Link href={`/jobs/${firstJob.job_id}`} target="_blank" rel="noopener" className="font-semibold text-emerald-800 hover:underline">{firstJob.job_title}</Link>
+        </p>
+      )}
+
       {thread.user.status ? (
         <p className="border-t border-slate-200 p-4 text-center text-sm text-slate-500">
           {thread.user.status === 'deleted' ? 'This person deleted their account. You can still read your conversation.'
@@ -206,7 +285,7 @@ function ThreadView({ otherId, jobId, myId, onSent }: { otherId: string; jobId: 
         </p>
       ) : thread.can_send ? (
         <form onSubmit={send} className="space-y-2 border-t border-slate-200 p-4">
-          {job && <p className="text-xs text-slate-500">About: <span className="font-semibold text-emerald-800">{job.title}</span></p>}
+          {job && job.id !== firstJob?.job_id && <p className="text-xs text-slate-500">About: <Link href={`/jobs/${job.id}`} target="_blank" rel="noopener" className="font-semibold text-emerald-800 hover:underline">{job.title}</Link></p>}
           <div className="flex items-end gap-2">
             <textarea value={draft} onChange={(e) => setDraft(e.target.value)} rows={2} aria-label={`Message ${other.name}`}
               onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) send(e); }}
@@ -222,22 +301,24 @@ function ThreadView({ otherId, jobId, myId, onSent }: { otherId: string; jobId: 
       ) : (
         other.role === 'worker' ? (
           <p className="border-t border-slate-200 p-4 text-center text-sm text-slate-500">
-            On the Free plan you can message workers who applied to your jobs.{' '}
-            <Link href="/pricing" className="font-semibold text-emerald-800 hover:underline">Upgrade to Pro</Link> to reach out to any worker first.
+            {thread.free_messaging === false ? <>Messaging applicants is part of Pro and Premium.{' '}
+              <Link href="/pricing" className="font-semibold text-emerald-800 hover:underline">Upgrade</Link> to message {other.name.split(' ')[0]}.</>
+              : <>On the Free plan you can message workers who applied to your jobs.{' '}
+              <Link href="/pricing" className="font-semibold text-emerald-800 hover:underline">Upgrade to Pro</Link> to reach out to any worker first.</>}
           </p>
         ) : (
           <p className="border-t border-slate-200 p-4 text-center text-sm text-slate-500">You can reply once this employer messages you.</p>
         )
       )}
     </div>
-    {thread.applied && <WorkerPanel user={other} applied={thread.applied} canSend={thread.can_send} onSent={() => { reload(); onSent(); }} />}
+    {thread.applied && <WorkerPanel user={other} applied={thread.applied} canSend={thread.can_send} onSent={() => { reload(); onSent(); }} shown={details} onClose={() => setDetails(false)} />}
     </div>
   );
 }
 
 // Employers only, on wide screens: who this worker is and every job of yours they applied to, newest first.
 // Each card opens them on that job's applicants page with their details open.
-function WorkerPanel({ user, applied, canSend, onSent }: { user: Thread['user']; applied: Applied[]; canSend: boolean; onSent: () => void }) {
+function WorkerPanel({ user, applied, canSend, onSent, shown, onClose }: { user: Thread['user']; applied: Applied[]; canSend: boolean; onSent: () => void; shown: boolean; onClose: () => void }) {
   const first = user.name.split(' ')[0];
   // Nothing applied yet: offer the employer's open jobs to send as a link (only then is the list fetched).
   const { data: jobs } = useApi<Job[]>(applied.length === 0 && canSend && !user.status ? '/my/jobs' : null);
@@ -256,7 +337,11 @@ function WorkerPanel({ user, applied, canSend, onSent }: { user: Thread['user'];
     }
   }
   return (
-    <aside aria-label={`About ${user.name}`} className="hidden w-72 shrink-0 flex-col gap-4 overflow-y-auto border-l border-slate-200 bg-slate-50/40 p-5 xl:flex">
+    <aside aria-label={`About ${user.name}`} onKeyDown={(e) => { if (e.key === 'Escape') onClose(); }}
+      className={`${shown ? 'absolute inset-y-0 right-0 z-10 flex shadow-2xl' : 'hidden'} w-72 max-w-full shrink-0 flex-col gap-4 overflow-y-auto border-l border-slate-200 bg-white p-5 xl:static xl:flex xl:bg-slate-50/40 xl:shadow-none`}>
+      <button type="button" onClick={onClose} aria-label="Close details" className="absolute top-3 right-3 rounded-lg p-1 text-slate-400 hover:bg-slate-100 hover:text-slate-700 xl:hidden">
+        <svg viewBox="0 0 20 20" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" aria-hidden="true"><path d="M5 5l10 10M15 5L5 15" /></svg>
+      </button>
       <div className="text-center">
         <Initials name={user.name} id={user.id} size="mx-auto h-16 w-16 text-lg" />
         <p className="mt-2 font-semibold text-slate-900">{user.name}</p>
@@ -316,5 +401,82 @@ function Official() {
       <svg viewBox="0 0 20 20" className="h-2.5 w-2.5" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M4 10l4 4 8-8" /></svg>
       Official
     </span>
+  );
+}
+
+type Folder = { id: number; title: string; people: Conversation[] };
+
+// One folder per job that someone in the list applied to (newest application first), with those people.
+// Someone who applied to two jobs is in both.
+function jobFolders(inbox: Conversation[]): Folder[] {
+  const by = new Map<number, Folder>();
+  for (const c of inbox) for (const a of c.applied ?? []) {
+    const f = by.get(a.job_id) ?? by.set(a.job_id, { id: a.job_id, title: a.title, people: [] }).get(a.job_id)!;
+    if (!f.people.includes(c)) f.people.push(c);
+  }
+  return [...by.values()];
+}
+
+function FolderButton({ label, count, active, onClick, onRemove }: { label: string; count: number; active: boolean; onClick: () => void; onRemove?: () => void }) {
+  return (
+    <div className={`group flex items-center rounded-lg ${active ? 'bg-emerald-50 text-emerald-900' : 'text-slate-600 hover:bg-white'}`}>
+      <button type="button" onClick={onClick} aria-pressed={active} title={label}
+        className={`flex min-w-0 flex-1 items-center justify-between gap-2 px-2.5 py-2 text-left text-sm ${active ? 'font-semibold' : ''}`}>
+        <span className="truncate">{label}</span>
+        <span className="shrink-0 text-xs text-slate-400">{count}</span>
+      </button>
+      {onRemove && (
+        <button type="button" onClick={onRemove} aria-label={`Remove ${label} from Messages`} title="Remove from Messages"
+          className="mr-1 rounded-md p-1 text-slate-400 opacity-0 transition hover:bg-red-50 hover:text-red-700 focus-visible:opacity-100 group-hover:opacity-100">
+          <svg viewBox="0 0 20 20" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M4 6h12M8 6V4h4v2M6 6l1 10h6l1-10" /></svg>
+        </button>
+      )}
+    </div>
+  );
+}
+
+// "Remove from Messages" for one job: hides the chats with everyone who applied to it (the same as Select ›
+// Remove). Applications, the job post and the workers' side of the chat all stay.
+function ClearJob({ job, onClose, onDone }: { job?: Folder; onClose: () => void; onDone: (ids: number[]) => void }) {
+  const dialog = useModal(!!job, onClose);
+  const [state, setState] = useState({ busy: false, error: '' });
+  if (!job) return null;
+  const alsoElsewhere = job.people.filter((c) => (c.applied?.length ?? 0) > 1);
+  async function remove() {
+    const ids = job!.people.map((c) => c.user_id);
+    setState({ busy: true, error: '' });
+    try {
+      await api('/messages/hide', { body: { user_ids: ids } });
+      onDone(ids);
+    } catch (err) {
+      setState({ busy: false, error: (err as Error).message });
+    }
+  }
+  const n = job.people.length;
+  return (
+    <dialog ref={dialog} onClose={onClose} aria-labelledby="clear-job-title" onClick={(e) => { if (e.target === dialog.current) onClose(); }}
+      className="m-auto w-[min(28rem,calc(100vw-2rem))] rounded-2xl p-6 shadow-2xl backdrop:bg-slate-950/50">
+      <h2 id="clear-job-title" className="text-lg font-bold text-slate-900">Remove “{job.title}” from Messages?</h2>
+      <p className="mt-2 text-sm text-slate-600">
+        This removes your {n === 1 ? 'chat' : `${n} chats`} with {n === 1 ? 'the person' : 'everyone'} who applied to this job from your Messages list.
+      </p>
+      <ul className="mt-3 space-y-1 text-sm text-slate-600">
+        <li>✓ Their applications stay on the job’s Applicants page.</li>
+        <li>✓ The job post stays as it is.</li>
+        <li>✓ Workers keep their side of the chat. If they write again, they show up here again.</li>
+      </ul>
+      {alsoElsewhere.length > 0 && (
+        <p className="mt-3 rounded-lg bg-amber-50 px-3 py-2 text-sm text-amber-900">
+          {alsoElsewhere.map((c) => c.name).join(', ')} also applied to another of your jobs, so they’ll be removed from that list too.
+        </p>
+      )}
+      <div className="mt-5 flex gap-2">
+        <button type="button" onClick={remove} disabled={state.busy} className="flex-1 rounded-full bg-red-600 px-4 py-2 text-sm font-semibold text-white hover:bg-red-700 disabled:opacity-50">
+          {state.busy ? 'Removing…' : `Remove ${n === 1 ? 'chat' : `${n} chats`}`}
+        </button>
+        <button type="button" onClick={onClose} className="flex-1 rounded-full border border-slate-200 px-4 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50">Keep</button>
+      </div>
+      <ErrorText msg={state.error} />
+    </dialog>
   );
 }
